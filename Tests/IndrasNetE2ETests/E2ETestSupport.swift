@@ -4,7 +4,7 @@ import Subprocess
 import System
 import Testing
 
-enum IntegrationTestSupport {
+enum E2ETestSupport {
   static func packageRoot() throws -> FilePath {
     var url = URL(fileURLWithPath: #filePath)
     let fileManager = FileManager.default
@@ -40,8 +40,7 @@ enum IntegrationTestSupport {
     return nil
   }
 
-  static func nodeExecutable() async throws -> FilePath {
-    let binary = "indras-net"
+  static func buildProduct(named binary: String) async throws -> FilePath {
     if let path = try locateExecutable(named: binary) {
       return path
     }
@@ -109,22 +108,85 @@ enum IntegrationTestSupport {
     }
   }
 
-  static func waitForListeningPort(
+  static func waitForRunning(
     eventLog: IndrasNetEventLog,
     timeout: Duration
-  ) async throws -> Int {
+  ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if let port = await eventLog.listeningPort() {
-        return port
+      if await eventLog.hasRunning() {
+        return
       }
       try await Task.sleep(for: .milliseconds(25))
     }
-    Issue.record("server did not report a listening port in time; events: \(await eventLog.allEvents())")
+    Issue.record("node did not report running in time; events: \(await eventLog.allEvents())")
     struct Timeout: Error {}
     throw Timeout()
   }
+
+  static func waitForAllMinPingSent(
+    eventLogs: [IndrasNetEventLog],
+    nodes: [String],
+    baselines: [Int],
+    minimum: Int,
+    timeout: Duration
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      var allMet = true
+      for index in eventLogs.indices {
+        let count = await eventLogs[index].pingSentCount(
+          node: nodes[index],
+          since: baselines[index]
+        )
+        if count < minimum {
+          allMet = false
+          break
+        }
+      }
+      if allMet {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    var summaries: [String] = []
+    for index in eventLogs.indices {
+      let count = await eventLogs[index].pingSentCount(
+        node: nodes[index],
+        since: baselines[index]
+      )
+      summaries.append("\(nodes[index]): \(count)")
+    }
+    Issue.record(
+      "not all nodes sent \(minimum) pings in time; counts since baseline: \(summaries.joined(separator: ", "))"
+    )
+    struct Timeout: Error {}
+    throw Timeout()
+  }
+
+  static func waitForMinPingReceived(
+    eventLog: IndrasNetEventLog,
+    node: String,
+    minimum: Int,
+    timeout: Duration
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      if await eventLog.pingReceivedCount(node: node) >= minimum {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    Issue.record(
+      "node \(node) did not receive \(minimum) pings in time; events: \(await eventLog.allEvents())"
+    )
+    struct Timeout: Error {}
+    throw Timeout()
+  }
+
 }
 
 actor IndrasNetEventLog {
@@ -142,21 +204,67 @@ actor IndrasNetEventLog {
     self.events.lazy.filter(predicate).count
   }
 
+  func count(since startIndex: Int, where predicate: (IndrasNetEvent) -> Bool) -> Int {
+    slice(since: startIndex).count(where: predicate)
+  }
+
   func contains(where predicate: (IndrasNetEvent) -> Bool) -> Bool {
     self.events.contains(where: predicate)
   }
 
-  func listeningPort() -> Int? {
-    for event in self.events {
-      if case .listening(_, let port) = event { return port }
-    }
-    return nil
+  func hasRunning() -> Bool {
+    events.contains { if case .running = $0 { true } else { false } }
   }
 
-  func payloads(_ direction: IndrasNetEvent.Direction, type: String) -> [String] {
-    self.events.compactMap { event in
-      if case .message(direction, type, let payload) = event { return payload }
-      return nil
+  func eventCount() -> Int {
+    events.count
+  }
+
+  func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
+    MeshEventCounts(
+      pingSent: pingSentCount(node: node, since: startIndex),
+      pingReceived: pingReceivedCount(node: node, since: startIndex),
+      pongSent: pongSentCount(node: node, since: startIndex),
+      pongReceived: pongReceivedCount(node: node, since: startIndex)
+    )
+  }
+
+  private func slice(since startIndex: Int) -> ArraySlice<IndrasNetEvent> {
+    events.dropFirst(startIndex)
+  }
+
+  func pingSentCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { event in
+      if case .pingSent(let from, _) = event { return from == node }
+      return false
     }
   }
+
+  func pingReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { event in
+      if case .pingReceived(let local, _) = event { return local == node }
+      return false
+    }
+  }
+
+  func pongSentCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { event in
+      if case .pongSent(let from, _) = event { return from == node }
+      return false
+    }
+  }
+
+  func pongReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { event in
+      if case .pongReceived(let local, _) = event { return local == node }
+      return false
+    }
+  }
+}
+
+struct MeshEventCounts: Equatable {
+  var pingSent: Int
+  var pingReceived: Int
+  var pongSent: Int
+  var pongReceived: Int
 }

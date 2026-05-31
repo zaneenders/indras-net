@@ -1,66 +1,129 @@
 import Foundation
 import IndrasNet
+import Synchronization
 
 @main
-enum IndrasNetCommand {
-  private static let usage = """
-    Usage: indras-net [options] [host] [port]
+struct IndrasNetCommand {
+  static func main() async {
+    do {
+      if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
+        print(Self.usage)
+        return
+      }
 
-    By default a node binds [host] [port] and serves inbound connections.
-    With --connect it dials [host] [port] and runs a client script instead.
+      let clusterPath = try Self.parseClusterPath()
+      let cluster = try ClusterFile.load(fromPath: clusterPath)
+      let local = try Self.parseLocalEndpoint()
+      let jsonEventLog = CommandLine.arguments.contains("--json-event-log")
+
+      let runner = IndrasNetNodeRunner(
+        local: local,
+        cluster: cluster,
+        jsonEventLog: jsonEventLog
+      )
+      try await runner.run(untilInterrupted: Self.waitForInterrupt)
+    } catch let error as ConfigurationError {
+      fputs("error: \(error.message)\n\n\(Self.usage)\n", stderr)
+      exit(1)
+    } catch {
+      fputs("error: \(error)\n", stderr)
+      exit(1)
+    }
+  }
+
+  private static let usage = """
+    Usage: indras-net <host> <port> [options]
+
+    Runs a mesh node at <host>:<port>. Peers come from the shared cluster.json
+    (same file on every node). Each peer is addressed as host:port.
+
+    Example cluster.json:
+
+      {
+        "peers": [
+          { "host": "127.0.0.1", "port": 9001 },
+          { "host": "127.0.0.1", "port": 9002 }
+        ]
+      }
 
     Options:
-      --json-event-log    Emit NDJSON events on stdout (human logs on stderr)
-      --connect           Dial [host] [port] and run a client script instead of listening
-      --script <path>     JSON array of send/expect steps (implies --connect)
+      --cluster <path>       Shared cluster file (default: ./cluster.json)
+      --json-event-log       Emit NDJSON cluster events on stdout (human logs on stderr)
     """
 
-  static func main() async throws {
-    var args = Array(CommandLine.arguments.dropFirst().filter { $0 != "--" })
-    var jsonEventLog = false
-    var mode = Config.Mode.serve
-    var script = ClientScriptStep.defaultPingHello
+  private enum ConfigurationError: Error {
+    case message(String)
 
-    while let flag = args.first, flag.hasPrefix("--") {
-      args.removeFirst()
-      switch flag {
-      case "--json-event-log":
-        jsonEventLog = true
-      case "--connect":
-        mode = .connect
-      case "--script":
-        guard let path = args.first else {
-          ProcessLog.human("error: missing path for --script\n\n\(usage)")
-          throw ExitCode.failure
-        }
-        args.removeFirst()
-        script = try ClientScriptStep.load(from: URL(fileURLWithPath: path))
-        mode = .connect
-      case "--help", "-h":
-        print(usage)
-        return
-      default:
-        ProcessLog.human("error: unknown option \(flag)\n\n\(usage)")
-        throw ExitCode.failure
+    var message: String {
+      switch self {
+      case .message(let text): text
+      }
+    }
+  }
+
+  private static func parseClusterPath() throws -> String {
+    var args = Array(CommandLine.arguments.dropFirst())
+    guard let index = args.firstIndex(of: "--cluster") else {
+      return "cluster.json"
+    }
+    args.remove(at: index)
+    guard index < args.count else {
+      throw ConfigurationError.message("missing path for --cluster")
+    }
+    let path = args[index]
+    args.remove(at: index)
+    return path
+  }
+
+  private static func parseLocalEndpoint() throws -> ClusterEndpoint {
+    var args = Array(CommandLine.arguments.dropFirst())
+
+    args.removeAll { $0 == "--json-event-log" }
+
+    if let index = args.firstIndex(of: "--cluster") {
+      args.remove(at: index)
+      if index < args.count {
+        args.remove(at: index)
       }
     }
 
-    let host = args.first ?? "127.0.0.1"
-    let port = args.dropFirst().first.flatMap(Int.init) ?? 7878
+    guard args.count >= 2 else {
+      throw ConfigurationError.message("expected <host> and <port>")
+    }
 
-    let node = IndrasNet(
-      config: Config(
-        mode: mode,
-        host: host,
-        port: port,
-        jsonEventLog: jsonEventLog,
-        clientScript: script
-      )
-    )
-    try await node.runNode()
+    let host = args[0]
+    guard let port = Int(args[1]) else {
+      throw ConfigurationError.message("port must be an integer")
+    }
+
+    return ClusterEndpoint(host: host, port: port)
+  }
+
+  private static func waitForInterrupt() async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      let once = SignalOnce()
+      let signals: [Int32] = [SIGINT, SIGTERM]
+      let sources = signals.map {
+        DispatchSource.makeSignalSource(signal: $0, queue: .global())
+      }
+      for (sig, source) in zip(signals, sources) {
+        source.setEventHandler {
+          // Both handlers may fire (e.g. SIGINT then SIGTERM); resume only once.
+          guard once.fire() else { return }
+          sources.forEach { $0.cancel() }
+          continuation.resume()
+        }
+        signal(sig, SIG_IGN)
+        source.resume()
+      }
+    }
   }
 }
 
-private enum ExitCode: Error {
-  case failure
+private final class SignalOnce: Sendable {
+  private let fired = Atomic<Bool>(false)
+
+  func fire() -> Bool {
+    fired.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged
+  }
 }

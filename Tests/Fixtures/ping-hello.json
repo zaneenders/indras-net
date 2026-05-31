@@ -1,6 +1,0 @@
-[
-  { "action": "send", "type": "ping" },
-  { "action": "expect", "type": "pong" },
-  { "action": "send", "type": "hello", "payload": "ok" },
-  { "action": "expect", "type": "hello", "payload": "ok" }
-]

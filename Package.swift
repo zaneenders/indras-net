@@ -14,12 +14,19 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "indras-net",
-      dependencies: ["IndrasNet"]
+      dependencies: ["IndrasNet"],
+      swiftSettings: [
+        .treatAllWarnings(as: .error)
+      ]
     ),
     .target(
       name: "IndrasNet",
       dependencies: [
-        .product(name: "NIO", package: "swift-nio")
+        .product(name: "NIO", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+      ],
+      swiftSettings: [
+        .treatAllWarnings(as: .error)
       ]
     ),
     .testTarget(
@@ -27,10 +34,11 @@ let package = Package(
       dependencies: [
         "IndrasNet",
         .product(name: "NIOEmbedded", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
       ]
     ),
     .testTarget(
-      name: "IndrasNetIntegrationTests",
+      name: "IndrasNetE2ETests",
       dependencies: [
         "IndrasNet",
         .product(name: "Subprocess", package: "swift-subprocess"),

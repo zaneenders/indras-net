@@ -1,45 +1,37 @@
 # Indra's Net
 
-## Serve
+## Shared `cluster.json`
 
-```bash
-swift run indras-net
-swift run indras-net --json-event-log 127.0.0.1 7878
-```
-
-With `--json-event-log`, NDJSON events go to **stdout** (human logs on **stderr**). Example:
+One file for the whole cluster (copy the same file to every node):
 
 ```json
-{"listening":{"host":"127.0.0.1","port":7878}}
-{"message":{"direction":"received","payload":"","type":"ping"}}
-{"message":{"direction":"sent","payload":"","type":"pong"}}
+{
+  "peers": [
+    { "host": "127.0.0.1", "port": 9001 },
+    { "host": "127.0.0.1", "port": 9002 },
+    { "host": "127.0.0.1", "port": 9003 }
+  ]
+}
 ```
 
-## Connect
+Each process picks its own listen address on the command line. The node dials every peer in the file except itself (matching `host` + `port`).
 
-`--connect` dials a peer and runs a JSON **script** of `send` / `expect` steps
-(default: ping → pong → hello → hello). `--script` implies `--connect`.
+Peers are identified as **`host:port`** on the wire (no separate IDs).
+
+## Run nodes
 
 ```bash
-swift run indras-net --connect
-swift run indras-net --connect --json-event-log 127.0.0.1 7878
-swift run indras-net --script Tests/Fixtures/ping-hello.json
+swift run indras-net 127.0.0.1 9001 --cluster cluster.json
+swift run indras-net 127.0.0.1 9002 --cluster cluster.json
+swift run indras-net 127.0.0.1 9003 --cluster cluster.json
 ```
 
-Custom script (`Tests/Fixtures/ping-hello.json`):
+Nodes exchange JSON `hello` (with `host:port` as the peer identity), then ping connected peers on a random interval (200–500 ms).
 
-```json
-[
-  { "action": "send", "type": "ping" },
-  { "action": "expect", "type": "pong" },
-  { "action": "send", "type": "hello", "payload": "ok" },
-  { "action": "expect", "type": "hello", "payload": "ok" }
-]
-```
+With `--json-event-log`, NDJSON events go to **stdout** (human logs on **stderr**).
 
 ## Testing
 
 ```bash
-swift test
 ./test-scripts/coverage.sh
 ```

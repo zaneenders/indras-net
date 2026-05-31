@@ -25,17 +25,6 @@ public enum MessageAsyncChannel {
   }
 
   @Sendable
-  public static func messageCodecChannelInitializer(
-    maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength
-  ) -> @Sendable (Channel) -> EventLoopFuture<Void> {
-    { channel in
-      channel.eventLoop.makeCompletedFuture {
-        try installMessageCodec(on: channel, maxPayloadLength: maxPayloadLength)
-      }
-    }
-  }
-
-  @Sendable
   public static func messageAsyncChannelInitializer(
     maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength
   ) -> @Sendable (Channel) -> EventLoopFuture<AsyncChannel> {
@@ -44,27 +33,6 @@ public enum MessageAsyncChannel {
         try installMessageCodec(on: channel, maxPayloadLength: maxPayloadLength)
         return try wrapChannel(channel)
       }
-    }
-  }
-}
-
-public struct IndrasNet {
-  let group: any EventLoopGroup
-  let config: Config
-
-  public init(config: Config, group: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
-    self.config = config
-    self.group = group
-  }
-
-  /// Run this node according to `config.mode`: bind and serve, or dial a peer and
-  /// run its client script. A node will eventually do both concurrently.
-  public func runNode() async throws {
-    switch config.mode {
-    case .serve:
-      try await run()
-    case .connect:
-      try await runClient()
     }
   }
 }

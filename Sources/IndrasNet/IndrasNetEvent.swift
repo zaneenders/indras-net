@@ -1,11 +1,14 @@
-public enum IndrasNetEvent: Sendable, Equatable, Codable {
-  public enum Direction: String, Sendable, Equatable, Codable {
-    case sent
-    case received
-  }
+import Foundation
 
-  case listening(host: String, port: Int)
-  case message(direction: Direction, type: String, payload: String)
-  case sessionComplete
+public enum IndrasNetEvent: Sendable, Equatable, Codable {
+  case listening(node: String, host: String, port: Int)
+  case running
+  case pingSent(from: String, to: String)
+  case pingReceived(node: String, from: String)
+  case pongSent(from: String, to: String)
+  case pongReceived(node: String, from: String)
+  case failedToPing(node: String, peer: String, error: String)
+  case failedToPong(node: String, peer: String, error: String)
+  case message(direction: IndrasNetEventDirection, type: String, payload: String)
   case failed(error: String)
 }
