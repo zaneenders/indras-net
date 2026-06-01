@@ -1,7 +1,8 @@
-import IndrasNet
 import NIOCore
 import NIOEmbedded
 import Testing
+
+@testable import IndrasNet
 
 @Suite struct MessageCodecTests {
   @Test func encodeDecodeRoundTripPreservesFields() throws {
@@ -175,7 +176,7 @@ extension MessageCodecTests {
 }
 
 extension Message {
-  public func encodeToByteBuffer(allocator: ByteBufferAllocator = ByteBufferAllocator()) -> ByteBuffer {
+  func encodeToByteBuffer(allocator: ByteBufferAllocator = ByteBufferAllocator()) -> ByteBuffer {
     var buffer = allocator.buffer(capacity: WireProtocol.headerLength + payload.readableBytes)
     let encoder = MessageEncoder()
     try? encoder.encode(data: self, out: &buffer)

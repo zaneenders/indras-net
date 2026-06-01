@@ -1,3 +1,3 @@
-public enum IndrasNetTransportError: Error, Equatable, Sendable {
+enum IndrasNetTransportError: Error, Equatable, Sendable {
   case peerNotConnected(PeerID)
 }

@@ -1,9 +1,9 @@
 import NIOCore
 import NIOPosix
 
-public typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
+typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
 
-public actor IndrasNetTCPTransport {
+actor IndrasNetTCPTransport {
   /// A unit of connection work (the accept loop, an outbound dial, or a single
   /// peer-connection handler) run as a child of the supervisor's task group.
   private typealias ConnectionJob = @Sendable () async -> Void
@@ -27,7 +27,7 @@ public actor IndrasNetTCPTransport {
   /// end each handler's inbound sequence.
   private var connectionChannels: [ObjectIdentifier: any Channel] = [:]
 
-  public init(
+  init(
     configuration: IndrasNetTCPConfiguration,
     eventLoopGroup: MultiThreadedEventLoopGroup = .singleton
   ) {
@@ -39,14 +39,14 @@ public actor IndrasNetTCPTransport {
     self.configuration.peers.filter { self.configuration.localPeerID < $0.peerID }
   }
 
-  public func listenPort() async -> Int? {
+  func listenPort() async -> Int? {
     guard let address = self.serverChannel?.channel.localAddress else {
       return nil
     }
     return address.port
   }
 
-  public func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
+  func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
     guard self.onMessage == nil else {
       return
     }
@@ -80,15 +80,15 @@ public actor IndrasNetTCPTransport {
     }
   }
 
-  public func send(_ message: Message, to peerID: PeerID) async throws {
+  func send(_ message: Message, to peerID: PeerID) async throws {
     try await self.peerManager.send(message, to: peerID)
   }
 
-  public func isConnected(to peerID: PeerID) async -> Bool {
+  func isConnected(to peerID: PeerID) async -> Bool {
     await self.peerManager.contains(peerID: peerID)
   }
 
-  public func connectMissingPeers() async {
+  func connectMissingPeers() async {
     for peer in self.dialablePeers {
       if await !self.peerManager.contains(peerID: peer.peerID) {
         self.enqueue { await self.connect(to: peer) }
@@ -96,7 +96,7 @@ public actor IndrasNetTCPTransport {
     }
   }
 
-  public func shutdown() async throws {
+  func shutdown() async throws {
     self.onMessage = nil
 
     // Stop accepting new connection jobs; the supervisor's task group keeps
@@ -189,12 +189,10 @@ public actor IndrasNetTCPTransport {
     self.registerChannel(channel)
     defer { self.unregisterChannel(channel) }
 
-    let localPeerID = self.configuration.localPeerID
-
     var peerID: PeerID?
     do {
       try await asyncChannel.executeThenClose { inbound, outbound in
-        try await outbound.write(Message.hello(peerID: localPeerID))
+        try await outbound.write(Message.hello(peerID: self.configuration.localPeerID))
 
         for try await message in inbound {
           if let peerID {

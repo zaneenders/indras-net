@@ -3,14 +3,9 @@ import NIOCore
 import NIOPosix
 
 public struct IndrasNetNodeRunner: Sendable {
-  public let local: ClusterEndpoint
-  public let cluster: ClusterFile
-  public let jsonEventLog: Bool
-
-  /// Default ping cadence, jittered so nodes don't all fire in lockstep.
-  public static func defaultPingInterval() -> Duration {
-    .milliseconds(Int.random(in: 200..<500))
-  }
+  let local: ClusterEndpoint
+  let cluster: ClusterFile
+  let jsonEventLog: Bool
 
   public init(
     local: ClusterEndpoint,

@@ -1,15 +1,15 @@
 import NIOCore
 
-public struct MessageDecoder: ByteToMessageDecoder {
-  public typealias InboundOut = Message
+struct MessageDecoder: ByteToMessageDecoder {
+  typealias InboundOut = Message
 
   private let maxPayloadLength: UInt32
 
-  public init(maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength) {
+  init(maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength) {
     self.maxPayloadLength = maxPayloadLength
   }
 
-  public mutating func decode(
+  mutating func decode(
     context: ChannelHandlerContext,
     buffer: inout ByteBuffer
   ) throws -> DecodingState {
@@ -20,7 +20,7 @@ public struct MessageDecoder: ByteToMessageDecoder {
     return .continue
   }
 
-  public mutating func decodeLast(
+  mutating func decodeLast(
     context: ChannelHandlerContext,
     buffer: inout ByteBuffer,
     seenEOF: Bool

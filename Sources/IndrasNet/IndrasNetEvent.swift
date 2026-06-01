@@ -1,6 +1,6 @@
 import Foundation
 
-public enum IndrasNetEvent: Sendable, Equatable, Codable {
+enum IndrasNetEvent: Sendable, Equatable, Codable {
   case listening(node: String, host: String, port: Int)
   case running
   case pingSent(from: String, to: String)

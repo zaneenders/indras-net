@@ -1,4 +1,4 @@
-public enum IndrasNetEventDirection: String, Sendable, Equatable, Codable {
+enum IndrasNetEventDirection: String, Sendable, Equatable, Codable {
   case sent
   case received
 }

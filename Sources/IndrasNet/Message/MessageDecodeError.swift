@@ -1,4 +1,4 @@
-public enum MessageDecodeError: Error, Sendable, Equatable {
+enum MessageDecodeError: Error, Sendable, Equatable {
   case truncatedHeader(remainingBytes: Int)
   case invalidMagic(got: UInt8)
   case unsupportedVersion(got: UInt8, expected: UInt8)

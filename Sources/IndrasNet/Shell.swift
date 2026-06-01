@@ -1,7 +1,7 @@
 import NIOCore
 
 // Shell owns the Instance and the Peer and glues the two together
-public actor Shell {
+actor Shell {
   var instance: Instance
   let peer: IndrasNetPeer
   let eventLogger: EventLogger

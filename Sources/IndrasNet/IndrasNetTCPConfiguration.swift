@@ -1,10 +1,10 @@
-public struct IndrasNetTCPConfiguration: Sendable {
-  public var localPeerID: PeerID
-  public var host: String
-  public var port: Int  // Use `0` to bind an ephemeral port in tests.
-  public var peers: [ClusterEndpoint]
+struct IndrasNetTCPConfiguration: Sendable {
+  var localPeerID: PeerID
+  var host: String
+  var port: Int  // Use `0` to bind an ephemeral port in tests.
+  var peers: [ClusterEndpoint]
 
-  public init(
+  init(
     localPeerID: PeerID,
     host: String,
     port: Int,

@@ -1,8 +1,9 @@
 import Foundation
-import IndrasNet
 import Subprocess
 import System
 import Testing
+
+@testable import IndrasNet
 
 enum E2ETestSupport {
   static func packageRoot() throws -> FilePath {

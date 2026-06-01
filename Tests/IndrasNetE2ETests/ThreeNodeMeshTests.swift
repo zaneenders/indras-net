@@ -1,5 +1,6 @@
-import IndrasNet
 import Testing
+
+@testable import IndrasNet
 
 @Suite(.timeLimit(.minutes(1))) struct ThreeNodeMeshTests {
   @Test func threeNodesPingPongWithSharedCluster() async throws {
