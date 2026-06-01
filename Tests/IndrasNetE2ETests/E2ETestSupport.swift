@@ -166,6 +166,47 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
+  static func waitForAllMinPingReceived(
+    eventLogs: [IndrasNetEventLog],
+    nodes: [String],
+    baselines: [Int],
+    minimum: Int,
+    timeout: Duration
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      var allMet = true
+      for index in eventLogs.indices {
+        let count = await eventLogs[index].pingReceivedCount(
+          node: nodes[index],
+          since: baselines[index]
+        )
+        if count < minimum {
+          allMet = false
+          break
+        }
+      }
+      if allMet {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    var summaries: [String] = []
+    for index in eventLogs.indices {
+      let count = await eventLogs[index].pingReceivedCount(
+        node: nodes[index],
+        since: baselines[index]
+      )
+      summaries.append("\(nodes[index]): \(count)")
+    }
+    Issue.record(
+      "not all nodes received \(minimum) pings in time; counts since baseline: \(summaries.joined(separator: ", "))"
+    )
+    struct Timeout: Error {}
+    throw Timeout()
+  }
+
   static func waitForMinPingReceived(
     eventLog: IndrasNetEventLog,
     node: String,

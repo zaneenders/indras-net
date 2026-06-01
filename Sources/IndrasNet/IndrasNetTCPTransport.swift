@@ -3,7 +3,7 @@ import NIOPosix
 
 public typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
 
-public actor IndrasNetTCPNode {
+public actor IndrasNetTCPTransport {
   /// A unit of connection work (the accept loop, an outbound dial, or a single
   /// peer-connection handler) run as a child of the supervisor's task group.
   private typealias ConnectionJob = @Sendable () async -> Void

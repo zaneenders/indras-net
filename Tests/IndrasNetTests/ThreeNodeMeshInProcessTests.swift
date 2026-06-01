@@ -14,9 +14,9 @@ import Testing
       func makeNode(
         local: ClusterEndpoint,
         peers: [ClusterEndpoint]
-      ) async throws -> (node: IndrasNetTCPNode, collector: MessageCollector) {
+      ) async throws -> (node: IndrasNetTCPTransport, collector: MessageCollector) {
         let collector = MessageCollector()
-        let node = IndrasNetTCPNode(
+        let node = IndrasNetTCPTransport(
           configuration: IndrasNetTCPConfiguration(
             localPeerID: local.peerID,
             host: local.host,
@@ -38,7 +38,7 @@ import Testing
       let b = try await makeNode(local: endpointB, peers: [endpointC, endpointA])
       let c = try await makeNode(local: endpointC, peers: [endpointB, endpointA])
 
-      let nodes: [(endpoint: ClusterEndpoint, node: IndrasNetTCPNode, collector: MessageCollector)] =
+      let nodes: [(endpoint: ClusterEndpoint, node: IndrasNetTCPTransport, collector: MessageCollector)] =
         [(endpointA, a.node, a.collector), (endpointB, b.node, b.collector), (endpointC, c.node, c.collector)]
 
       await TestHelpers.waitUntil(timeout: .seconds(10)) {

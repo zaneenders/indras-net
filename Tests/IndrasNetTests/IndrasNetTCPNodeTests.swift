@@ -3,7 +3,7 @@ import Testing
 
 @testable import IndrasNet
 
-@Suite struct IndrasNetTCPNodeTests {
+@Suite(.timeLimit(.minutes(1))) struct IndrasNetTCPNodeTests {
   @Test func twoNodesExchangePingPong() async throws {
     try await TestHelpers.withEventLoopGroup { sharedGroup in
       let host = "127.0.0.1"
@@ -11,7 +11,7 @@ import Testing
       let peerB = ClusterEndpoint(host: host, port: 29_101)
 
       let collectorB = MessageCollector()
-      let nodeB = IndrasNetTCPNode(
+      let nodeB = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerB.peerID,
           host: host,
@@ -28,7 +28,7 @@ import Testing
       }
 
       let collectorA = MessageCollector()
-      let nodeA = IndrasNetTCPNode(
+      let nodeA = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerA.peerID,
           host: host,
@@ -69,7 +69,7 @@ import Testing
       let peerB = ClusterEndpoint(host: host, port: 29_103)
 
       let collectorB = MessageCollector()
-      let nodeB = IndrasNetTCPNode(
+      let nodeB = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerB.peerID,
           host: host,
@@ -81,7 +81,7 @@ import Testing
         await collectorB.record(message, from: peerID)
       }
 
-      let nodeA = IndrasNetTCPNode(
+      let nodeA = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerA.peerID,
           host: host,

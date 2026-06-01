@@ -1,7 +1,7 @@
 import IndrasNet
 import Testing
 
-@Suite struct ThreeNodeMeshTests {
+@Suite(.timeLimit(.minutes(1))) struct ThreeNodeMeshTests {
   @Test func threeNodesPingPongWithSharedCluster() async throws {
     let binary = try await E2ETestSupport.buildProduct(named: "indras-net")
     let root = try E2ETestSupport.packageRoot()
@@ -51,6 +51,14 @@ import Testing
       baselines = await logs.asyncMap { await $0.eventCount() }
 
       try await E2ETestSupport.waitForAllMinPingSent(
+        eventLogs: logs,
+        nodes: nodeKeys,
+        baselines: baselines,
+        minimum: minimumPingCount,
+        timeout: .seconds(30)
+      )
+
+      try await E2ETestSupport.waitForAllMinPingReceived(
         eventLogs: logs,
         nodes: nodeKeys,
         baselines: baselines,
