@@ -5,8 +5,9 @@ private let log = Logger(label: "indras-net.shell")
 
 public actor Shell {
   var instance: Instance
-  let peerId: String
+  let peerId: PeerID
   let transport: IndrasNetTCPTransport
+  private var endpoints: [PeerID: ClusterEndpoint] = [:]
 
   private typealias Job = @Sendable () async -> Void
   private var supervisor: Task<Void, Never>?
@@ -20,7 +21,9 @@ public actor Shell {
 
   public func start(with peers: [ClusterEndpoint]) async throws {
     guard self.supervisor == nil else { return }
-    instance.peers.formUnion(peers.map(\.addressKey))
+
+    self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
+    self.instance.members = Set(self.endpoints.keys)
 
     let (stream, continuation) = AsyncStream.makeStream(of: Job.self)
     self.cancelableJobs = continuation
@@ -35,7 +38,7 @@ public actor Shell {
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)
     }
-    self.enqueue { await self.runHelloTimer() }
+    self.enqueue { await self.runMaintenanceTimer() }
   }
 
   public func stop() async {
@@ -48,7 +51,6 @@ public actor Shell {
 
   func receiveMessage(message: Message, from peer: PeerID) {
     switch message.type {
-    case .hello: onHello(from: peer)
     case .ping:
       log.info("[\(self.peerId)] ping <- \(peer)")
       onPing(from: peer)
@@ -69,35 +71,30 @@ public actor Shell {
   }
 
   func onPong(from peer: PeerID) {
-    for action in instance.pong(peer, ContinuousClock.now) {
-      switch action {
-      case .callPing: sendPing(to: peer)
-      }
-    }
-  }
-
-  func onHello(from peer: PeerID) {
-    for action in instance.hello(peer, ContinuousClock.now) {
-      switch action {
-      case .callPing: sendPing(to: peer)
-      }
-    }
+    instance.pong(peer, ContinuousClock.now)
   }
 
   private func enqueue(_ job: @escaping Job) {
     self.cancelableJobs?.yield(job)
   }
 
-  private func runHelloTimer() async {
+  private func runMaintenanceTimer() async {
     while !Task.isCancelled {
+      let connected = await transport.connectedPeers()
+
       var nextWake: ContinuousClock.Instant?
-      for action in instance.update(ContinuousClock.now) {
+      for action in instance.update(ContinuousClock.now, connected: connected) {
         switch action {
         case .next(let time):
           nextWake = time
-        case .hellosToSend(let hellos):
-          for case .callPing(let peer) in hellos {
-            self.enqueue { await self.sendHello(to: peer) }
+        case .dialsToStart(let peers):
+          for peer in peers {
+            guard let endpoint = self.endpoints[peer] else { continue }
+            await transport.connect(to: endpoint)
+          }
+        case .pingsToSend(let peers):
+          for peer in peers {
+            sendPing(to: peer)
           }
         }
       }
@@ -121,28 +118,32 @@ public actor Shell {
     self.enqueue { await self.deliverPong(to: peer) }
   }
 
-  private func sendHello(to peer: PeerID) async {
-    log.info("\(self.peerId) hello to: \(peer)")
-    // TODO: Send message
-  }
-
   private func deliverPing(to peer: PeerID) async {
     do {
       try await Task.sleep(for: getJitter())
+      try await transport.send(.ping(), to: peer)
+      log.info("[\(self.peerId)] ping -> \(peer)")
+    } catch is CancellationError {
+      return  // shutting down
+    } catch IndrasNetTransportError.peerNotConnected {
+      return
     } catch {
-      return  // cancelled during shutdown
+      log.notice("[\(self.peerId)] ping -> \(peer) failed: \(error)")
     }
-    log.info("[\(self.peerId)] ping -> \(peer)")
   }
 
   private func deliverPong(to peer: PeerID) async {
     do {
       try await Task.sleep(for: getJitter())
+      try await transport.send(.pong(), to: peer)
+      log.info("[\(self.peerId)] pong -> \(peer)")
+    } catch is CancellationError {
+      return  // shutting down
+    } catch IndrasNetTransportError.peerNotConnected {
+      return
     } catch {
-      return  // cancelled during shutdown
+      log.notice("[\(self.peerId)] pong -> \(peer) failed: \(error)")
     }
-    // TODO: Send Message
-    log.info("[\(self.peerId)] pong -> \(peer)")
   }
 
   private func getJitter() -> Duration {

@@ -41,4 +41,12 @@ extension Message {
     guard let raw = copy.readString(length: copy.readableBytes) else { return nil }
     return PeerID(raw)
   }
+
+  static func ping() -> Message {
+    Message(type: .ping, payload: ByteBuffer())
+  }
+
+  static func pong() -> Message {
+    Message(type: .pong, payload: ByteBuffer())
+  }
 }

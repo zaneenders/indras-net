@@ -3,6 +3,7 @@ import NIO
 import NIOCore
 import NIOPosix
 
+typealias PeerID = String
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
 private let log = Logger(label: "indras-net.transport")
@@ -25,8 +26,8 @@ public actor IndrasNetTCPTransport {
   private var supervisorTask: Task<Void, Never>?
   private var jobContinuation: AsyncStream<ConnectionJob>.Continuation?
 
-  private var connectionChannels: [ObjectIdentifier: any Channel] = [:]
-  private var nextConnectionID: UInt64 = 0
+  private var peerWriterChannels: [PeerID: NIOAsyncChannelOutboundWriter<Message>] = [:]
+  private var dialing: Set<PeerID> = []
 
   public init(
     configuration: IndrasNetTCPConfiguration,
@@ -36,15 +37,26 @@ public actor IndrasNetTCPTransport {
     self.eventLoopGroup = eventLoopGroup
   }
 
-  private var dialablePeers: [ClusterEndpoint] {
-    self.configuration.peers.filter { self.configuration.localPeerID < $0.addressKey }
-  }
-
   public func listenPort() async -> Int? {
     guard let address = self.serverChannel?.channel.localAddress else {
       return nil
     }
     return address.port
+  }
+
+  func connectedPeers() -> Set<PeerID> {
+    Set(self.peerWriterChannels.keys)
+  }
+
+  func isConnected(to peer: PeerID) -> Bool {
+    self.peerWriterChannels[peer] != nil
+  }
+
+  func send(_ message: Message, to peer: PeerID) async throws {
+    guard let writer = self.peerWriterChannels[peer] else {
+      throw IndrasNetTransportError.peerNotConnected(peer)
+    }
+    try await writer.write(message)
   }
 
   func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
@@ -74,9 +86,24 @@ public actor IndrasNetTCPTransport {
     }
 
     self.enqueue { await self.runAcceptLoop(server: server) }
-    for peer in self.dialablePeers {
-      self.enqueue { await self.connect(to: peer) }
+  }
+
+  func connect(to peer: ClusterEndpoint) {
+    let key = peer.addressKey
+    guard self.configuration.localPeerID < key else { return }
+    guard self.peerWriterChannels[key] == nil, !self.dialing.contains(key) else { return }
+    self.dialing.insert(key)
+    let scheduled = self.enqueue {
+      await self.dial(peer)
+      await self.finishDialing(key)
     }
+    if !scheduled {
+      self.dialing.remove(key)
+    }
+  }
+
+  private func finishDialing(_ key: PeerID) {
+    self.dialing.remove(key)
   }
 
   public func shutdown() async throws {
@@ -90,10 +117,7 @@ public actor IndrasNetTCPTransport {
       self.serverChannel = nil
     }
 
-    for channel in self.connectionChannels.values {
-      channel.close(promise: nil)
-    }
-
+    self.supervisorTask?.cancel()
     _ = await self.supervisorTask?.value
     self.supervisorTask = nil
   }
@@ -103,19 +127,6 @@ public actor IndrasNetTCPTransport {
     guard let continuation = self.jobContinuation else { return false }
     continuation.yield(job)
     return true
-  }
-
-  private func registerChannel(_ channel: any Channel) {
-    self.connectionChannels[ObjectIdentifier(channel)] = channel
-  }
-
-  private func unregisterChannel(_ channel: any Channel) {
-    self.connectionChannels[ObjectIdentifier(channel)] = nil
-  }
-
-  private func mintConnectionID() -> UInt64 {
-    defer { self.nextConnectionID += 1 }
-    return self.nextConnectionID
   }
 
   private func runAcceptLoop(server: NIOAsyncChannel<MessageChannel, Never>) async {
@@ -131,11 +142,11 @@ public actor IndrasNetTCPTransport {
         }
       }
     } catch {
-      // Accept loop ended (shutdown or error).
+      log.notice("Accept loop ended: \(error)")
     }
   }
 
-  private func connect(to peer: ClusterEndpoint) async {
+  private func dial(_ peer: ClusterEndpoint) async {
     do {
       let asyncChannel = try await ClientBootstrap(group: self.eventLoopGroup)
         .channelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -147,7 +158,7 @@ public actor IndrasNetTCPTransport {
 
       await self.handleConnection(asyncChannel: asyncChannel, origin: .created)
     } catch {
-      // Outbound dial failed; caller may retry via connectMissingPeers().
+      log.debug("Outbound dial failed: \(peer)")
     }
   }
 
@@ -161,10 +172,11 @@ public actor IndrasNetTCPTransport {
       return
     }
 
-    self.registerChannel(channel)
-    defer { self.unregisterChannel(channel) }
-
     var peerID: PeerID?
+    defer {
+      if let peerID { self.peerWriterChannels[peerID] = nil }
+    }
+
     var version: UInt8?
     var magic: UInt8?
     do {
@@ -203,6 +215,7 @@ public actor IndrasNetTCPTransport {
               return  // First frame wasn't a handshake message; reject.
             }
             guard let peerID else { return }
+            self.peerWriterChannels[peerID] = outbound
             log.info("Connection: \(peerID)")
           }
         }

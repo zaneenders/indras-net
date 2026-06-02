@@ -23,7 +23,7 @@ import Testing
       try await nodeB.start { message, peerID in
         await collectorB.record(message, from: peerID)
         if message.type == .ping {
-          // TODO: send message
+          try? await nodeB.send(.pong(), to: peerID)
         }
       }
 
@@ -32,8 +32,7 @@ import Testing
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerA.addressKey,
           host: host,
-          port: peerA.port,
-          peers: [peerB]
+          port: peerA.port
         ),
         eventLoopGroup: sharedGroup
       )
@@ -41,13 +40,15 @@ import Testing
       try await nodeA.start { message, peerID in
         await collectorA.record(message, from: peerID)
       }
+      await nodeA.connect(to: peerB)
 
       await TestHelpers.waitUntil(timeout: .seconds(5)) {
-        // TODO: Is Node connected
-        return true
+        let aReady = await nodeA.isConnected(to: peerB.addressKey)
+        let bReady = await nodeB.isConnected(to: peerA.addressKey)
+        return aReady && bReady
       }
 
-      // TODO: Send ping A -> B
+      try await nodeA.send(.ping(), to: peerB.addressKey)
 
       let pongFromB = try await collectorA.waitForMessage(
         type: .pong, from: peerB.addressKey, timeout: .seconds(5))
@@ -86,19 +87,20 @@ import Testing
         configuration: IndrasNetTCPConfiguration(
           localPeerID: peerA.addressKey,
           host: host,
-          port: peerA.port,
-          peers: [peerB]
+          port: peerA.port
         ),
         eventLoopGroup: sharedGroup
       )
       try await nodeA.start { _, _ in }
+      await nodeA.connect(to: peerB)
 
       await TestHelpers.waitUntil(timeout: .seconds(5)) {
-        // TODO: Is Node connected
-        return true
+        let aReady = await nodeA.isConnected(to: peerB.addressKey)
+        let bReady = await nodeB.isConnected(to: peerA.addressKey)
+        return aReady && bReady
       }
 
-      // TODO: send ping
+      try await nodeA.send(.ping(), to: peerB.addressKey)
       let ping = try await collectorB.waitForMessage(
         type: .ping, from: peerA.addressKey, timeout: .seconds(5))
       #expect(ping.type == .ping)

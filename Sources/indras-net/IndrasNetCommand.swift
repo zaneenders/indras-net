@@ -90,7 +90,7 @@ struct IndrasNetCommand {
 
   private static func runNode(local: ClusterEndpoint, peers: [ClusterEndpoint]) async throws {
     let transport = IndrasNetTCPTransport(
-      configuration: local.tcpConfiguration(peers: peers)
+      configuration: local.tcpConfiguration()
     )
     let shell = Shell(local, transport: transport)
     let nodeName = local.addressKey

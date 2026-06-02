@@ -12,37 +12,47 @@ import Testing
       let endpointA = ClusterEndpoint(host: host, port: 29_202)
 
       func makeNode(
-        local: ClusterEndpoint,
-        peers: [ClusterEndpoint]
+        local: ClusterEndpoint
       ) async throws -> (node: IndrasNetTCPTransport, collector: MessageCollector) {
         let collector = MessageCollector()
         let node = IndrasNetTCPTransport(
           configuration: IndrasNetTCPConfiguration(
             localPeerID: local.addressKey,
             host: local.host,
-            port: local.port,
-            peers: peers
+            port: local.port
           ),
           eventLoopGroup: group
         )
         try await node.start { message, from in
           await collector.record(message, from: from)
           if message.type == .ping {
-            // TODO: Send pong
+            try? await node.send(.pong(), to: from)
           }
         }
         return (node, collector)
       }
 
-      let a = try await makeNode(local: endpointA, peers: [endpointB, endpointC])
-      let b = try await makeNode(local: endpointB, peers: [endpointC, endpointA])
-      let c = try await makeNode(local: endpointC, peers: [endpointB, endpointA])
+      let a = try await makeNode(local: endpointA)
+      let b = try await makeNode(local: endpointB)
+      let c = try await makeNode(local: endpointC)
 
       let nodes: [(endpoint: ClusterEndpoint, node: IndrasNetTCPTransport, collector: MessageCollector)] =
         [(endpointA, a.node, a.collector), (endpointB, b.node, b.collector), (endpointC, c.node, c.collector)]
 
+      for entry in nodes {
+        for other in nodes where other.endpoint.addressKey != entry.endpoint.addressKey {
+          await entry.node.connect(to: other.endpoint)
+        }
+      }
+
       await TestHelpers.waitUntil(timeout: .seconds(10)) {
-        // TODO: Check that all nodes are conencted
+        for node in nodes {
+          for other in nodes where other.endpoint.addressKey != node.endpoint.addressKey {
+            if await !node.node.isConnected(to: other.endpoint.addressKey) {
+              return false
+            }
+          }
+        }
         return true
       }
 
@@ -52,7 +62,7 @@ import Testing
             group.addTask {
               let pingCount = Int.random(in: 1...5)
               for _ in 0..<pingCount {
-                // TODO: Send ping
+                try await sender.node.send(.ping(), to: receiver.endpoint.addressKey)
               }
               try await receiver.collector.waitForCount(
                 type: .ping, from: sender.endpoint.addressKey, atLeast: pingCount, timeout: .seconds(5))

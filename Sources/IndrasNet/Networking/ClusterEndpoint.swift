@@ -15,12 +15,11 @@ public struct ClusterEndpoint: Sendable, Codable, Equatable {
     "\(host):\(port)"
   }
 
-  public func tcpConfiguration(peers: [ClusterEndpoint]) -> IndrasNetTCPConfiguration {
+  public func tcpConfiguration() -> IndrasNetTCPConfiguration {
     IndrasNetTCPConfiguration(
       localPeerID: addressKey,
       host: host,
-      port: port,
-      peers: peers
+      port: port
     )
   }
 }
