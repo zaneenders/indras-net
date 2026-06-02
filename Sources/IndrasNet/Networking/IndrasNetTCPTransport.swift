@@ -18,6 +18,12 @@ public actor IndrasNetTCPTransport {
     case created
   }
 
+  private struct Connection {
+    let id: UInt64
+    let channel: any Channel
+    let writer: NIOAsyncChannelOutboundWriter<Message>
+  }
+
   private let configuration: IndrasNetTCPConfiguration
   private let eventLoopGroup: MultiThreadedEventLoopGroup
   private var serverChannel: NIOAsyncChannel<MessageChannel, Never>?
@@ -26,8 +32,9 @@ public actor IndrasNetTCPTransport {
   private var supervisorTask: Task<Void, Never>?
   private var jobContinuation: AsyncStream<ConnectionJob>.Continuation?
 
-  private var peerWriterChannels: [PeerID: NIOAsyncChannelOutboundWriter<Message>] = [:]
+  private var connections: [PeerID: Connection] = [:]
   private var dialing: Set<PeerID> = []
+  private var nextConnectionID: UInt64 = 0
 
   public init(
     configuration: IndrasNetTCPConfiguration,
@@ -45,18 +52,18 @@ public actor IndrasNetTCPTransport {
   }
 
   func connectedPeers() -> Set<PeerID> {
-    Set(self.peerWriterChannels.keys)
+    Set(self.connections.keys)
   }
 
   func isConnected(to peer: PeerID) -> Bool {
-    self.peerWriterChannels[peer] != nil
+    self.connections[peer] != nil
   }
 
   func send(_ message: Message, to peer: PeerID) async throws {
-    guard let writer = self.peerWriterChannels[peer] else {
+    guard let connection = self.connections[peer] else {
       throw IndrasNetTransportError.peerNotConnected(peer)
     }
-    try await writer.write(message)
+    try await connection.writer.write(message)
   }
 
   func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
@@ -90,8 +97,7 @@ public actor IndrasNetTCPTransport {
 
   func connect(to peer: ClusterEndpoint) {
     let key = peer.addressKey
-    guard self.configuration.localPeerID < key else { return }
-    guard self.peerWriterChannels[key] == nil, !self.dialing.contains(key) else { return }
+    guard self.connections[key] == nil, !self.dialing.contains(key) else { return }
     self.dialing.insert(key)
     let scheduled = self.enqueue {
       await self.dial(peer)
@@ -104,6 +110,25 @@ public actor IndrasNetTCPTransport {
 
   private func finishDialing(_ key: PeerID) {
     self.dialing.remove(key)
+  }
+
+  private func mintConnectionID() -> UInt64 {
+    defer { self.nextConnectionID += 1 }
+    return self.nextConnectionID
+  }
+
+  private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
+    if let existing = self.connections[peerID] {
+      let initiatorIsLocal = origin == .created
+      let localIsLower = self.configuration.localPeerID < peerID
+      guard initiatorIsLocal == localIsLower else {
+        return false
+      }
+      existing.channel.close(promise: nil)
+      log.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
+    }
+    self.connections[peerID] = connection
+    return true
   }
 
   public func shutdown() async throws {
@@ -172,9 +197,12 @@ public actor IndrasNetTCPTransport {
       return
     }
 
+    let connectionID = self.mintConnectionID()
     var peerID: PeerID?
     defer {
-      if let peerID { self.peerWriterChannels[peerID] = nil }
+      if let peerID, self.connections[peerID]?.id == connectionID {
+        self.connections[peerID] = nil
+      }
     }
 
     var version: UInt8?
@@ -208,14 +236,17 @@ public actor IndrasNetTCPTransport {
               peerID = message.greetPeerID()
               try await outbound.write(Message.hello(id: self.configuration.localPeerID))
             case (.greet, .created):
-              return  // Both sides think they're the initiator. The < rule forbids this for any pair.
+              return  // I dialed, so I expect a hello, not a greet. Bad state.
             case (.hello, .accepted):
-              return  // Bad state
+              return  // They dialed, so I expect a greet, not a hello. Bad state.
             default:
-              return  // First frame wasn't a handshake message; reject.
+              return
             }
             guard let peerID else { return }
-            self.peerWriterChannels[peerID] = outbound
+            let connection = Connection(id: connectionID, channel: channel, writer: outbound)
+            guard self.adopt(connection, peerID: peerID, origin: origin) else {
+              return
+            }
             log.info("Connection: \(peerID)")
           }
         }
