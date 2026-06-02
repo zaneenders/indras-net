@@ -81,7 +81,7 @@ enum E2ETestSupport {
   static func runNode(
     binary: FilePath,
     arguments: [String],
-    eventLog: IndrasNetEventLog,
+    log: NodeLog,
     workingDirectory: FilePath,
     platformOptions: PlatformOptions = PlatformOptions()
   ) async throws -> TerminationStatus? {
@@ -92,15 +92,11 @@ enum E2ETestSupport {
         workingDirectory: workingDirectory,
         platformOptions: platformOptions,
         input: .none,
-        output: .sequence,
-        error: .discarded
+        output: .discarded,
+        error: .sequence
       ) { execution in
-        let decoder = JSONDecoder()
-        for try await line in execution.standardOutput.strings() {
-          guard let event = try? decoder.decode(IndrasNetEvent.self, from: Data(line.utf8)) else {
-            continue
-          }
-          await eventLog.record(event)
+        for try await line in execution.standardError.strings() {
+          await log.record(line)
         }
       }
       return result.terminationStatus
@@ -109,25 +105,22 @@ enum E2ETestSupport {
     }
   }
 
-  static func waitForRunning(
-    eventLog: IndrasNetEventLog,
-    timeout: Duration
-  ) async throws {
+  static func waitForRunning(log: NodeLog, timeout: Duration) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if await eventLog.hasRunning() {
+      if await log.hasRunning() {
         return
       }
       try await Task.sleep(for: .milliseconds(25))
     }
-    Issue.record("node did not report running in time; events: \(await eventLog.allEvents())")
+    Issue.record("node did not report running in time; log: \(await log.allLines())")
     struct Timeout: Error {}
     throw Timeout()
   }
 
   static func waitForAllMinPingSent(
-    eventLogs: [IndrasNetEventLog],
+    logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
     minimum: Int,
@@ -137,8 +130,8 @@ enum E2ETestSupport {
     let deadline = clock.now + timeout
     while clock.now < deadline {
       var allMet = true
-      for index in eventLogs.indices {
-        let count = await eventLogs[index].pingSentCount(
+      for index in logs.indices {
+        let count = await logs[index].pingSentCount(
           node: nodes[index],
           since: baselines[index]
         )
@@ -153,8 +146,8 @@ enum E2ETestSupport {
       try await Task.sleep(for: .milliseconds(25))
     }
     var summaries: [String] = []
-    for index in eventLogs.indices {
-      let count = await eventLogs[index].pingSentCount(
+    for index in logs.indices {
+      let count = await logs[index].pingSentCount(
         node: nodes[index],
         since: baselines[index]
       )
@@ -168,7 +161,7 @@ enum E2ETestSupport {
   }
 
   static func waitForAllMinPingReceived(
-    eventLogs: [IndrasNetEventLog],
+    logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
     minimum: Int,
@@ -178,8 +171,8 @@ enum E2ETestSupport {
     let deadline = clock.now + timeout
     while clock.now < deadline {
       var allMet = true
-      for index in eventLogs.indices {
-        let count = await eventLogs[index].pingReceivedCount(
+      for index in logs.indices {
+        let count = await logs[index].pingReceivedCount(
           node: nodes[index],
           since: baselines[index]
         )
@@ -194,8 +187,8 @@ enum E2ETestSupport {
       try await Task.sleep(for: .milliseconds(25))
     }
     var summaries: [String] = []
-    for index in eventLogs.indices {
-      let count = await eventLogs[index].pingReceivedCount(
+    for index in logs.indices {
+      let count = await logs[index].pingReceivedCount(
         node: nodes[index],
         since: baselines[index]
       )
@@ -209,7 +202,7 @@ enum E2ETestSupport {
   }
 
   static func waitForMinPingReceived(
-    eventLog: IndrasNetEventLog,
+    log: NodeLog,
     node: String,
     minimum: Int,
     timeout: Duration
@@ -217,13 +210,13 @@ enum E2ETestSupport {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if await eventLog.pingReceivedCount(node: node) >= minimum {
+      if await log.pingReceivedCount(node: node) >= minimum {
         return
       }
       try await Task.sleep(for: .milliseconds(25))
     }
     Issue.record(
-      "node \(node) did not receive \(minimum) pings in time; events: \(await eventLog.allEvents())"
+      "node \(node) did not receive \(minimum) pings in time; log: \(await log.allLines())"
     )
     struct Timeout: Error {}
     throw Timeout()
@@ -231,35 +224,23 @@ enum E2ETestSupport {
 
 }
 
-actor IndrasNetEventLog {
-  private var events: [IndrasNetEvent] = []
+actor NodeLog {
+  private var lines: [String] = []
 
-  func record(_ event: IndrasNetEvent) {
-    self.events.append(event)
+  func record(_ line: String) {
+    lines.append(line)
   }
 
-  func allEvents() -> [IndrasNetEvent] {
-    self.events
-  }
-
-  func count(where predicate: (IndrasNetEvent) -> Bool) -> Int {
-    self.events.lazy.filter(predicate).count
-  }
-
-  func count(since startIndex: Int, where predicate: (IndrasNetEvent) -> Bool) -> Int {
-    slice(since: startIndex).count(where: predicate)
-  }
-
-  func contains(where predicate: (IndrasNetEvent) -> Bool) -> Bool {
-    self.events.contains(where: predicate)
+  func allLines() -> [String] {
+    lines
   }
 
   func hasRunning() -> Bool {
-    events.contains { if case .running = $0 { true } else { false } }
+    lines.contains { $0.contains("running (Ctrl+C to stop)") }
   }
 
-  func eventCount() -> Int {
-    events.count
+  func lineCount() -> Int {
+    lines.count
   }
 
   func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
@@ -271,36 +252,24 @@ actor IndrasNetEventLog {
     )
   }
 
-  private func slice(since startIndex: Int) -> ArraySlice<IndrasNetEvent> {
-    events.dropFirst(startIndex)
+  private func slice(since startIndex: Int) -> ArraySlice<String> {
+    lines.dropFirst(startIndex)
   }
 
   func pingSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { event in
-      if case .pingSent(let from, _) = event { return from == node }
-      return false
-    }
+    slice(since: startIndex).count { $0.contains("[\(node)] ping ->") }
   }
 
   func pingReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { event in
-      if case .pingReceived(let local, _) = event { return local == node }
-      return false
-    }
+    slice(since: startIndex).count { $0.contains("[\(node)] ping <-") }
   }
 
   func pongSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { event in
-      if case .pongSent(let from, _) = event { return from == node }
-      return false
-    }
+    slice(since: startIndex).count { $0.contains("[\(node)] pong ->") }
   }
 
   func pongReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { event in
-      if case .pongReceived(let local, _) = event { return local == node }
-      return false
-    }
+    slice(since: startIndex).count { $0.contains("[\(node)] pong <-") }
   }
 }
 

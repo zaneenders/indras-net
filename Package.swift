@@ -8,6 +8,7 @@ let package = Package(
     .macOS(.v26)
   ],
   dependencies: [
+    .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     .package(url: "https://github.com/apple/swift-nio.git", branch: "2.100.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", branch: "0.5"),
   ],
@@ -22,6 +23,7 @@ let package = Package(
     .target(
       name: "IndrasNet",
       dependencies: [
+        .product(name: "Logging", package: "swift-log"),
         .product(name: "NIO", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),
       ],

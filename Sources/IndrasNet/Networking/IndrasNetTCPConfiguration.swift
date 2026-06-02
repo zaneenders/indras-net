@@ -1,11 +1,13 @@
-struct IndrasNetTCPConfiguration: Sendable {
-  var localPeerID: PeerID
+public struct IndrasNetTCPConfiguration: Sendable {
+  let magic: UInt8 = Message.magic
+  let version: UInt8 = Message.version
+  var localPeerID: String
   var host: String
   var port: Int  // Use `0` to bind an ephemeral port in tests.
   var peers: [ClusterEndpoint]
 
-  init(
-    localPeerID: PeerID,
+  public init(
+    localPeerID: String,
     host: String,
     port: Int,
     peers: [ClusterEndpoint] = []

@@ -5,9 +5,15 @@ struct MessageType: RawRepresentable, Hashable, Sendable {
     self.rawValue = rawValue
   }
 
-  static let hello = MessageType(rawValue: 0x0001)
-  static let ping = MessageType(rawValue: 0x0002)
-  static let pong = MessageType(rawValue: 0x0003)
+  // Send magic number and version
+  static let signal = MessageType(rawValue: 0x0000)
+  // Start the conversation with your ID
+  static let greet = MessageType(rawValue: 0x0001)
+  // Accept the conversation with their ID
+  static let hello = MessageType(rawValue: 0x0002)
+
+  static let ping = MessageType(rawValue: 0x0003)
+  static let pong = MessageType(rawValue: 0x0004)
 
   private static let names: [MessageType: String] = [
     .hello: "hello",

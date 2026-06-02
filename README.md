@@ -28,8 +28,6 @@ swift run indras-net 127.0.0.1 9003 --cluster cluster.json
 
 Nodes exchange JSON `hello` (with `host:port` as the peer identity), then ping connected peers on a random interval (200–500 ms).
 
-With `--json-event-log`, NDJSON events go to **stdout** (human logs on **stderr**).
-
 ## Testing
 
 ```bash

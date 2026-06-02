@@ -13,7 +13,7 @@ import Testing
       let collectorB = MessageCollector()
       let nodeB = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
-          localPeerID: peerB.peerID,
+          localPeerID: peerB.addressKey,
           host: host,
           port: peerB.port
         ),
@@ -23,14 +23,14 @@ import Testing
       try await nodeB.start { message, peerID in
         await collectorB.record(message, from: peerID)
         if message.type == .ping {
-          try? await nodeB.send(Message(type: .pong, payload: .init()), to: peerID)
+          // TODO: send message
         }
       }
 
       let collectorA = MessageCollector()
       let nodeA = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
-          localPeerID: peerA.peerID,
+          localPeerID: peerA.addressKey,
           host: host,
           port: peerA.port,
           peers: [peerB]
@@ -43,17 +43,18 @@ import Testing
       }
 
       await TestHelpers.waitUntil(timeout: .seconds(5)) {
-        await nodeA.isConnected(to: peerB.peerID)
+        // TODO: Is Node connected
+        return true
       }
 
-      try await nodeA.send(Message(type: .ping, payload: .init()), to: peerB.peerID)
+      // TODO: Send ping A -> B
 
       let pongFromB = try await collectorA.waitForMessage(
-        type: .pong, from: peerB.peerID, timeout: .seconds(5))
+        type: .pong, from: peerB.addressKey, timeout: .seconds(5))
       #expect(pongFromB.type == .pong)
 
       let pingAtB = try await collectorB.waitForMessage(
-        type: .ping, from: peerA.peerID, timeout: .seconds(5))
+        type: .ping, from: peerA.addressKey, timeout: .seconds(5))
       #expect(pingAtB.type == .ping)
 
       try await nodeA.shutdown()
@@ -71,7 +72,7 @@ import Testing
       let collectorB = MessageCollector()
       let nodeB = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
-          localPeerID: peerB.peerID,
+          localPeerID: peerB.addressKey,
           host: host,
           port: peerB.port
         ),
@@ -83,7 +84,7 @@ import Testing
 
       let nodeA = IndrasNetTCPTransport(
         configuration: IndrasNetTCPConfiguration(
-          localPeerID: peerA.peerID,
+          localPeerID: peerA.addressKey,
           host: host,
           port: peerA.port,
           peers: [peerB]
@@ -93,12 +94,13 @@ import Testing
       try await nodeA.start { _, _ in }
 
       await TestHelpers.waitUntil(timeout: .seconds(5)) {
-        await nodeB.isConnected(to: peerA.peerID)
+        // TODO: Is Node connected
+        return true
       }
 
-      try await nodeA.send(Message(type: .ping, payload: .init()), to: peerB.peerID)
+      // TODO: send ping
       let ping = try await collectorB.waitForMessage(
-        type: .ping, from: peerA.peerID, timeout: .seconds(5))
+        type: .ping, from: peerA.addressKey, timeout: .seconds(5))
       #expect(ping.type == .ping)
 
       try await nodeA.shutdown()

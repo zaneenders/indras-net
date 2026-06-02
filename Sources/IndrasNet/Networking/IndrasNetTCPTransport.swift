@@ -1,33 +1,34 @@
+import Logging
+import NIO
 import NIOCore
 import NIOPosix
 
+private typealias MessageChannel = NIOAsyncChannel<Message, Message>
+
+private let log = Logger(label: "indras-net.transport")
+
 typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
 
-actor IndrasNetTCPTransport {
-  /// A unit of connection work (the accept loop, an outbound dial, or a single
-  /// peer-connection handler) run as a child of the supervisor's task group.
+public actor IndrasNetTCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
+
+  private enum ConnectionOrigin {
+    case accepted
+    case created
+  }
 
   private let configuration: IndrasNetTCPConfiguration
   private let eventLoopGroup: MultiThreadedEventLoopGroup
-  private let peerManager = PeerConnectionManager()
-
-  private var serverChannel: NIOAsyncChannel<MessageAsyncChannel.AsyncChannel, Never>?
+  private var serverChannel: NIOAsyncChannel<MessageChannel, Never>?
   private var onMessage: IndrasNetInboundHandler?
 
-  /// Owns the discarding task group that runs every connection job. Awaiting it
-  /// in `shutdown()` awaits all in-flight connection work before the caller can
-  /// tear down the `EventLoopGroup`.
   private var supervisorTask: Task<Void, Never>?
-  /// Feeds connection jobs to the supervisor. `nil` once shutting down, after
-  /// which no new jobs are accepted.
   private var jobContinuation: AsyncStream<ConnectionJob>.Continuation?
 
-  /// Open peer-connection channels, so `shutdown()` can close them and thereby
-  /// end each handler's inbound sequence.
   private var connectionChannels: [ObjectIdentifier: any Channel] = [:]
+  private var nextConnectionID: UInt64 = 0
 
-  init(
+  public init(
     configuration: IndrasNetTCPConfiguration,
     eventLoopGroup: MultiThreadedEventLoopGroup = .singleton
   ) {
@@ -36,10 +37,10 @@ actor IndrasNetTCPTransport {
   }
 
   private var dialablePeers: [ClusterEndpoint] {
-    self.configuration.peers.filter { self.configuration.localPeerID < $0.peerID }
+    self.configuration.peers.filter { self.configuration.localPeerID < $0.addressKey }
   }
 
-  func listenPort() async -> Int? {
+  public func listenPort() async -> Int? {
     guard let address = self.serverChannel?.channel.localAddress else {
       return nil
     }
@@ -57,7 +58,7 @@ actor IndrasNetTCPTransport {
       .bind(
         host: self.configuration.host,
         port: self.configuration.port,
-        childChannelInitializer: MessageAsyncChannel.messageAsyncChannelInitializer()
+        childChannelInitializer: messageAsyncChannelInitializer()
       )
 
     self.serverChannel = server
@@ -72,35 +73,15 @@ actor IndrasNetTCPTransport {
       }
     }
 
-    // The accept loop and the initial dials run as connection jobs, so they are
-    // owned and awaited by the supervisor's task group.
     self.enqueue { await self.runAcceptLoop(server: server) }
     for peer in self.dialablePeers {
       self.enqueue { await self.connect(to: peer) }
     }
   }
 
-  func send(_ message: Message, to peerID: PeerID) async throws {
-    try await self.peerManager.send(message, to: peerID)
-  }
-
-  func isConnected(to peerID: PeerID) async -> Bool {
-    await self.peerManager.contains(peerID: peerID)
-  }
-
-  func connectMissingPeers() async {
-    for peer in self.dialablePeers {
-      if await !self.peerManager.contains(peerID: peer.peerID) {
-        self.enqueue { await self.connect(to: peer) }
-      }
-    }
-  }
-
-  func shutdown() async throws {
+  public func shutdown() async throws {
     self.onMessage = nil
 
-    // Stop accepting new connection jobs; the supervisor's task group keeps
-    // running the jobs already in flight until they complete.
     self.jobContinuation?.finish()
     self.jobContinuation = nil
 
@@ -109,23 +90,14 @@ actor IndrasNetTCPTransport {
       self.serverChannel = nil
     }
 
-    // Close every established peer connection so each handler's inbound sequence
-    // ends and its `executeThenClose` returns.
     for channel in self.connectionChannels.values {
       channel.close(promise: nil)
     }
 
-    // Awaiting the supervisor awaits the whole discarding task group: the accept
-    // loop, every dial, and every connection handler. Once it returns, no
-    // channel is still being torn down, so the caller can safely shut down the
-    // EventLoopGroup.
     _ = await self.supervisorTask?.value
     self.supervisorTask = nil
   }
 
-  /// Submits a connection job to the supervisor. Returns `false` if the node is
-  /// shutting down and the job was not scheduled, so the caller can clean up any
-  /// resource it was about to hand off.
   @discardableResult
   private func enqueue(_ job: @escaping ConnectionJob) -> Bool {
     guard let continuation = self.jobContinuation else { return false }
@@ -141,16 +113,19 @@ actor IndrasNetTCPTransport {
     self.connectionChannels[ObjectIdentifier(channel)] = nil
   }
 
-  private func runAcceptLoop(server: NIOAsyncChannel<MessageAsyncChannel.AsyncChannel, Never>) async {
+  private func mintConnectionID() -> UInt64 {
+    defer { self.nextConnectionID += 1 }
+    return self.nextConnectionID
+  }
+
+  private func runAcceptLoop(server: NIOAsyncChannel<MessageChannel, Never>) async {
     do {
       try await server.executeThenClose { inbound in
         for try await childChannel in inbound {
           let scheduled = self.enqueue {
-            await self.handleConnection(asyncChannel: childChannel)
+            await self.handleConnection(asyncChannel: childChannel, origin: .accepted)
           }
           if !scheduled {
-            // Shutting down: nothing will handle this channel, so close it here
-            // rather than leak it past the EventLoopGroup's lifetime.
             childChannel.channel.close(promise: nil)
           }
         }
@@ -167,21 +142,21 @@ actor IndrasNetTCPTransport {
         .connect(
           host: peer.host,
           port: peer.port,
-          channelInitializer: MessageAsyncChannel.messageAsyncChannelInitializer()
+          channelInitializer: messageAsyncChannelInitializer()
         )
 
-      await self.handleConnection(asyncChannel: asyncChannel)
+      await self.handleConnection(asyncChannel: asyncChannel, origin: .created)
     } catch {
       // Outbound dial failed; caller may retry via connectMissingPeers().
     }
   }
 
   private func handleConnection(
-    asyncChannel: MessageAsyncChannel.AsyncChannel,
+    asyncChannel: MessageChannel,
+    origin: ConnectionOrigin
   ) async {
     let channel = asyncChannel.channel
     guard let onMessage = self.onMessage else {
-      // Node is shutting down; don't leave the freshly opened channel open.
       channel.close(promise: nil)
       return
     }
@@ -190,27 +165,75 @@ actor IndrasNetTCPTransport {
     defer { self.unregisterChannel(channel) }
 
     var peerID: PeerID?
+    var version: UInt8?
+    var magic: UInt8?
     do {
       try await asyncChannel.executeThenClose { inbound, outbound in
-        try await outbound.write(Message.hello(peerID: self.configuration.localPeerID))
+        try await outbound.write(Message.signal())
+        if origin == .created {
+          try await outbound.write(Message.greet(id: self.configuration.localPeerID))
+        }
 
         for try await message in inbound {
           if let peerID {
             await onMessage(message, peerID)
           } else {
-            // Protocol invariant: the first frame is the peer's hello.
-            guard let remotePeerID = try? message.helloPeerID() else { return }
-            peerID = remotePeerID
-            await self.peerManager.register(peerID: remotePeerID, outbound: outbound)
+            guard magic != nil, version != nil else {
+              guard let (m, v) = message.signalRead() else {
+                return
+              }
+              guard m == self.configuration.magic && v == self.configuration.version else {
+                return
+              }
+              magic = m
+              version = v
+              continue
+            }
+            switch (message.type, origin) {
+            case (.hello, .created):
+              peerID = message.helloPeerID()
+            case (.greet, .accepted):
+              peerID = message.greetPeerID()
+              try await outbound.write(Message.hello(id: self.configuration.localPeerID))
+            case (.greet, .created):
+              return  // Both sides think they're the initiator. The < rule forbids this for any pair.
+            case (.hello, .accepted):
+              return  // Bad state
+            default:
+              return  // First frame wasn't a handshake message; reject.
+            }
+            guard let peerID else { return }
+            log.info("Connection: \(peerID)")
           }
         }
       }
     } catch {
       // Connection ended; fall through to unregister.
     }
+  }
+}
 
-    if let peerID {
-      await self.peerManager.unregister(peerID: peerID)
+@Sendable
+private func messageAsyncChannelInitializer(
+  maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength
+) -> @Sendable (Channel) -> EventLoopFuture<MessageChannel> {
+  { channel in
+    channel.eventLoop.makeCompletedFuture {
+      try channel.pipeline.syncOperations.addHandler(
+        ByteToMessageHandler(MessageDecoder(maxPayloadLength: maxPayloadLength))
+      )
+      try channel.pipeline.syncOperations.addHandler(MessageToByteHandler(MessageEncoder()))
+      return try NIOAsyncChannel(
+        wrappingChannelSynchronously: channel,
+        configuration: .init(
+          inboundType: Message.self,
+          outboundType: Message.self
+        )
+      )
     }
   }
+}
+
+enum IndrasNetTransportError: Error, Equatable, Sendable {
+  case peerNotConnected(PeerID)
 }

@@ -50,9 +50,8 @@ import Testing
     )
     var wire = message.encodeToByteBuffer()
 
+    // Magic/version no longer ride in the frame header — see ProtocolPreambleHandlerTests.
     #expect(wire.readableBytes == WireProtocol.headerLength + 1)
-    #expect(wire.readInteger(as: UInt8.self) == WireProtocol.magic)
-    #expect(wire.readInteger(as: UInt8.self) == WireProtocol.version)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.pong.rawValue)
     #expect(wire.readInteger(as: UInt32.self) == 1)
     #expect(wire.readString(length: 1) == "x")
@@ -70,24 +69,6 @@ import Testing
     #expect(try channel.readInbound(as: Message.self) != nil)
   }
 
-  @Test func decodeRejectsInvalidMagic() throws {
-    var wire = validHeaderWire(type: .hello, payloadLength: 0)
-    wire.setInteger(0x00, at: wire.readerIndex, as: UInt8.self)
-
-    #expect(throws: MessageDecodeError.invalidMagic(got: 0x00)) {
-      _ = try decodeInbound(wire)
-    }
-  }
-
-  @Test func decodeRejectsUnsupportedVersion() throws {
-    var wire = validHeaderWire(type: .hello, payloadLength: 0)
-    wire.setInteger(UInt8(99), at: wire.readerIndex + 1, as: UInt8.self)
-
-    #expect(throws: MessageDecodeError.unsupportedVersion(got: 99, expected: WireProtocol.version)) {
-      _ = try decodeInbound(wire)
-    }
-  }
-
   @Test func decodeAcceptsUnknownMessageTypeForExtensibility() throws {
     // Unknown type bytes round-trip rather than being rejected, so new protocols
     // (e.g. Raft RPCs) can be mixed in without touching the framing layer.
@@ -100,14 +81,12 @@ import Testing
 
   @Test func decodeLastRejectsPartialFrameOnClose() throws {
     var wire = ByteBuffer()
-    wire.writeInteger(WireProtocol.magic)
-    wire.writeInteger(WireProtocol.version)
-    wire.writeInteger(UInt16(0x0001))
+    wire.writeInteger(UInt16(0x0001))  // type only; payload length (4 bytes) missing
 
     let channel = try makeCodecChannel()
     try channel.writeInbound(wire)
 
-    #expect(throws: MessageDecodeError.incompleteMessageOnClose(remainingBytes: 4)) {
+    #expect(throws: MessageDecodeError.incompleteMessageOnClose(remainingBytes: 2)) {
       _ = try channel.finish(acceptAlreadyClosed: false)
     }
   }
@@ -167,8 +146,6 @@ extension MessageCodecTests {
     payloadLength: UInt32
   ) -> ByteBuffer {
     var buffer = ByteBuffer()
-    buffer.writeInteger(WireProtocol.magic)
-    buffer.writeInteger(WireProtocol.version)
     buffer.writeInteger(typeRaw)
     buffer.writeInteger(payloadLength)
     return buffer

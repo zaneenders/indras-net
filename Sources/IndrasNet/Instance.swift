@@ -1,3 +1,4 @@
+typealias PeerID = String
 struct Instance {
   var peers: Set<PeerID> = []
   var heardFrom: [PeerID: ContinuousClock.Instant] = [:]

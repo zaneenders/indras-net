@@ -1,67 +1,62 @@
+import Logging
 import NIOCore
 
-// Shell owns the Instance and the Peer and glues the two together
-actor Shell {
+private let log = Logger(label: "indras-net.shell")
+
+public actor Shell {
   var instance: Instance
-  let peer: IndrasNetPeer
-  let eventLogger: EventLogger
+  let peerId: String
   let transport: IndrasNetTCPTransport
 
-  init(_ node: ClusterEndpoint, transport: IndrasNetTCPTransport, events: EventLogger) {
-    self.peer = IndrasNetPeer(id: node.peerID, transport)
+  private typealias Job = @Sendable () async -> Void
+  private var supervisor: Task<Void, Never>?
+  private var cancelableJobs: AsyncStream<Job>.Continuation?
+
+  public init(_ node: ClusterEndpoint, transport: IndrasNetTCPTransport) {
+    self.peerId = node.addressKey
     self.transport = transport
-    self.instance = Instance(node.peerID)
-    self.eventLogger = events
+    self.instance = Instance(node.addressKey)
   }
 
-  func start(with peers: [ClusterEndpoint]) async throws {
-    instance.peers.formUnion(peers.map(\.peerID))
-    try await transport.start { message, from in
-      await self.recieveMessage(message: message, from: from)
-    }
-    sendHellos()
-  }
+  public func start(with peers: [ClusterEndpoint]) async throws {
+    guard self.supervisor == nil else { return }
+    instance.peers.formUnion(peers.map(\.addressKey))
 
-  func sendHellos() {
-    for action in instance.update(ContinuousClock.now) {
-      switch action {
-      case .next(let time):
-        Task {
-          let sleep = ContinuousClock.now.duration(to: time)
-          try await Task.sleep(for: sleep)
-          sendHellos()
-        }
-      case .hellosToSend(let hellos):
-        for helloAction in hellos {
-          switch helloAction {
-          case .callPing(let peer):
-            Task {
-              ProcessLog.human("\(self.peer.id.rawValue) hello to: \(peer.rawValue)")
-              try await transport.send(.hello(peerID: self.peer.id), to: peer)
-            }
-          }
+    let (stream, continuation) = AsyncStream.makeStream(of: Job.self)
+    self.cancelableJobs = continuation
+    self.supervisor = Task {
+      await withDiscardingTaskGroup { group in
+        for await job in stream {
+          group.addTask { await job() }
         }
       }
     }
+
+    try await transport.start { message, from in
+      await self.receiveMessage(message: message, from: from)
+    }
+    self.enqueue { await self.runHelloTimer() }
   }
 
-  private func getJitter() -> Duration {
-    Duration(.milliseconds(Int64.random(in: 1..<500)))
+  public func stop() async {
+    self.cancelableJobs?.finish()
+    self.cancelableJobs = nil
+    self.supervisor?.cancel()
+    _ = await self.supervisor?.value
+    self.supervisor = nil
   }
 
-  func recieveMessage(message: Message, from peer: PeerID) {
+  func receiveMessage(message: Message, from peer: PeerID) {
     switch message.type {
     case .hello: onHello(from: peer)
     case .ping:
-      eventLogger.emit(.pingReceived(node: self.peer.id.rawValue, from: peer.rawValue))
-      ProcessLog.human("[\(self.peer.id.rawValue)] ping <- \(peer.rawValue)")
+      log.info("[\(self.peerId)] ping <- \(peer)")
       onPing(from: peer)
     case .pong:
-      eventLogger.emit(.pongReceived(node: self.peer.id.rawValue, from: peer.rawValue))
-      ProcessLog.human("[\(self.peer.id.rawValue)] pong <- \(peer.rawValue)")
+      log.info("[\(self.peerId)] pong <- \(peer)")
       onPong(from: peer)
     default:
-      ProcessLog.human("Shell: default[\(message)], from: \(peer)")
+      log.info("Shell: default[\(message)], from: \(peer)")
     }
   }
 
@@ -72,6 +67,7 @@ actor Shell {
       }
     }
   }
+
   func onPong(from peer: PeerID) {
     for action in instance.pong(peer, ContinuousClock.now) {
       switch action {
@@ -88,27 +84,68 @@ actor Shell {
     }
   }
 
-  private func sendPong(to: PeerID) {
-    Task {
-      do {
-        try await Task.sleep(for: getJitter())
-        try await self.peer.send(message: Message(type: .pong, payload: ByteBuffer()), to: to)
-        eventLogger.emit(.pongSent(from: self.peer.id.rawValue, to: to.rawValue))
-      } catch {
-        eventLogger.emit(.failedToPong(node: self.peer.id.rawValue, peer: to.rawValue, error: "\(error)"))
+  private func enqueue(_ job: @escaping Job) {
+    self.cancelableJobs?.yield(job)
+  }
+
+  private func runHelloTimer() async {
+    while !Task.isCancelled {
+      var nextWake: ContinuousClock.Instant?
+      for action in instance.update(ContinuousClock.now) {
+        switch action {
+        case .next(let time):
+          nextWake = time
+        case .hellosToSend(let hellos):
+          for case .callPing(let peer) in hellos {
+            self.enqueue { await self.sendHello(to: peer) }
+          }
+        }
+      }
+      guard let nextWake else { return }
+      let sleepDuration = ContinuousClock.now.duration(to: nextWake)
+      if sleepDuration > .zero {
+        do {
+          try await Task.sleep(for: sleepDuration)
+        } catch {
+          return
+        }
       }
     }
   }
 
-  private func sendPing(to: PeerID) {
-    Task {
-      do {
-        try await Task.sleep(for: getJitter())
-        try await self.peer.send(message: Message(type: .ping, payload: ByteBuffer()), to: to)
-        eventLogger.emit(.pingSent(from: self.peer.id.rawValue, to: to.rawValue))
-      } catch {
-        eventLogger.emit(.failedToPing(node: self.peer.id.rawValue, peer: to.rawValue, error: "\(error)"))
-      }
+  private func sendPing(to peer: PeerID) {
+    self.enqueue { await self.deliverPing(to: peer) }
+  }
+
+  private func sendPong(to peer: PeerID) {
+    self.enqueue { await self.deliverPong(to: peer) }
+  }
+
+  private func sendHello(to peer: PeerID) async {
+    log.info("\(self.peerId) hello to: \(peer)")
+    // TODO: Send message
+  }
+
+  private func deliverPing(to peer: PeerID) async {
+    do {
+      try await Task.sleep(for: getJitter())
+    } catch {
+      return  // cancelled during shutdown
     }
+    log.info("[\(self.peerId)] ping -> \(peer)")
+  }
+
+  private func deliverPong(to peer: PeerID) async {
+    do {
+      try await Task.sleep(for: getJitter())
+    } catch {
+      return  // cancelled during shutdown
+    }
+    // TODO: Send Message
+    log.info("[\(self.peerId)] pong -> \(peer)")
+  }
+
+  private func getJitter() -> Duration {
+    Duration(.milliseconds(Int64.random(in: 1..<500)))
   }
 }

@@ -61,16 +61,8 @@ struct MessageDecoder: ByteToMessageDecoder {
   }
 
   private func parseHeader(_ header: inout ByteBuffer) throws -> ParsedHeader {
-    let magic = try header.readRequiredInteger(as: UInt8.self)
-    guard magic == WireProtocol.magic else {
-      throw MessageDecodeError.invalidMagic(got: magic)
-    }
-
-    let version = try header.readRequiredInteger(as: UInt8.self)
-    guard version == WireProtocol.version else {
-      throw MessageDecodeError.unsupportedVersion(got: version, expected: WireProtocol.version)
-    }
-
+    // Magic/version are validated once per connection by `ProtocolPreambleHandler`,
+    // so the per-message header is just type + payload length.
     let typeRaw = try header.readRequiredInteger(as: UInt16.self)
     let payloadLength = try header.readRequiredInteger(as: UInt32.self)
     return ParsedHeader(type: MessageType(rawValue: typeRaw), payloadLength: payloadLength)

@@ -9,18 +9,14 @@ import Testing
     let clusterPath = root.appending("cluster.json").string
     let host = "127.0.0.1"
     let ports = [9001, 9002, 9003]
-    let nodeKeys = ports.map { ClusterEndpoint.addressKey(host: host, port: $0) }
+    let nodeKeys = ports.map { ClusterEndpoint(host: host, port: $0).addressKey }
 
-    let logs = [IndrasNetEventLog(), IndrasNetEventLog(), IndrasNetEventLog()]
+    let logs = [NodeLog(), NodeLog(), NodeLog()]
 
     let minimumPingCount = 6
 
     func nodeArguments(port: Int) -> [String] {
-      [
-        host, String(port),
-        "--cluster", clusterPath,
-        "--json-event-log",
-      ]
+      [host, String(port), "--cluster", clusterPath]
     }
 
     var baselines: [Int] = []
@@ -32,7 +28,7 @@ import Testing
           try await E2ETestSupport.runNode(
             binary: binary,
             arguments: nodeArguments(port: port),
-            eventLog: log,
+            log: log,
             workingDirectory: root,
             platformOptions: E2ETestSupport.processPlatformOptions()
           )
@@ -40,19 +36,19 @@ import Testing
       }
 
       for (log, key) in zip(logs, nodeKeys) {
-        try await E2ETestSupport.waitForRunning(eventLog: log, timeout: .seconds(10))
+        try await E2ETestSupport.waitForRunning(log: log, timeout: .seconds(10))
         try await E2ETestSupport.waitForMinPingReceived(
-          eventLog: log,
+          log: log,
           node: key,
           minimum: 2,
           timeout: .seconds(15)
         )
       }
 
-      baselines = await logs.asyncMap { await $0.eventCount() }
+      baselines = await logs.asyncMap { await $0.lineCount() }
 
       try await E2ETestSupport.waitForAllMinPingSent(
-        eventLogs: logs,
+        logs: logs,
         nodes: nodeKeys,
         baselines: baselines,
         minimum: minimumPingCount,
@@ -60,7 +56,7 @@ import Testing
       )
 
       try await E2ETestSupport.waitForAllMinPingReceived(
-        eventLogs: logs,
+        logs: logs,
         nodes: nodeKeys,
         baselines: baselines,
         minimum: minimumPingCount,

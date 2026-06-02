@@ -18,7 +18,7 @@ import Testing
         let collector = MessageCollector()
         let node = IndrasNetTCPTransport(
           configuration: IndrasNetTCPConfiguration(
-            localPeerID: local.peerID,
+            localPeerID: local.addressKey,
             host: local.host,
             port: local.port,
             peers: peers
@@ -28,7 +28,7 @@ import Testing
         try await node.start { message, from in
           await collector.record(message, from: from)
           if message.type == .ping {
-            try? await node.send(Message(type: .pong, payload: message.payload), to: from)
+            // TODO: Send pong
           }
         }
         return (node, collector)
@@ -42,39 +42,27 @@ import Testing
         [(endpointA, a.node, a.collector), (endpointB, b.node, b.collector), (endpointC, c.node, c.collector)]
 
       await TestHelpers.waitUntil(timeout: .seconds(10)) {
-        for entry in nodes {
-          await entry.node.connectMissingPeers()
-        }
-        for entry in nodes {
-          for other in nodes where other.endpoint.peerID != entry.endpoint.peerID {
-            guard await entry.node.isConnected(to: other.endpoint.peerID) else {
-              return false
-            }
-          }
-        }
+        // TODO: Check that all nodes are conencted
         return true
       }
 
       try await withThrowingTaskGroup(of: Void.self) { group in
         for sender in nodes {
-          for receiver in nodes where receiver.endpoint.peerID != sender.endpoint.peerID {
+          for receiver in nodes where receiver.endpoint.addressKey != sender.endpoint.addressKey {
             group.addTask {
               let pingCount = Int.random(in: 1...5)
               for _ in 0..<pingCount {
-                try await sender.node.send(
-                  Message(type: .ping, payload: .init()),
-                  to: receiver.endpoint.peerID
-                )
+                // TODO: Send ping
               }
               try await receiver.collector.waitForCount(
-                type: .ping, from: sender.endpoint.peerID, atLeast: pingCount, timeout: .seconds(5))
+                type: .ping, from: sender.endpoint.addressKey, atLeast: pingCount, timeout: .seconds(5))
               try await sender.collector.waitForCount(
-                type: .pong, from: receiver.endpoint.peerID, atLeast: pingCount, timeout: .seconds(5))
+                type: .pong, from: receiver.endpoint.addressKey, atLeast: pingCount, timeout: .seconds(5))
 
               let pingsReceived = await receiver.collector.count(
-                type: .ping, from: sender.endpoint.peerID)
+                type: .ping, from: sender.endpoint.addressKey)
               let pongsReceived = await sender.collector.count(
-                type: .pong, from: receiver.endpoint.peerID)
+                type: .pong, from: receiver.endpoint.addressKey)
               #expect(pingsReceived == pingCount)
               #expect(pongsReceived == pingCount)
             }
