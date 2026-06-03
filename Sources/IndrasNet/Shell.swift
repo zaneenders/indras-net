@@ -49,15 +49,13 @@ public actor Shell {
     self.supervisor = nil
   }
 
-  func receiveMessage(message: Message, from peer: PeerID) {
-    switch message.type {
+  func receiveMessage(message: AppMessage, from peer: PeerID) {
+    switch message {
     case .ping:
       log.info("[\(self.peerId)] ping <- \(peer)")
       onPing(from: peer)
     case .pong:
       log.info("[\(self.peerId)] pong <- \(peer)")
-    default:
-      log.info("Shell: default[\(message)], from: \(peer)")
     }
   }
 
@@ -116,7 +114,7 @@ public actor Shell {
   private func deliverPing(to peer: PeerID) async {
     do {
       try await Task.sleep(for: getJitter())
-      try await transport.send(.ping(), to: peer)
+      try await transport.send(.ping, to: peer)
       log.info("[\(self.peerId)] ping -> \(peer)")
     } catch is CancellationError {
       return  // shutting down
@@ -130,7 +128,7 @@ public actor Shell {
   private func deliverPong(to peer: PeerID) async {
     do {
       try await Task.sleep(for: getJitter())
-      try await transport.send(.pong(), to: peer)
+      try await transport.send(.pong, to: peer)
       log.info("[\(self.peerId)] pong -> \(peer)")
     } catch is CancellationError {
       return  // shutting down

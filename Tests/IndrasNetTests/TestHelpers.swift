@@ -1,3 +1,5 @@
+import Foundation
+import Logging
 import NIOPosix
 import Testing
 
@@ -37,35 +39,35 @@ extension TestHelpers {
 }
 
 actor MessageCollector {
-  private var entries: [(Message, PeerID)] = []
+  private var entries: [(AppMessage, PeerID)] = []
 
-  func record(_ message: Message, from peerID: PeerID) {
+  func record(_ message: AppMessage, from peerID: PeerID) {
     self.entries.append((message, peerID))
   }
 
   func waitForMessage(
-    type: MessageType,
+    type: AppMessage,
     from peerID: PeerID,
     timeout: Duration
-  ) async throws -> Message {
+  ) async throws -> AppMessage {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if let match = self.entries.first(where: { $0.0.type == type && $0.1 == peerID }) {
+      if let match = self.entries.first(where: { $0.0 == type && $0.1 == peerID }) {
         return match.0
       }
       try? await Task.sleep(for: .milliseconds(25))
     }
-    Issue.record("Did not receive \(type.name) from \(peerID)")
+    Issue.record("Did not receive \(type) from \(peerID)")
     throw MessageCollectorError.timeout
   }
 
-  func count(type: MessageType, from peerID: PeerID) -> Int {
-    self.entries.lazy.filter { $0.0.type == type && $0.1 == peerID }.count
+  func count(type: AppMessage, from peerID: PeerID) -> Int {
+    self.entries.lazy.filter { $0.0 == type && $0.1 == peerID }.count
   }
 
   func waitForCount(
-    type: MessageType,
+    type: AppMessage,
     from peerID: PeerID,
     atLeast minimum: Int,
     timeout: Duration
@@ -79,7 +81,7 @@ actor MessageCollector {
       try? await Task.sleep(for: .milliseconds(25))
     }
     Issue.record(
-      "Received \(self.count(type: type, from: peerID)) \(type.name) from \(peerID), expected \(minimum)"
+      "Received \(self.count(type: type, from: peerID)) \(type) from \(peerID), expected \(minimum)"
     )
     throw MessageCollectorError.timeout
   }

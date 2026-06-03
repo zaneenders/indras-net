@@ -1,6 +1,6 @@
 public struct TransportConfiguration: Sendable {
-  let magic: UInt8 = Message.magic
-  let version: UInt8 = Message.version
+  let magic: UInt8 = HandshakeFrame.magic
+  let version: UInt8 = HandshakeFrame.version
   var localPeerID: String
   var host: String
   var port: Int  // Use `0` to bind an ephemeral port in tests.

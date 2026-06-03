@@ -22,8 +22,8 @@ import Testing
 
       try await nodeB.start { message, peerID in
         await collectorB.record(message, from: peerID)
-        if message.type == .ping {
-          try? await nodeB.send(.pong(), to: peerID)
+        if message == .ping {
+          try? await nodeB.send(.pong, to: peerID)
         }
       }
 
@@ -48,15 +48,15 @@ import Testing
         return aReady && bReady
       }
 
-      try await nodeA.send(.ping(), to: peerB.addressKey)
+      try await nodeA.send(.ping, to: peerB.addressKey)
 
       let pongFromB = try await collectorA.waitForMessage(
         type: .pong, from: peerB.addressKey, timeout: .seconds(5))
-      #expect(pongFromB.type == .pong)
+      #expect(pongFromB == .pong)
 
       let pingAtB = try await collectorB.waitForMessage(
         type: .ping, from: peerA.addressKey, timeout: .seconds(5))
-      #expect(pingAtB.type == .ping)
+      #expect(pingAtB == .ping)
 
       try await nodeA.shutdown()
       try await nodeB.shutdown()
@@ -100,10 +100,10 @@ import Testing
         return aReady && bReady
       }
 
-      try await nodeA.send(.ping(), to: peerB.addressKey)
+      try await nodeA.send(.ping, to: peerB.addressKey)
       let ping = try await collectorB.waitForMessage(
         type: .ping, from: peerA.addressKey, timeout: .seconds(5))
-      #expect(ping.type == .ping)
+      #expect(ping == .ping)
 
       try await nodeA.shutdown()
       try await nodeB.shutdown()

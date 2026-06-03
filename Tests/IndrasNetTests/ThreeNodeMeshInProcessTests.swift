@@ -25,8 +25,8 @@ import Testing
         )
         try await node.start { message, from in
           await collector.record(message, from: from)
-          if message.type == .ping {
-            try? await node.send(.pong(), to: from)
+          if message == .ping {
+            try? await node.send(.pong, to: from)
           }
         }
         return (node, collector)
@@ -62,7 +62,7 @@ import Testing
             group.addTask {
               let pingCount = Int.random(in: 1...5)
               for _ in 0..<pingCount {
-                try await sender.node.send(.ping(), to: receiver.endpoint.addressKey)
+                try await sender.node.send(.ping, to: receiver.endpoint.addressKey)
               }
               try await receiver.collector.waitForCount(
                 type: .ping, from: sender.endpoint.addressKey, atLeast: pingCount, timeout: .seconds(5))

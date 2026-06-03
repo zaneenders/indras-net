@@ -8,12 +8,12 @@ private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
 private let log = Logger(label: "indras-net.transport")
 
-typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
+typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerID) async -> Void
 
 public actor TCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
 
-  private enum ConnectionOrigin {
+  enum ConnectionOrigin {
     case accepted
     case created
   }
@@ -59,11 +59,11 @@ public actor TCPTransport {
     self.connections[peer] != nil
   }
 
-  func send(_ message: Message, to peer: PeerID) async throws {
+  func send(_ message: AppMessage, to peer: PeerID) async throws {
     guard let connection = self.connections[peer] else {
       throw IndrasNetTransportError.peerNotConnected(peer)
     }
-    try await connection.writer.write(message)
+    try await connection.writer.write(message.message)
   }
 
   func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
@@ -117,11 +117,15 @@ public actor TCPTransport {
     return self.nextConnectionID
   }
 
+  static func shouldReplaceExisting(origin: ConnectionOrigin, localIsLower: Bool) -> Bool {
+    let initiatorIsLocal = origin == .created
+    return initiatorIsLocal == localIsLower
+  }
+
   private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
     if let existing = self.connections[peerID] {
-      let initiatorIsLocal = origin == .created
       let localIsLower = self.configuration.localPeerID < peerID
-      guard initiatorIsLocal == localIsLower else {
+      guard Self.shouldReplaceExisting(origin: origin, localIsLower: localIsLower) else {
         return false
       }
       existing.channel.close(promise: nil)
@@ -205,50 +209,55 @@ public actor TCPTransport {
       }
     }
 
-    var version: UInt8?
-    var magic: UInt8?
+    var handshakeVerified = false
     do {
       try await asyncChannel.executeThenClose { inbound, outbound in
-        try await outbound.write(Message.signal())
+        try await outbound.write(
+          HandshakeFrame.signal(
+            magic: self.configuration.magic,
+            version: self.configuration.version
+          ).message
+        )
         if origin == .created {
-          try await outbound.write(Message.greet(id: self.configuration.localPeerID))
+          try await outbound.write(HandshakeFrame.greet(self.configuration.localPeerID).message)
         }
 
-        for try await message in inbound {
+        for try await wire in inbound {
+          // Once the peer is identified, only application messages flow upward;
+          // handshake frames are never surfaced to the Shell.
           if let peerID {
-            await onMessage(message, peerID)
-          } else {
-            guard magic != nil, version != nil else {
-              guard let (m, v) = message.signalRead() else {
-                return
-              }
-              guard m == self.configuration.magic && v == self.configuration.version else {
-                return
-              }
-              magic = m
-              version = v
-              continue
-            }
-            switch (message.type, origin) {
-            case (.hello, .created):
-              peerID = message.helloPeerID()
-            case (.greet, .accepted):
-              peerID = message.greetPeerID()
-              try await outbound.write(Message.hello(id: self.configuration.localPeerID))
-            case (.greet, .created):
-              return  // I dialed, so I expect a hello, not a greet. Bad state.
-            case (.hello, .accepted):
-              return  // They dialed, so I expect a greet, not a hello. Bad state.
-            default:
-              return
-            }
-            guard let peerID else { return }
-            let connection = Connection(id: connectionID, channel: channel, writer: outbound)
-            guard self.adopt(connection, peerID: peerID, origin: origin) else {
-              return
-            }
-            log.info("Connection: \(peerID)")
+            guard let app = AppMessage(wire) else { continue }
+            await onMessage(app, peerID)
+            continue
           }
+
+          guard let frame = HandshakeFrame(wire) else { return }
+
+          if !handshakeVerified {
+            guard
+              case .signal(let magic, let version) = frame,
+              magic == self.configuration.magic, version == self.configuration.version
+            else { return }
+            handshakeVerified = true
+            continue
+          }
+
+          switch (frame, origin) {
+          case (.hello(let id), .created):
+            peerID = id  // I dialed and expect their hello.
+          case (.greet(let id), .accepted):
+            peerID = id  // They dialed and greeted; answer with my hello.
+            try await outbound.write(HandshakeFrame.hello(self.configuration.localPeerID).message)
+          default:
+            return  // Wrong handshake frame for this side. Bad state.
+          }
+
+          guard let peerID else { return }
+          let connection = Connection(id: connectionID, channel: channel, writer: outbound)
+          guard self.adopt(connection, peerID: peerID, origin: origin) else {
+            return
+          }
+          log.info("Connection: \(peerID)")
         }
       }
     } catch {
