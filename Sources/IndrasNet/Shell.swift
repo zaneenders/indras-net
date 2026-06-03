@@ -1,22 +1,22 @@
 import Logging
 import NIOCore
 
-private let log = Logger(label: "indras-net.shell")
-
 public actor Shell {
   var instance: Instance
   let peerId: PeerID
   let transport: TCPTransport
+  private let logger: Logger
   private var endpoints: [PeerID: NodeAddress] = [:]
 
   private typealias Job = @Sendable () async -> Void
   private var supervisor: Task<Void, Never>?
   private var cancelableJobs: AsyncStream<Job>.Continuation?
 
-  public init(_ node: NodeAddress, transport: TCPTransport) {
+  public init(_ node: NodeAddress, transport: TCPTransport, logger: Logger? = nil) {
     self.peerId = node.addressKey
     self.transport = transport
     self.instance = Instance(node.addressKey)
+    self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
   public func start(with peers: [NodeAddress]) async throws {
@@ -52,10 +52,10 @@ public actor Shell {
   func receiveMessage(message: AppMessage, from peer: PeerID) {
     switch message {
     case .ping:
-      log.info("[\(self.peerId)] ping <- \(peer)")
+      self.logger.info("[\(self.peerId)] ping <- \(peer)")
       onPing(from: peer)
     case .pong:
-      log.info("[\(self.peerId)] pong <- \(peer)")
+      self.logger.info("[\(self.peerId)] pong <- \(peer)")
     }
   }
 
@@ -115,13 +115,13 @@ public actor Shell {
     do {
       try await Task.sleep(for: getJitter())
       try await transport.send(.ping, to: peer)
-      log.info("[\(self.peerId)] ping -> \(peer)")
+      self.logger.info("[\(self.peerId)] ping -> \(peer)")
     } catch is CancellationError {
       return  // shutting down
     } catch IndrasNetTransportError.peerNotConnected {
       return
     } catch {
-      log.notice("[\(self.peerId)] ping -> \(peer) failed: \(error)")
+      self.logger.notice("[\(self.peerId)] ping -> \(peer) failed: \(error)")
     }
   }
 
@@ -129,13 +129,13 @@ public actor Shell {
     do {
       try await Task.sleep(for: getJitter())
       try await transport.send(.pong, to: peer)
-      log.info("[\(self.peerId)] pong -> \(peer)")
+      self.logger.info("[\(self.peerId)] pong -> \(peer)")
     } catch is CancellationError {
       return  // shutting down
     } catch IndrasNetTransportError.peerNotConnected {
       return
     } catch {
-      log.notice("[\(self.peerId)] pong -> \(peer) failed: \(error)")
+      self.logger.notice("[\(self.peerId)] pong -> \(peer) failed: \(error)")
     }
   }
 

@@ -21,7 +21,8 @@ import Testing
             host: local.host,
             port: local.port
           ),
-          eventLoopGroup: group
+          eventLoopGroup: group,
+          logger: TestHelpers.quietLogger
         )
         try await node.start { message, from in
           await collector.record(message, from: from)

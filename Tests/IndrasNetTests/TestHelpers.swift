@@ -5,7 +5,13 @@ import Testing
 
 @testable import IndrasNet
 
-enum TestHelpers {}
+enum TestHelpers {
+  static let quietLogger: Logger = {
+    var logger = Logger(label: "indras-net.test")
+    logger.logLevel = .error
+    return logger
+  }()
+}
 
 extension TestHelpers {
   static func withEventLoopGroup<R>(

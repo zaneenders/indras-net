@@ -17,7 +17,8 @@ import Testing
           host: host,
           port: peerB.port
         ),
-        eventLoopGroup: sharedGroup
+        eventLoopGroup: sharedGroup,
+        logger: TestHelpers.quietLogger
       )
 
       try await nodeB.start { message, peerID in
@@ -34,7 +35,8 @@ import Testing
           host: host,
           port: peerA.port
         ),
-        eventLoopGroup: sharedGroup
+        eventLoopGroup: sharedGroup,
+        logger: TestHelpers.quietLogger
       )
 
       try await nodeA.start { message, peerID in
@@ -77,7 +79,8 @@ import Testing
           host: host,
           port: peerB.port
         ),
-        eventLoopGroup: sharedGroup
+        eventLoopGroup: sharedGroup,
+        logger: TestHelpers.quietLogger
       )
       try await nodeB.start { message, peerID in
         await collectorB.record(message, from: peerID)
@@ -89,7 +92,8 @@ import Testing
           host: host,
           port: peerA.port
         ),
-        eventLoopGroup: sharedGroup
+        eventLoopGroup: sharedGroup,
+        logger: TestHelpers.quietLogger
       )
       try await nodeA.start { _, _ in }
       await nodeA.connect(to: peerB)

@@ -6,14 +6,12 @@ import NIOPosix
 typealias PeerID = String
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
-private let log = Logger(label: "indras-net.transport")
-
 typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerID) async -> Void
 
 public actor TCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
 
-  enum ConnectionOrigin {
+  private enum ConnectionOrigin {
     case accepted
     case created
   }
@@ -26,6 +24,7 @@ public actor TCPTransport {
 
   private let configuration: TransportConfiguration
   private let eventLoopGroup: MultiThreadedEventLoopGroup
+  private let logger: Logger
   private var serverChannel: NIOAsyncChannel<MessageChannel, Never>?
   private var onMessage: IndrasNetInboundHandler?
 
@@ -38,10 +37,12 @@ public actor TCPTransport {
 
   public init(
     configuration: TransportConfiguration,
-    eventLoopGroup: MultiThreadedEventLoopGroup = .singleton
+    eventLoopGroup: MultiThreadedEventLoopGroup = .singleton,
+    logger: Logger? = nil
   ) {
     self.configuration = configuration
     self.eventLoopGroup = eventLoopGroup
+    self.logger = logger ?? Logger(label: "indras-net.transport")
   }
 
   public func listenPort() async -> Int? {
@@ -117,19 +118,17 @@ public actor TCPTransport {
     return self.nextConnectionID
   }
 
-  static func shouldReplaceExisting(origin: ConnectionOrigin, localIsLower: Bool) -> Bool {
-    let initiatorIsLocal = origin == .created
-    return initiatorIsLocal == localIsLower
-  }
-
   private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
     if let existing = self.connections[peerID] {
+      // Both ends keep the connection initiated by the lower peer ID, so they
+      // deterministically converge on the same surviving socket.
+      let initiatorIsLocal = origin == .created
       let localIsLower = self.configuration.localPeerID < peerID
-      guard Self.shouldReplaceExisting(origin: origin, localIsLower: localIsLower) else {
+      guard initiatorIsLocal == localIsLower else {
         return false
       }
       existing.channel.close(promise: nil)
-      log.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
+      self.logger.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }
     self.connections[peerID] = connection
     return true
@@ -171,7 +170,7 @@ public actor TCPTransport {
         }
       }
     } catch {
-      log.notice("Accept loop ended: \(error)")
+      self.logger.notice("Accept loop ended: \(error)")
     }
   }
 
@@ -187,7 +186,7 @@ public actor TCPTransport {
 
       await self.handleConnection(asyncChannel: asyncChannel, origin: .created)
     } catch {
-      log.debug("Outbound dial failed: \(peer)")
+      self.logger.debug("Outbound dial failed: \(peer)")
     }
   }
 
@@ -257,7 +256,7 @@ public actor TCPTransport {
           guard self.adopt(connection, peerID: peerID, origin: origin) else {
             return
           }
-          log.info("Connection: \(peerID)")
+          self.logger.info("Connection: \(peerID)")
         }
       }
     } catch {
