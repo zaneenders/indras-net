@@ -1,6 +1,5 @@
 struct Instance {
   var members: Set<PeerID> = []
-  var heardFrom: [PeerID: ContinuousClock.Instant] = [:]
 
   let id: PeerID
 
@@ -8,19 +7,11 @@ struct Instance {
     self.id = peerID
   }
 
-  mutating func ping(_ peer: PeerID, _ snapShot: ContinuousClock.Instant) -> [PingAction] {
-    heardFrom[peer] = snapShot
-    return [.callPong(peer)]
+  func ping(_ peer: PeerID) -> [PingAction] {
+    [.callPong(peer)]
   }
 
-  mutating func pong(_ peer: PeerID, _ snapShot: ContinuousClock.Instant) {
-    heardFrom[peer] = snapShot
-  }
-
-  mutating func update(_ timeStamp: ContinuousClock.Instant, connected: Set<PeerID>) -> [UpdateAction] {
-    for (peer, snap) in heardFrom where snap < timeStamp.advanced(by: .seconds(-3)) {
-      heardFrom.removeValue(forKey: peer)
-    }
+  func update(_ timeStamp: ContinuousClock.Instant, connected: Set<PeerID>) -> [UpdateAction] {
     var result: [UpdateAction] = [.next(timeStamp.advanced(by: .seconds(1)))]
     let missing = members.subtracting(connected)
     if !missing.isEmpty {

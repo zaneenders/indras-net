@@ -56,22 +56,17 @@ public actor Shell {
       onPing(from: peer)
     case .pong:
       log.info("[\(self.peerId)] pong <- \(peer)")
-      onPong(from: peer)
     default:
       log.info("Shell: default[\(message)], from: \(peer)")
     }
   }
 
   func onPing(from peer: PeerID) {
-    for action in instance.ping(peer, ContinuousClock.now) {
+    for action in instance.ping(peer) {
       switch action {
       case .callPong: sendPong(to: peer)
       }
     }
-  }
-
-  func onPong(from peer: PeerID) {
-    instance.pong(peer, ContinuousClock.now)
   }
 
   private func enqueue(_ job: @escaping Job) {

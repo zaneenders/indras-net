@@ -50,8 +50,9 @@ import Testing
     )
     var wire = message.encodeToByteBuffer()
 
-    // Magic/version no longer ride in the frame header — see ProtocolPreambleHandlerTests.
-    #expect(wire.readableBytes == WireProtocol.headerLength + 1)
+    // Magic/version no longer ride in the frame header — they're exchanged once per
+    // connection via the `.signal` message (see `TCPTransport.handleConnection`).
+    #expect(wire.readableBytes == Message.headerLength + 1)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.pong.rawValue)
     #expect(wire.readInteger(as: UInt32.self) == 1)
     #expect(wire.readString(length: 1) == "x")
@@ -59,13 +60,13 @@ import Testing
 
   @Test func decoderWaitsForFullFrameBeforeEmitting() throws {
     let wire = Message(type: .hello, payload: ByteBuffer()).encodeToByteBuffer()
-    let partial = wire.getSlice(at: wire.readerIndex, length: WireProtocol.headerLength - 1)!
+    let partial = wire.getSlice(at: wire.readerIndex, length: Message.headerLength - 1)!
 
     let channel = try makeCodecChannel()
     try channel.writeInbound(partial)
     #expect(try channel.readInbound(as: Message.self) == nil)
 
-    try channel.writeInbound(wire.getSlice(at: wire.readerIndex + WireProtocol.headerLength - 1, length: 1)!)
+    try channel.writeInbound(wire.getSlice(at: wire.readerIndex + Message.headerLength - 1, length: 1)!)
     #expect(try channel.readInbound(as: Message.self) != nil)
   }
 
@@ -115,7 +116,7 @@ import Testing
 }
 
 extension MessageCodecTests {
-  private func makeCodecChannel(maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength) throws
+  private func makeCodecChannel(maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength) throws
     -> EmbeddedChannel
   {
     let channel = EmbeddedChannel()
@@ -127,7 +128,7 @@ extension MessageCodecTests {
 
   private func decodeInbound(
     _ wire: ByteBuffer,
-    maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength
+    maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength
   ) throws -> Message {
     let channel = try makeCodecChannel(maxPayloadLength: maxPayloadLength)
     try channel.writeInbound(wire)
@@ -154,7 +155,7 @@ extension MessageCodecTests {
 
 extension Message {
   func encodeToByteBuffer(allocator: ByteBufferAllocator = ByteBufferAllocator()) -> ByteBuffer {
-    var buffer = allocator.buffer(capacity: WireProtocol.headerLength + payload.readableBytes)
+    var buffer = allocator.buffer(capacity: Message.headerLength + payload.readableBytes)
     let encoder = MessageEncoder()
     try? encoder.encode(data: self, out: &buffer)
     return buffer

@@ -16,12 +16,16 @@ struct MessageType: RawRepresentable, Hashable, Sendable {
   static let pong = MessageType(rawValue: 0x0004)
 
   private static let names: [MessageType: String] = [
+    .signal: "signal",
+    .greet: "greet",
     .hello: "hello",
     .ping: "ping",
     .pong: "pong",
   ]
 
   private static let byName: [String: MessageType] = [
+    "signal": .signal,
+    "greet": .greet,
     "hello": .hello,
     "ping": .ping,
     "pong": .pong,

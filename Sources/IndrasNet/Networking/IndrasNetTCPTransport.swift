@@ -259,7 +259,7 @@ public actor TCPTransport {
 
 @Sendable
 private func messageAsyncChannelInitializer(
-  maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength
+  maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength
 ) -> @Sendable (Channel) -> EventLoopFuture<MessageChannel> {
   { channel in
     channel.eventLoop.makeCompletedFuture {
