@@ -10,7 +10,7 @@ private let log = Logger(label: "indras-net.transport")
 
 typealias IndrasNetInboundHandler = @Sendable (Message, PeerID) async -> Void
 
-public actor IndrasNetTCPTransport {
+public actor TCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
 
   private enum ConnectionOrigin {
@@ -24,7 +24,7 @@ public actor IndrasNetTCPTransport {
     let writer: NIOAsyncChannelOutboundWriter<Message>
   }
 
-  private let configuration: IndrasNetTCPConfiguration
+  private let configuration: TransportConfiguration
   private let eventLoopGroup: MultiThreadedEventLoopGroup
   private var serverChannel: NIOAsyncChannel<MessageChannel, Never>?
   private var onMessage: IndrasNetInboundHandler?
@@ -37,7 +37,7 @@ public actor IndrasNetTCPTransport {
   private var nextConnectionID: UInt64 = 0
 
   public init(
-    configuration: IndrasNetTCPConfiguration,
+    configuration: TransportConfiguration,
     eventLoopGroup: MultiThreadedEventLoopGroup = .singleton
   ) {
     self.configuration = configuration
@@ -95,7 +95,7 @@ public actor IndrasNetTCPTransport {
     self.enqueue { await self.runAcceptLoop(server: server) }
   }
 
-  func connect(to peer: ClusterEndpoint) {
+  func connect(to peer: NodeAddress) {
     let key = peer.addressKey
     guard self.connections[key] == nil, !self.dialing.contains(key) else { return }
     self.dialing.insert(key)
@@ -171,7 +171,7 @@ public actor IndrasNetTCPTransport {
     }
   }
 
-  private func dial(_ peer: ClusterEndpoint) async {
+  private func dial(_ peer: NodeAddress) async {
     do {
       let asyncChannel = try await ClientBootstrap(group: self.eventLoopGroup)
         .channelOption(.socketOption(.so_reuseaddr), value: 1)

@@ -52,10 +52,10 @@ struct IndrasNetCommand {
   }
 
   private struct ClusterFile: Decodable {
-    var peers: [ClusterEndpoint]
+    var peers: [NodeAddress]
   }
 
-  private static func parseArguments() throws -> (ClusterEndpoint, String) {
+  private static func parseArguments() throws -> (NodeAddress, String) {
     var args = Array(CommandLine.arguments.dropFirst())
     var clusterPath = "cluster.json"
 
@@ -76,20 +76,20 @@ struct IndrasNetCommand {
       throw CLIError(message: "port must be an integer")
     }
 
-    return (ClusterEndpoint(host: host, port: port), clusterPath)
+    return (NodeAddress(host: host, port: port), clusterPath)
   }
 
   private static func loadPeers(
     from path: String,
-    excluding local: ClusterEndpoint
-  ) throws -> [ClusterEndpoint] {
+    excluding local: NodeAddress
+  ) throws -> [NodeAddress] {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     let cluster = try JSONDecoder().decode(ClusterFile.self, from: data)
     return cluster.peers.filter { $0.host != local.host || $0.port != local.port }
   }
 
-  private static func runNode(local: ClusterEndpoint, peers: [ClusterEndpoint]) async throws {
-    let transport = IndrasNetTCPTransport(
+  private static func runNode(local: NodeAddress, peers: [NodeAddress]) async throws {
+    let transport = TCPTransport(
       configuration: local.tcpConfiguration()
     )
     let shell = Shell(local, transport: transport)

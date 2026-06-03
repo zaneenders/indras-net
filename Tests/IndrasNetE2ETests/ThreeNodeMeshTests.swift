@@ -9,7 +9,7 @@ import Testing
     let clusterPath = root.appending("cluster.json").string
     let host = "127.0.0.1"
     let ports = [9001, 9002, 9003]
-    let nodeKeys = ports.map { ClusterEndpoint(host: host, port: $0).addressKey }
+    let nodeKeys = ports.map { NodeAddress(host: host, port: $0).addressKey }
 
     let logs = [NodeLog(), NodeLog(), NodeLog()]
 

@@ -7,16 +7,16 @@ import Testing
   @Test func threeNodesFormMeshAndPingPong() async throws {
     try await TestHelpers.withEventLoopGroup { group in
       let host = "127.0.0.1"
-      let endpointC = ClusterEndpoint(host: host, port: 29_200)
-      let endpointB = ClusterEndpoint(host: host, port: 29_201)
-      let endpointA = ClusterEndpoint(host: host, port: 29_202)
+      let endpointC = NodeAddress(host: host, port: 29_200)
+      let endpointB = NodeAddress(host: host, port: 29_201)
+      let endpointA = NodeAddress(host: host, port: 29_202)
 
       func makeNode(
-        local: ClusterEndpoint
-      ) async throws -> (node: IndrasNetTCPTransport, collector: MessageCollector) {
+        local: NodeAddress
+      ) async throws -> (node: TCPTransport, collector: MessageCollector) {
         let collector = MessageCollector()
-        let node = IndrasNetTCPTransport(
-          configuration: IndrasNetTCPConfiguration(
+        let node = TCPTransport(
+          configuration: TransportConfiguration(
             localPeerID: local.addressKey,
             host: local.host,
             port: local.port
@@ -36,7 +36,7 @@ import Testing
       let b = try await makeNode(local: endpointB)
       let c = try await makeNode(local: endpointC)
 
-      let nodes: [(endpoint: ClusterEndpoint, node: IndrasNetTCPTransport, collector: MessageCollector)] =
+      let nodes: [(endpoint: NodeAddress, node: TCPTransport, collector: MessageCollector)] =
         [(endpointA, a.node, a.collector), (endpointB, b.node, b.collector), (endpointC, c.node, c.collector)]
 
       for entry in nodes {

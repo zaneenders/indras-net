@@ -1,4 +1,4 @@
-public struct IndrasNetTCPConfiguration: Sendable {
+public struct TransportConfiguration: Sendable {
   let magic: UInt8 = Message.magic
   let version: UInt8 = Message.version
   var localPeerID: String

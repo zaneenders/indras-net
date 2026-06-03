@@ -1,4 +1,4 @@
-public struct ClusterEndpoint: Sendable, Codable, Equatable {
+public struct NodeAddress: Sendable, Codable, Equatable {
   public let host: String
   public let port: Int
 
@@ -15,8 +15,8 @@ public struct ClusterEndpoint: Sendable, Codable, Equatable {
     "\(host):\(port)"
   }
 
-  public func tcpConfiguration() -> IndrasNetTCPConfiguration {
-    IndrasNetTCPConfiguration(
+  public func tcpConfiguration() -> TransportConfiguration {
+    TransportConfiguration(
       localPeerID: addressKey,
       host: host,
       port: port

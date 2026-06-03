@@ -7,12 +7,12 @@ import Testing
   @Test func twoNodesExchangePingPong() async throws {
     try await TestHelpers.withEventLoopGroup { sharedGroup in
       let host = "127.0.0.1"
-      let peerA = ClusterEndpoint(host: host, port: 29_100)
-      let peerB = ClusterEndpoint(host: host, port: 29_101)
+      let peerA = NodeAddress(host: host, port: 29_100)
+      let peerB = NodeAddress(host: host, port: 29_101)
 
       let collectorB = MessageCollector()
-      let nodeB = IndrasNetTCPTransport(
-        configuration: IndrasNetTCPConfiguration(
+      let nodeB = TCPTransport(
+        configuration: TransportConfiguration(
           localPeerID: peerB.addressKey,
           host: host,
           port: peerB.port
@@ -28,8 +28,8 @@ import Testing
       }
 
       let collectorA = MessageCollector()
-      let nodeA = IndrasNetTCPTransport(
-        configuration: IndrasNetTCPConfiguration(
+      let nodeA = TCPTransport(
+        configuration: TransportConfiguration(
           localPeerID: peerA.addressKey,
           host: host,
           port: peerA.port
@@ -67,12 +67,12 @@ import Testing
   func inboundAcceptRegistersPeer() async throws {
     try await TestHelpers.withEventLoopGroup { sharedGroup in
       let host = "127.0.0.1"
-      let peerA = ClusterEndpoint(host: host, port: 29_102)
-      let peerB = ClusterEndpoint(host: host, port: 29_103)
+      let peerA = NodeAddress(host: host, port: 29_102)
+      let peerB = NodeAddress(host: host, port: 29_103)
 
       let collectorB = MessageCollector()
-      let nodeB = IndrasNetTCPTransport(
-        configuration: IndrasNetTCPConfiguration(
+      let nodeB = TCPTransport(
+        configuration: TransportConfiguration(
           localPeerID: peerB.addressKey,
           host: host,
           port: peerB.port
@@ -83,8 +83,8 @@ import Testing
         await collectorB.record(message, from: peerID)
       }
 
-      let nodeA = IndrasNetTCPTransport(
-        configuration: IndrasNetTCPConfiguration(
+      let nodeA = TCPTransport(
+        configuration: TransportConfiguration(
           localPeerID: peerA.addressKey,
           host: host,
           port: peerA.port

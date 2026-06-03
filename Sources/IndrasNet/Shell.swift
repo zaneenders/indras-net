@@ -6,20 +6,20 @@ private let log = Logger(label: "indras-net.shell")
 public actor Shell {
   var instance: Instance
   let peerId: PeerID
-  let transport: IndrasNetTCPTransport
-  private var endpoints: [PeerID: ClusterEndpoint] = [:]
+  let transport: TCPTransport
+  private var endpoints: [PeerID: NodeAddress] = [:]
 
   private typealias Job = @Sendable () async -> Void
   private var supervisor: Task<Void, Never>?
   private var cancelableJobs: AsyncStream<Job>.Continuation?
 
-  public init(_ node: ClusterEndpoint, transport: IndrasNetTCPTransport) {
+  public init(_ node: NodeAddress, transport: TCPTransport) {
     self.peerId = node.addressKey
     self.transport = transport
     self.instance = Instance(node.addressKey)
   }
 
-  public func start(with peers: [ClusterEndpoint]) async throws {
+  public func start(with peers: [NodeAddress]) async throws {
     guard self.supervisor == nil else { return }
 
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
