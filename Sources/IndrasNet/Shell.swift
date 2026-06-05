@@ -1,5 +1,16 @@
+import Foundation
 import Logging
 import NIOCore
+
+public enum ShellError: Error, LocalizedError {
+  case noListenPort
+
+  public var errorDescription: String? {
+    switch self {
+    case .noListenPort: "no port bound"
+    }
+  }
+}
 
 public actor Shell {
   var instance: Instance
@@ -19,8 +30,15 @@ public actor Shell {
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
-  public func start(with peers: [NodeAddress]) async throws {
-    guard self.supervisor == nil else { return }
+  public init(_ node: NodeAddress, logger: Logger? = nil) {
+    self.init(node, transport: TCPTransport(configuration: node.tcpConfiguration()), logger: logger)
+  }
+
+  public func start(with peers: [NodeAddress]) async throws -> Int {
+    if self.supervisor != nil {
+      guard let port = await transport.listenPort() else { throw ShellError.noListenPort }
+      return port
+    }
 
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
     self.instance.members = Set(self.endpoints.keys)
@@ -39,6 +57,22 @@ public actor Shell {
       await self.receiveMessage(message: message, from: from)
     }
     self.enqueue { await self.runMaintenanceTimer() }
+
+    guard let port = await transport.listenPort() else {
+      await stop()
+      try await transport.shutdown()
+      throw ShellError.noListenPort
+    }
+    return port
+  }
+
+  public func shutdown() async throws {
+    await stop()
+    try await transport.shutdown()
+  }
+
+  func connectedPeers() async -> Set<PeerID> {
+    await transport.connectedPeers()
   }
 
   public func stop() async {
@@ -52,10 +86,10 @@ public actor Shell {
   func receiveMessage(message: AppMessage, from peer: PeerID) {
     switch message {
     case .ping:
-      self.logger.info("[\(self.peerId)] ping <- \(peer)")
+      logEvent(kind: "ping", direction: "in", peer: peer)
       onPing(from: peer)
     case .pong:
-      self.logger.info("[\(self.peerId)] pong <- \(peer)")
+      logEvent(kind: "pong", direction: "in", peer: peer)
     }
   }
 
@@ -115,7 +149,7 @@ public actor Shell {
     do {
       try await Task.sleep(for: getJitter())
       try await transport.send(.ping, to: peer)
-      self.logger.info("[\(self.peerId)] ping -> \(peer)")
+      logEvent(kind: "ping", direction: "out", peer: peer)
     } catch is CancellationError {
       return  // shutting down
     } catch IndrasNetTransportError.peerNotConnected {
@@ -129,7 +163,7 @@ public actor Shell {
     do {
       try await Task.sleep(for: getJitter())
       try await transport.send(.pong, to: peer)
-      self.logger.info("[\(self.peerId)] pong -> \(peer)")
+      logEvent(kind: "pong", direction: "out", peer: peer)
     } catch is CancellationError {
       return  // shutting down
     } catch IndrasNetTransportError.peerNotConnected {
@@ -142,4 +176,22 @@ public actor Shell {
   private func getJitter() -> Duration {
     Duration(.milliseconds(Int64.random(in: 1..<500)))
   }
+
+  private func logEvent(kind: String, direction: String, peer: PeerID) {
+    let arrow = direction == "out" ? "->" : "<-"
+    self.logger.info(
+      "[\(self.peerId)] \(kind) \(arrow) \(peer)",
+      metadata: [
+        ShellLogKey.kind: .string(kind),
+        ShellLogKey.direction: .string(direction),
+        ShellLogKey.peer: .string(peer),
+      ]
+    )
+  }
+}
+
+enum ShellLogKey {
+  static let kind = "shell.kind"
+  static let direction = "shell.direction"
+  static let peer = "shell.peer"
 }

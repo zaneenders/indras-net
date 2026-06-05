@@ -118,22 +118,6 @@ public actor TCPTransport {
     return self.nextConnectionID
   }
 
-  private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
-    if let existing = self.connections[peerID] {
-      // Both ends keep the connection initiated by the lower peer ID, so they
-      // deterministically converge on the same surviving socket.
-      let initiatorIsLocal = origin == .created
-      let localIsLower = self.configuration.localPeerID < peerID
-      guard initiatorIsLocal == localIsLower else {
-        return false
-      }
-      existing.channel.close(promise: nil)
-      self.logger.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
-    }
-    self.connections[peerID] = connection
-    return true
-  }
-
   public func shutdown() async throws {
     self.onMessage = nil
 
@@ -204,7 +188,7 @@ public actor TCPTransport {
     var peerID: PeerID?
     defer {
       if let peerID, self.connections[peerID]?.id == connectionID {
-        self.connections[peerID] = nil
+        self.connections.removeValue(forKey: peerID)
       }
     }
 
@@ -222,20 +206,24 @@ public actor TCPTransport {
         }
 
         for try await wire in inbound {
-          // Once the peer is identified, only application messages flow upward;
-          // handshake frames are never surfaced to the Shell.
           if let peerID {
-            guard let app = AppMessage(wire) else { continue }
+            guard let app = AppMessage(wire) else {
+              self.logger.warning("Have: \(peerID) unable to decode AppMessage from \(wire)")
+              continue
+            }
             await onMessage(app, peerID)
             continue
           }
 
-          guard let frame = HandshakeFrame(wire) else { return }
+          guard let frame = HandshakeFrame(wire) else {
+            self.logger.warning("unable to decode HandshakeFrame from \(wire)")
+            return
+          }
 
           if !handshakeVerified {
-            guard
-              case .signal(let magic, let version) = frame,
-              magic == self.configuration.magic, version == self.configuration.version
+            guard case .signal(let magic, let version) = frame,
+              self.configuration.magic == magic,
+              self.configuration.version == version
             else { return }
             handshakeVerified = true
             continue
@@ -262,6 +250,23 @@ public actor TCPTransport {
     } catch {
       // Connection ended; fall through to unregister.
     }
+  }
+
+  // Weather to adopt the given connection over an existing one
+  private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
+    if let existing = self.connections[peerID] {
+      // Both ends keep the connection initiated by the lower peer ID, so they
+      // deterministically converge on the same surviving socket.
+      let initiatorIsLocal = origin == .created
+      let localIsLower = self.configuration.localPeerID < peerID
+      guard initiatorIsLocal == localIsLower else {
+        return false
+      }
+      existing.channel.close(promise: nil)
+      self.logger.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
+    }
+    self.connections[peerID] = connection
+    return true
   }
 }
 

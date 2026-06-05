@@ -89,20 +89,10 @@ struct IndrasNetCommand {
   }
 
   private static func runNode(local: NodeAddress, peers: [NodeAddress]) async throws {
-    let transport = TCPTransport(
-      configuration: local.tcpConfiguration()
-    )
-    let shell = Shell(local, transport: transport)
-    let nodeName = local.addressKey
+    let shell = Shell(local)
+    let port = try await shell.start(with: peers)
 
-    try await shell.start(with: peers)
-    guard let meshPort = await transport.listenPort() else {
-      await shell.stop()
-      try? await transport.shutdown()
-      throw CLIError(message: "no port bound")
-    }
-
-    log.info("node \(nodeName) mesh \(local.host):\(meshPort)")
+    log.info("node \(local.addressKey) mesh \(local.host):\(port)")
     if peers.isEmpty {
       log.info("no peers in cluster.json")
     } else {
@@ -113,8 +103,7 @@ struct IndrasNetCommand {
     await waitForInterrupt()
     log.info("shutting down")
 
-    await shell.stop()
-    try await transport.shutdown()
+    try await shell.shutdown()
   }
 
   private static func waitForInterrupt() async {
