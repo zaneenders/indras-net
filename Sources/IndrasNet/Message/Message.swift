@@ -1,13 +1,12 @@
 import NIOCore
 
+// NOTE: I think we could have transport level message and user messages inside of that kinda like TCP/IP nesting
 struct Message: Sendable, Equatable {
   var type: MessageType
   var payload: ByteBuffer
 
-  var payloadString: String {
-    var copy = payload
-    return copy.readString(length: copy.readableBytes) ?? ""
-  }
+  static let headerLength: Int = 6
+  static let defaultMaxPayloadLength: UInt32 = UInt32(UInt16.max)
 
   init(
     type: MessageType,

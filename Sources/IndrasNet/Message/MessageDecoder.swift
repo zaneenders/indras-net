@@ -5,7 +5,7 @@ struct MessageDecoder: ByteToMessageDecoder {
 
   private let maxPayloadLength: UInt32
 
-  init(maxPayloadLength: UInt32 = WireProtocol.defaultMaxPayloadLength) {
+  init(maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength) {
     self.maxPayloadLength = maxPayloadLength
   }
 
@@ -33,11 +33,11 @@ struct MessageDecoder: ByteToMessageDecoder {
   }
 
   private mutating func decodeNextMessage(buffer: inout ByteBuffer) throws -> Message? {
-    guard buffer.readableBytes >= WireProtocol.headerLength else {
+    guard buffer.readableBytes >= Message.headerLength else {
       return nil
     }
 
-    guard var header = buffer.getSlice(at: buffer.readerIndex, length: WireProtocol.headerLength) else {
+    guard var header = buffer.getSlice(at: buffer.readerIndex, length: Message.headerLength) else {
       return nil
     }
     let parsed = try parseHeader(&header)
@@ -46,12 +46,12 @@ struct MessageDecoder: ByteToMessageDecoder {
       throw MessageDecodeError.messageTooLarge(length: parsed.payloadLength, max: maxPayloadLength)
     }
 
-    let totalLength = WireProtocol.headerLength + Int(parsed.payloadLength)
+    let totalLength = Message.headerLength + Int(parsed.payloadLength)
     guard buffer.readableBytes >= totalLength else {
       return nil
     }
 
-    _ = buffer.readSlice(length: WireProtocol.headerLength)
+    _ = buffer.readSlice(length: Message.headerLength)
     let payload = buffer.readSlice(length: Int(parsed.payloadLength)) ?? ByteBuffer()
 
     return Message(
@@ -61,16 +61,6 @@ struct MessageDecoder: ByteToMessageDecoder {
   }
 
   private func parseHeader(_ header: inout ByteBuffer) throws -> ParsedHeader {
-    let magic = try header.readRequiredInteger(as: UInt8.self)
-    guard magic == WireProtocol.magic else {
-      throw MessageDecodeError.invalidMagic(got: magic)
-    }
-
-    let version = try header.readRequiredInteger(as: UInt8.self)
-    guard version == WireProtocol.version else {
-      throw MessageDecodeError.unsupportedVersion(got: version, expected: WireProtocol.version)
-    }
-
     let typeRaw = try header.readRequiredInteger(as: UInt16.self)
     let payloadLength = try header.readRequiredInteger(as: UInt32.self)
     return ParsedHeader(type: MessageType(rawValue: typeRaw), payloadLength: payloadLength)

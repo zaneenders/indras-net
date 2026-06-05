@@ -7,85 +7,76 @@ import Testing
   @Test func threeNodesFormMeshAndPingPong() async throws {
     try await TestHelpers.withEventLoopGroup { group in
       let host = "127.0.0.1"
-      let endpointC = ClusterEndpoint(host: host, port: 29_200)
-      let endpointB = ClusterEndpoint(host: host, port: 29_201)
-      let endpointA = ClusterEndpoint(host: host, port: 29_202)
+      let port = 29_200
+      let c = NodeAddress(host: host, port: port)
+      let b = NodeAddress(host: host, port: port + 1)
+      let a = NodeAddress(host: host, port: port + 2)
+      let nodes = [a, b, c]
 
-      func makeNode(
-        local: ClusterEndpoint,
-        peers: [ClusterEndpoint]
-      ) async throws -> (node: IndrasNetTCPTransport, collector: MessageCollector) {
-        let collector = MessageCollector()
-        let node = IndrasNetTCPTransport(
-          configuration: IndrasNetTCPConfiguration(
-            localPeerID: local.peerID,
-            host: local.host,
-            port: local.port,
-            peers: peers
+      let recorder = ShellActionRecorder()
+      func makeShell(_ local: NodeAddress) -> Shell {
+        Shell(
+          local,
+          transport: TCPTransport(
+            configuration: local.tcpConfiguration(),
+            eventLoopGroup: group,
+            logger: TestHelpers.quietLogger
           ),
-          eventLoopGroup: group
+          logger: TestHelpers.shellLogger(node: local, recorder: recorder)
         )
-        try await node.start { message, from in
-          await collector.record(message, from: from)
-          if message.type == .ping {
-            try? await node.send(Message(type: .pong, payload: message.payload), to: from)
-          }
-        }
-        return (node, collector)
       }
 
-      let a = try await makeNode(local: endpointA, peers: [endpointB, endpointC])
-      let b = try await makeNode(local: endpointB, peers: [endpointC, endpointA])
-      let c = try await makeNode(local: endpointC, peers: [endpointB, endpointA])
+      let shellA = makeShell(a)
+      let shellB = makeShell(b)
+      let shellC = makeShell(c)
+      let shells = [shellA, shellB, shellC]
 
-      let nodes: [(endpoint: ClusterEndpoint, node: IndrasNetTCPTransport, collector: MessageCollector)] =
-        [(endpointA, a.node, a.collector), (endpointB, b.node, b.collector), (endpointC, c.node, c.collector)]
+      _ = try await shellC.start(with: [b, a])
+      _ = try await shellB.start(with: [c, a])
+      _ = try await shellA.start(with: [b, c])
 
       await TestHelpers.waitUntil(timeout: .seconds(10)) {
-        for entry in nodes {
-          await entry.node.connectMissingPeers()
-        }
-        for entry in nodes {
-          for other in nodes where other.endpoint.peerID != entry.endpoint.peerID {
-            guard await entry.node.isConnected(to: other.endpoint.peerID) else {
-              return false
-            }
+        for shell in shells {
+          if await shell.connectedPeers().count != 2 {
+            return false
           }
         }
         return true
       }
 
-      try await withThrowingTaskGroup(of: Void.self) { group in
-        for sender in nodes {
-          for receiver in nodes where receiver.endpoint.peerID != sender.endpoint.peerID {
-            group.addTask {
-              let pingCount = Int.random(in: 1...5)
-              for _ in 0..<pingCount {
-                try await sender.node.send(
-                  Message(type: .ping, payload: .init()),
-                  to: receiver.endpoint.peerID
-                )
-              }
-              try await receiver.collector.waitForCount(
-                type: .ping, from: sender.endpoint.peerID, atLeast: pingCount, timeout: .seconds(5))
-              try await sender.collector.waitForCount(
-                type: .pong, from: receiver.endpoint.peerID, atLeast: pingCount, timeout: .seconds(5))
+      let minimum = 5
+      await TestHelpers.waitUntil(timeout: .seconds(30)) {
+        TestHelpers.meshTrafficMet(recorder: recorder, nodes: nodes, minimum: minimum)
+      }
 
-              let pingsReceived = await receiver.collector.count(
-                type: .ping, from: sender.endpoint.peerID)
-              let pongsReceived = await sender.collector.count(
-                type: .pong, from: receiver.endpoint.peerID)
-              #expect(pingsReceived == pingCount)
-              #expect(pongsReceived == pingCount)
-            }
-          }
+      for local in nodes {
+        for remote in nodes where remote.addressKey != local.addressKey {
+          #expect(
+            recorder.count(
+              selfNode: local.addressKey, kind: "ping", direction: "out", peer: remote.addressKey
+            ) >= minimum
+          )
+          #expect(
+            recorder.count(
+              selfNode: remote.addressKey, kind: "ping", direction: "in", peer: local.addressKey
+            ) >= minimum
+          )
+          #expect(
+            recorder.count(
+              selfNode: local.addressKey, kind: "pong", direction: "out", peer: remote.addressKey
+            ) >= minimum
+          )
+          #expect(
+            recorder.count(
+              selfNode: remote.addressKey, kind: "pong", direction: "in", peer: local.addressKey
+            ) >= minimum
+          )
         }
-        try await group.waitForAll()
       }
 
-      for entry in nodes {
-        try await entry.node.shutdown()
-      }
+      try await shellA.shutdown()
+      try await shellB.shutdown()
+      try await shellC.shutdown()
     }
   }
 }

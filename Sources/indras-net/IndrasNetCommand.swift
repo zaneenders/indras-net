@@ -1,29 +1,26 @@
 import Foundation
 import IndrasNet
+import Logging
 import Synchronization
+
+private let log = Logger(label: "indras-net")
 
 @main
 struct IndrasNetCommand {
   static func main() async {
+    LoggingSystem.bootstrap { StreamLogHandler.standardError(label: $0) }
+
     do {
       if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
-        print(Self.usage)
+        print(usage)
         return
       }
 
-      let clusterPath = try Self.parseClusterPath()
-      let cluster = try ClusterFile.load(fromPath: clusterPath)
-      let local = try Self.parseLocalEndpoint()
-      let jsonEventLog = CommandLine.arguments.contains("--json-event-log")
-
-      let runner = IndrasNetNodeRunner(
-        local: local,
-        cluster: cluster,
-        jsonEventLog: jsonEventLog
-      )
-      try await runner.run(untilInterrupted: Self.waitForInterrupt)
-    } catch let error as ConfigurationError {
-      fputs("error: \(error.message)\n\n\(Self.usage)\n", stderr)
+      let (local, clusterPath) = try parseArguments()
+      let peers = try loadPeers(from: clusterPath, excluding: local)
+      try await runNode(local: local, peers: peers)
+    } catch let error as CLIError {
+      fputs("error: \(error.message)\n\n\(usage)\n", stderr)
       exit(1)
     } catch {
       fputs("error: \(error)\n", stderr)
@@ -48,55 +45,65 @@ struct IndrasNetCommand {
 
     Options:
       --cluster <path>       Shared cluster file (default: ./cluster.json)
-      --json-event-log       Emit NDJSON cluster events on stdout (human logs on stderr)
     """
 
-  private enum ConfigurationError: Error {
-    case message(String)
-
-    var message: String {
-      switch self {
-      case .message(let text): text
-      }
-    }
+  private struct CLIError: Error {
+    let message: String
   }
 
-  private static func parseClusterPath() throws -> String {
-    var args = Array(CommandLine.arguments.dropFirst())
-    guard let index = args.firstIndex(of: "--cluster") else {
-      return "cluster.json"
-    }
-    args.remove(at: index)
-    guard index < args.count else {
-      throw ConfigurationError.message("missing path for --cluster")
-    }
-    let path = args[index]
-    args.remove(at: index)
-    return path
+  private struct ClusterFile: Decodable {
+    var peers: [NodeAddress]
   }
 
-  private static func parseLocalEndpoint() throws -> ClusterEndpoint {
+  private static func parseArguments() throws -> (NodeAddress, String) {
     var args = Array(CommandLine.arguments.dropFirst())
-
-    args.removeAll { $0 == "--json-event-log" }
+    var clusterPath = "cluster.json"
 
     if let index = args.firstIndex(of: "--cluster") {
       args.remove(at: index)
-      if index < args.count {
-        args.remove(at: index)
+      guard index < args.count else {
+        throw CLIError(message: "missing path for --cluster")
       }
+      clusterPath = args.remove(at: index)
     }
 
     guard args.count >= 2 else {
-      throw ConfigurationError.message("expected <host> and <port>")
+      throw CLIError(message: "expected <host> and <port>")
     }
 
     let host = args[0]
     guard let port = Int(args[1]) else {
-      throw ConfigurationError.message("port must be an integer")
+      throw CLIError(message: "port must be an integer")
     }
 
-    return ClusterEndpoint(host: host, port: port)
+    return (NodeAddress(host: host, port: port), clusterPath)
+  }
+
+  private static func loadPeers(
+    from path: String,
+    excluding local: NodeAddress
+  ) throws -> [NodeAddress] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let cluster = try JSONDecoder().decode(ClusterFile.self, from: data)
+    return cluster.peers.filter { $0.host != local.host || $0.port != local.port }
+  }
+
+  private static func runNode(local: NodeAddress, peers: [NodeAddress]) async throws {
+    let shell = Shell(local)
+    let port = try await shell.start(with: peers)
+
+    log.info("node \(local.addressKey) mesh \(local.host):\(port)")
+    if peers.isEmpty {
+      log.info("no peers in cluster.json")
+    } else {
+      log.info("peers: \(peers.map(\.addressKey).joined(separator: ", "))")
+    }
+
+    log.info("running (Ctrl+C to stop)")
+    await waitForInterrupt()
+    log.info("shutting down")
+
+    try await shell.shutdown()
   }
 
   private static func waitForInterrupt() async {
@@ -108,7 +115,6 @@ struct IndrasNetCommand {
       }
       for (sig, source) in zip(signals, sources) {
         source.setEventHandler {
-          // Both handlers may fire (e.g. SIGINT then SIGTERM); resume only once.
           guard once.fire() else { return }
           sources.forEach { $0.cancel() }
           continuation.resume()

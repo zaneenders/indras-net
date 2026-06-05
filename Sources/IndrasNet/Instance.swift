@@ -1,6 +1,5 @@
 struct Instance {
-  var peers: Set<PeerID> = []
-  var heardFrom: [PeerID: ContinuousClock.Instant] = [:]
+  var members: Set<PeerID> = []
 
   let id: PeerID
 
@@ -8,35 +7,18 @@ struct Instance {
     self.id = peerID
   }
 
-  mutating func ping(_ peer: PeerID, _ snapShot: ContinuousClock.Instant) -> [PingAction] {
-    heardFrom[peer] = snapShot
-    return [.callPong(peer)]
+  func ping(_ peer: PeerID) -> [PingAction] {
+    [.callPong(peer)]
   }
 
-  mutating func pong(_ peer: PeerID, _ snapShot: ContinuousClock.Instant) -> [PongAction] {
-    heardFrom[peer] = snapShot
-    return [.callPing(peer)]
-  }
-
-  mutating func hello(_ peer: PeerID, _ snapShot: ContinuousClock.Instant) -> [HelloAction] {
-    heardFrom[peer] = snapShot
-    return [.callPing(peer)]
-  }
-
-  mutating func update(_ timeSamp: ContinuousClock.Instant) -> [UpdateAction] {
-    var peersToPing = peers
-    for (peer, snap) in heardFrom {
-      if snap < timeSamp.advanced(by: .seconds(-3)) {
-        heardFrom.removeValue(forKey: peer)
-      } else {
-        peersToPing.remove(peer)
-      }
+  func update(_ timeStamp: ContinuousClock.Instant, connected: Set<PeerID>) -> [UpdateAction] {
+    var result: [UpdateAction] = [.next(timeStamp.advanced(by: .seconds(1)))]
+    let missing = members.subtracting(connected)
+    if !missing.isEmpty {
+      result.append(.dialsToStart(Array(missing)))
     }
-    var result: [UpdateAction] = [
-      .next(timeSamp.advanced(by: .seconds(1)))
-    ]
-    if !peersToPing.isEmpty {
-      result.append(.hellosToSend(peersToPing.map { .callPing($0) }))
+    if !connected.isEmpty {
+      result.append(.pingsToSend(Array(connected)))
     }
     return result
   }
@@ -44,17 +26,10 @@ struct Instance {
 
 enum UpdateAction {
   case next(ContinuousClock.Instant)
-  case hellosToSend([HelloAction])
-}
-
-enum HelloAction {
-  case callPing(PeerID)
+  case dialsToStart([PeerID])
+  case pingsToSend([PeerID])
 }
 
 enum PingAction {
   case callPong(PeerID)
-}
-
-enum PongAction {
-  case callPing(PeerID)
 }
