@@ -78,7 +78,7 @@ public actor TCPTransport {
       .bind(
         host: self.configuration.host,
         port: self.configuration.port,
-        childChannelInitializer: messageAsyncChannelInitializer()
+        childChannelInitializer: asyncChannelInitializer()
       )
 
     self.serverChannel = server
@@ -165,7 +165,7 @@ public actor TCPTransport {
         .connect(
           host: peer.host,
           port: peer.port,
-          channelInitializer: messageAsyncChannelInitializer()
+          channelInitializer: asyncChannelInitializer()
         )
 
       await self.handleConnection(asyncChannel: asyncChannel, origin: .created)
@@ -271,7 +271,7 @@ public actor TCPTransport {
 }
 
 @Sendable
-private func messageAsyncChannelInitializer(
+private func asyncChannelInitializer(
   maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength
 ) -> @Sendable (Channel) -> EventLoopFuture<MessageChannel> {
   { channel in
