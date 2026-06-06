@@ -45,15 +45,15 @@ extension TestHelpers {
 }
 
 actor MessageCollector {
-  private var entries: [(AppMessage, PeerID)] = []
+  private var entries: [(AppMessage, PeerId)] = []
 
-  func record(_ message: AppMessage, from peerID: PeerID) {
+  func record(_ message: AppMessage, from peerID: PeerId) {
     self.entries.append((message, peerID))
   }
 
   func waitForMessage(
     type: AppMessage,
-    from peerID: PeerID,
+    from peerID: PeerId,
     timeout: Duration
   ) async throws -> AppMessage {
     let clock = ContinuousClock()
@@ -68,13 +68,13 @@ actor MessageCollector {
     throw MessageCollectorError.timeout
   }
 
-  func count(type: AppMessage, from peerID: PeerID) -> Int {
+  func count(type: AppMessage, from peerID: PeerId) -> Int {
     self.entries.lazy.filter { $0.0 == type && $0.1 == peerID }.count
   }
 
   func waitForCount(
     type: AppMessage,
-    from peerID: PeerID,
+    from peerID: PeerId,
     atLeast minimum: Int,
     timeout: Duration
   ) async throws {

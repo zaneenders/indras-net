@@ -1,28 +1,41 @@
 import NIOCore
 
 enum AppMessage: Equatable, Sendable {
-  case ping
-  case pong
+  case requestVote(RequestVote.Args)
+  case requestVoteReply(RequestVote.Reply)
+  case appendEntries
 }
 
 extension AppMessage {
   init?(_ message: Message) {
     switch message.type {
-    case .ping: self = .ping
-    case .pong: self = .pong
-    default: return nil
+    case .requestVote:
+      guard let args = RequestVote.Args(from: message) else { return nil }
+      self = .requestVote(args)
+    case .requestVoteResponse:
+      guard let reply = RequestVote.Reply(from: message) else { return nil }
+      self = .requestVoteReply(reply)
+    case .appendEntries:
+      self = .appendEntries
+    default:
+      return nil
     }
   }
 
   var message: Message {
     switch self {
-    case .ping: Message(type: .ping, payload: ByteBuffer())
-    case .pong: Message(type: .pong, payload: ByteBuffer())
+    case .requestVote(let args):
+      return args.toMessage()
+    case .requestVoteReply(let reply):
+      return reply.toMessage()
+    case .appendEntries:
+      return Message(type: .appendEntries, payload: ByteBuffer())
     }
   }
 }
 
 extension MessageType {
-  static let ping = MessageType(rawValue: 0x0003)
-  static let pong = MessageType(rawValue: 0x0004)
+  static let requestVote = MessageType(rawValue: 0x0003)
+  static let requestVoteResponse = MessageType(rawValue: 0x0004)
+  static let appendEntries = MessageType(rawValue: 0x0005)
 }
