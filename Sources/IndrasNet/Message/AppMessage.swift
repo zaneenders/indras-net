@@ -3,7 +3,7 @@ import NIOCore
 enum AppMessage: Equatable, Sendable {
   case requestVote(RequestVote.Args)
   case requestVoteReply(RequestVote.Reply)
-  case appendEntries
+  case appendEntries(AppendEntries.Args)
 }
 
 extension AppMessage {
@@ -16,7 +16,8 @@ extension AppMessage {
       guard let reply = RequestVote.Reply(from: message) else { return nil }
       self = .requestVoteReply(reply)
     case .appendEntries:
-      self = .appendEntries
+      guard let args = AppendEntries.Args(from: message) else { return nil }
+      self = .appendEntries(args)
     default:
       return nil
     }
@@ -28,8 +29,8 @@ extension AppMessage {
       return args.toMessage()
     case .requestVoteReply(let reply):
       return reply.toMessage()
-    case .appendEntries:
-      return Message(type: .appendEntries, payload: ByteBuffer())
+    case .appendEntries(let args):
+      return args.toMessage()
     }
   }
 }

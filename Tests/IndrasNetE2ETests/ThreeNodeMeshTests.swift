@@ -3,7 +3,7 @@ import Testing
 @testable import IndrasNet
 
 @Suite(.timeLimit(.minutes(1))) struct ThreeNodeMeshTests {
-  @Test func threeNodesPingPongWithSharedCluster() async throws {
+  @Test func threeNodesRequestVoteWithSharedCluster() async throws {
     let binary = try await E2ETestSupport.buildProduct(named: "indras-net")
     let root = try E2ETestSupport.packageRoot()
     let clusterPath = root.appending("cluster.json").string
@@ -13,7 +13,7 @@ import Testing
 
     let logs = [NodeLog(), NodeLog(), NodeLog()]
 
-    let minimumPingCount = 6
+    let minimumRequestVoteCount = 2
 
     func nodeArguments(port: Int) -> [String] {
       [host, String(port), "--cluster", clusterPath]
@@ -37,29 +37,29 @@ import Testing
 
       for (log, key) in zip(logs, nodeKeys) {
         try await E2ETestSupport.waitForRunning(log: log, timeout: .seconds(10))
-        try await E2ETestSupport.waitForMinPingReceived(
+        try await E2ETestSupport.waitForMinRequestVoteReceived(
           log: log,
           node: key,
-          minimum: 2,
+          minimum: 1,
           timeout: .seconds(15)
         )
       }
 
       baselines = await logs.asyncMap { await $0.lineCount() }
 
-      try await E2ETestSupport.waitForAllMinPingSent(
+      try await E2ETestSupport.waitForAllMinRequestVoteSent(
         logs: logs,
         nodes: nodeKeys,
         baselines: baselines,
-        minimum: minimumPingCount,
+        minimum: minimumRequestVoteCount,
         timeout: .seconds(30)
       )
 
-      try await E2ETestSupport.waitForAllMinPingReceived(
+      try await E2ETestSupport.waitForAllMinRequestVoteReceived(
         logs: logs,
         nodes: nodeKeys,
         baselines: baselines,
-        minimum: minimumPingCount,
+        minimum: minimumRequestVoteCount,
         timeout: .seconds(30)
       )
 
@@ -78,7 +78,8 @@ import Testing
     #expect(countsDuringWindow.count == 3)
     for (key, counts) in countsDuringWindow {
       #expect(
-        counts.pingSent >= minimumPingCount && counts.pingReceived >= minimumPingCount,
+        counts.requestVoteSent >= minimumRequestVoteCount
+          && counts.requestVoteReceived >= minimumRequestVoteCount,
         "unexpected counts for \(key) during measurement window: \(counts)"
       )
     }

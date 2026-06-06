@@ -119,7 +119,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForAllMinPingSent(
+  static func waitForAllMinRequestVoteSent(
     logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
@@ -131,7 +131,7 @@ enum E2ETestSupport {
     while clock.now < deadline {
       var allMet = true
       for index in logs.indices {
-        let count = await logs[index].pingSentCount(
+        let count = await logs[index].requestVoteSentCount(
           node: nodes[index],
           since: baselines[index]
         )
@@ -147,20 +147,20 @@ enum E2ETestSupport {
     }
     var summaries: [String] = []
     for index in logs.indices {
-      let count = await logs[index].pingSentCount(
+      let count = await logs[index].requestVoteSentCount(
         node: nodes[index],
         since: baselines[index]
       )
       summaries.append("\(nodes[index]): \(count)")
     }
     Issue.record(
-      "not all nodes sent \(minimum) pings in time; counts since baseline: \(summaries.joined(separator: ", "))"
+      "not all nodes sent \(minimum) request votes in time; counts since baseline: \(summaries.joined(separator: ", "))"
     )
     struct Timeout: Error {}
     throw Timeout()
   }
 
-  static func waitForAllMinPingReceived(
+  static func waitForAllMinRequestVoteReceived(
     logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
@@ -172,7 +172,7 @@ enum E2ETestSupport {
     while clock.now < deadline {
       var allMet = true
       for index in logs.indices {
-        let count = await logs[index].pingReceivedCount(
+        let count = await logs[index].requestVoteReceivedCount(
           node: nodes[index],
           since: baselines[index]
         )
@@ -188,20 +188,20 @@ enum E2ETestSupport {
     }
     var summaries: [String] = []
     for index in logs.indices {
-      let count = await logs[index].pingReceivedCount(
+      let count = await logs[index].requestVoteReceivedCount(
         node: nodes[index],
         since: baselines[index]
       )
       summaries.append("\(nodes[index]): \(count)")
     }
     Issue.record(
-      "not all nodes received \(minimum) pings in time; counts since baseline: \(summaries.joined(separator: ", "))"
+      "not all nodes received \(minimum) request votes in time; counts since baseline: \(summaries.joined(separator: ", "))"
     )
     struct Timeout: Error {}
     throw Timeout()
   }
 
-  static func waitForMinPingReceived(
+  static func waitForMinRequestVoteReceived(
     log: NodeLog,
     node: String,
     minimum: Int,
@@ -210,13 +210,13 @@ enum E2ETestSupport {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if await log.pingReceivedCount(node: node) >= minimum {
+      if await log.requestVoteReceivedCount(node: node) >= minimum {
         return
       }
       try await Task.sleep(for: .milliseconds(25))
     }
     Issue.record(
-      "node \(node) did not receive \(minimum) pings in time; log: \(await log.allLines())"
+      "node \(node) did not receive \(minimum) request votes in time; log: \(await log.allLines())"
     )
     struct Timeout: Error {}
     throw Timeout()
@@ -245,10 +245,11 @@ actor NodeLog {
 
   func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
     MeshEventCounts(
-      pingSent: pingSentCount(node: node, since: startIndex),
-      pingReceived: pingReceivedCount(node: node, since: startIndex),
-      pongSent: pongSentCount(node: node, since: startIndex),
-      pongReceived: pongReceivedCount(node: node, since: startIndex)
+      requestVoteSent: requestVoteSentCount(node: node, since: startIndex),
+      requestVoteReceived: requestVoteReceivedCount(node: node, since: startIndex),
+      requestVoteResponseSent: requestVoteResponseSentCount(node: node, since: startIndex),
+      requestVoteResponseReceived: requestVoteResponseReceivedCount(
+        node: node, since: startIndex)
     )
   }
 
@@ -256,26 +257,26 @@ actor NodeLog {
     lines.dropFirst(startIndex)
   }
 
-  func pingSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] ping ->") }
+  func requestVoteSentCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { $0.contains("[\(node)] requestVote ->") }
   }
 
-  func pingReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] ping <-") }
+  func requestVoteReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { $0.contains("[\(node)] requestVote <-") }
   }
 
-  func pongSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] pong ->") }
+  func requestVoteResponseSentCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse ->") }
   }
 
-  func pongReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] pong <-") }
+  func requestVoteResponseReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse <-") }
   }
 }
 
 struct MeshEventCounts: Equatable {
-  var pingSent: Int
-  var pingReceived: Int
-  var pongSent: Int
-  var pongReceived: Int
+  var requestVoteSent: Int
+  var requestVoteReceived: Int
+  var requestVoteResponseSent: Int
+  var requestVoteResponseReceived: Int
 }

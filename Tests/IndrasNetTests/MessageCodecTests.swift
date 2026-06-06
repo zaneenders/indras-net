@@ -5,79 +5,81 @@ import Testing
 @testable import IndrasNet
 
 @Suite struct MessageCodecTests {
-  @Test func encodeDecodeRoundTripPreservesFields() throws {
-    var payload = ByteBuffer()
-    payload.writeString("hello-wire")
-    let original = Message(
-      type: .ping,
-      payload: payload
-    )
+  @Test func handshakeSignalRoundTripThroughCodec() throws {
+    let original = HandshakeFrame.signal(magic: HandshakeFrame.magic, version: HandshakeFrame.version)
+    let decoded = try decodeInbound(original.message.encodeToByteBuffer())
+    let roundTripped = try #require(HandshakeFrame(decoded))
+    #expect(roundTripped == original)
+  }
 
+  @Test func handshakeGreetRoundTripThroughCodec() throws {
+    let original = HandshakeFrame.greet("peer-a")
+    let decoded = try decodeInbound(original.message.encodeToByteBuffer())
+    let roundTripped = try #require(HandshakeFrame(decoded))
+    #expect(roundTripped == original)
+  }
+
+  @Test func handshakeHelloRoundTripThroughCodec() throws {
+    let original = HandshakeFrame.hello("peer-b")
+    let decoded = try decodeInbound(original.message.encodeToByteBuffer())
+    let roundTripped = try #require(HandshakeFrame(decoded))
+    #expect(roundTripped == original)
+  }
+
+  @Test func requestVoteArgsRoundTripThroughCodec() throws {
+    let args = RequestVote.Args(term: 2, candidateId: "node-a", lostLogIndex: 3, lastLogTerm: 4)
+    let original = args.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())
-
-    #expect(decoded == original)
+    let roundTripped = try #require(RequestVote.Args(from: decoded))
+    #expect(roundTripped == args)
   }
 
-  @Test func encodeDecodeRoundTripHelloPayloadBody() throws {
-    var payload = ByteBuffer()
-    payload.writeString("ok")
-    let original = Message(type: .hello, payload: payload)
-
+  @Test func requestVoteReplyRoundTripThroughCodec() throws {
+    let reply = RequestVote.Reply(granted: true, term: 7)
+    let original = reply.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())
-
-    #expect(decoded.type == .hello)
-    var body = decoded.payload
-    #expect(body.readString(length: body.readableBytes) == "ok")
+    let roundTripped = try #require(RequestVote.Reply(from: decoded))
+    #expect(roundTripped == reply)
   }
 
-  @Test func encodeDecodeRoundTripAllMessageTypes() throws {
-    for type in [MessageType.hello, .ping, .pong] {
-      var payload = ByteBuffer()
-      payload.writeInteger(type.rawValue)
-      let original = Message(type: type, payload: payload)
-      let decoded = try decodeInbound(original.encodeToByteBuffer())
-      #expect(decoded.type == type)
-      #expect(decoded.payload == original.payload)
-    }
+  @Test func appendEntriesArgsRoundTripThroughCodec() throws {
+    let args = AppendEntries.Args(term: 3, leaderId: "leader-1")
+    let original = args.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(AppendEntries.Args(from: decoded))
+    #expect(roundTripped == args)
   }
 
-  @Test func encodedWireFormatMatchesProtocolLayout() throws {
-    var payload = ByteBuffer()
-    payload.writeString("x")
-    let message = Message(
-      type: .pong,
-      payload: payload
-    )
-    var wire = message.encodeToByteBuffer()
+  @Test func requestVoteReplyWireFormatMatchesProtocolLayout() throws {
+    let reply = RequestVote.Reply(granted: true, term: 1)
+    var wire = reply.toMessage().encodeToByteBuffer()
 
-    // Magic/version no longer ride in the frame header — they're exchanged once per
-    // connection via the `.signal` message (see `TCPTransport.handleConnection`).
-    #expect(wire.readableBytes == Message.headerLength + 1)
-    #expect(wire.readInteger(as: UInt16.self) == MessageType.pong.rawValue)
-    #expect(wire.readInteger(as: UInt32.self) == 1)
-    #expect(wire.readString(length: 1) == "x")
+    #expect(wire.readableBytes == Message.headerLength + 9)
+    #expect(wire.readInteger(as: UInt16.self) == MessageType.requestVoteResponse.rawValue)
+    #expect(wire.readInteger(as: UInt32.self) == 9)
+    #expect(wire.readInteger(as: Int64.self) == 1)
+    #expect(wire.readInteger(as: UInt8.self) == 1)
   }
 
   @Test func decoderWaitsForFullFrameBeforeEmitting() throws {
-    let wire = Message(type: .hello, payload: ByteBuffer()).encodeToByteBuffer()
-    let partial = wire.getSlice(at: wire.readerIndex, length: Message.headerLength - 1)!
+    let wire = HandshakeFrame.signal(magic: 0x66, version: 0).message.encodeToByteBuffer()
+    let totalBytes = wire.readableBytes
+    let partial = wire.getSlice(at: wire.readerIndex, length: totalBytes - 1)!
 
     let channel = try makeCodecChannel()
     try channel.writeInbound(partial)
     #expect(try channel.readInbound(as: Message.self) == nil)
 
-    try channel.writeInbound(wire.getSlice(at: wire.readerIndex + Message.headerLength - 1, length: 1)!)
+    try channel.writeInbound(wire.getSlice(at: wire.readerIndex + totalBytes - 1, length: 1)!)
     #expect(try channel.readInbound(as: Message.self) != nil)
   }
 
   @Test func decodeAcceptsUnknownMessageTypeForExtensibility() throws {
-    // Unknown type bytes round-trip rather than being rejected, so new protocols
-    // (e.g. Raft RPCs) can be mixed in without touching the framing layer.
     let wire = validHeaderWire(typeRaw: 0xFFFF, payloadLength: 0)
-
     let decoded = try decodeInbound(wire)
 
     #expect(decoded.type == MessageType(rawValue: 0xFFFF))
+    #expect(decoded.payload.readableBytes == 0)
   }
 
   @Test func decodeLastRejectsPartialFrameOnClose() throws {
@@ -94,7 +96,7 @@ import Testing
 
   @Test func decodeRejectsPayloadLengthAboveMax() throws {
     let max: UInt32 = 64
-    let wire = validHeaderWire(type: .hello, payloadLength: max + 1)
+    let wire = validHeaderWire(type: .requestVote, payloadLength: max + 1)
 
     #expect(throws: MessageDecodeError.messageTooLarge(length: max + 1, max: max)) {
       _ = try decodeInbound(wire, maxPayloadLength: max)
@@ -102,7 +104,7 @@ import Testing
   }
 
   @Test func decodeLastRejectsTrailingBytesOnClose() throws {
-    var wire = Message(type: .hello, payload: ByteBuffer()).encodeToByteBuffer()
+    var wire = RequestVote.Reply(granted: false, term: 0).toMessage().encodeToByteBuffer()
     wire.writeInteger(UInt8(0xFF))
 
     let channel = try makeCodecChannel()

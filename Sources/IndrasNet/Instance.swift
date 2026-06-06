@@ -4,24 +4,45 @@ typealias Term = Int
 
 struct Instance {
   let id: PeerId
-  var role: Role
-  var currentTerm: Term
-  var votedFor: PeerId?
-  var peers: Set<PeerId>
-  var votes: [PeerId: Bool] = [:]
+  private(set) var role: Role
+  private(set) var currentTerm: Term
+  private(set) var votedFor: PeerId?
+  private(set) var peers: Set<PeerId>
+  private(set) var votes: [PeerId: Bool]
 
-  init(_ peerID: PeerId) {
-    self.id = peerID
-    self.role = .follower
-    self.currentTerm = 0
-    self.votedFor = nil
-    self.peers = []
+  init(
+    id: PeerId,
+    peers: Set<PeerId> = [],
+    role: Role = .follower,
+    currentTerm: Term = 0,
+    votedFor: PeerId? = nil,
+    votes: [PeerId: Bool] = [:]
+  ) {
+    self.id = id
+    self.peers = peers
+    self.role = role
+    self.currentTerm = currentTerm
+    self.votedFor = votedFor
+    self.votes = votes
   }
 
   mutating func onRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
+
+    if requst.term > currentTerm {
+      currentTerm = requst.term
+      votedFor = nil
+      votes = [:]
+      role = .follower
+    }
+
     if requst.term < currentTerm {
+      actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
+      return actions
+    }
+
+    if role == .leader || (role == .candidate && requst.candidateId != id) {
       actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
       return actions
     }
@@ -29,6 +50,7 @@ struct Instance {
     if votedFor == nil || votedFor == requst.candidateId {
       // TODO: At least as upto date
       grantVote = true
+      votedFor = requst.candidateId
     }
     actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
     return actions
@@ -36,15 +58,19 @@ struct Instance {
 
   mutating func onElectionTimeOut() -> [ElectionTimeoutAction] {
     var actions: [ElectionTimeoutAction] = []
+    guard role == .follower else { return actions }
 
+    self.currentTerm += 1
     self.role = .candidate
-    self.votes[self.id] = true
+    self.votedFor = self.id
+    self.votes = [self.id: true]
 
     for peer in peers {
       actions.append(
         .requstVote(
           to: peer,
-          args: RequestVote.Args(term: self.currentTerm, candidateId: self.id, lostLogIndex: 0, lastLogTerm: 0)))
+          args: RequestVote.Args(
+            term: self.currentTerm, candidateId: self.id, lostLogIndex: 0, lastLogTerm: 0)))
     }
     return actions
   }
@@ -55,18 +81,40 @@ struct Instance {
     if reply.term > currentTerm {
       self.role = .follower
       self.currentTerm = reply.term
+      self.votedFor = nil
+      self.votes = [:]
       return actions
     }
+
+    guard role == .candidate, reply.term == currentTerm else { return actions }
 
     self.votes[peer] = reply.granted
     if self.votes.isLeader(peers.count) {
       self.role = .leader
-      print("LEADER: \(self.id)")
+      let heartbeat = AppendEntries.Args(term: currentTerm, leaderId: id)
       for peer in peers {
-        actions.append(.sendAppendEntry(peer))
+        actions.append(.sendAppendEntry(to: peer, args: heartbeat))
       }
     }
 
+    return actions
+  }
+
+  mutating func onAppendEntries(_ leader: PeerId, _ args: AppendEntries.Args) -> [AppendEntries.Args.Action] {
+    var actions: [AppendEntries.Args.Action] = []
+
+    if args.term < currentTerm {
+      return actions
+    }
+
+    if args.term > currentTerm {
+      currentTerm = args.term
+      votedFor = nil
+      votes = [:]
+    }
+
+    role = .follower
+    actions.append(.resetElectionTimeout)
     return actions
   }
 }
@@ -80,13 +128,11 @@ extension [PeerId: Bool] {
           count += 1
         }
       })
-    print(#function, votes, " peers: ", peers)
-
     return votes > peers / 2
   }
 }
 
-enum ElectionTimeoutAction {
+enum ElectionTimeoutAction: Equatable {
   case requstVote(to: PeerId, args: RequestVote.Args)
 }
 
@@ -95,8 +141,8 @@ enum RequestVote {
     let granted: Bool
     let term: Term
 
-    enum Action {
-      case sendAppendEntry(PeerId)
+    enum Action: Equatable {
+      case sendAppendEntry(to: PeerId, args: AppendEntries.Args)
     }
 
     init(granted: Bool, term: Term) {
@@ -129,7 +175,7 @@ enum RequestVote {
     let lostLogIndex: Int
     let lastLogTerm: Int
 
-    enum Action {
+    enum Action: Equatable {
       case sendRequestVoteReply(to: PeerId, term: Term, voteGranted: Bool)
       case roleChanged(Role)
       case resetElectionTimeout
@@ -169,7 +215,41 @@ enum RequestVote {
   }
 }
 
-enum Role {
+enum AppendEntries {
+  struct Args: Equatable, Sendable {
+    let term: Term
+    let leaderId: PeerId
+
+    enum Action: Equatable {
+      case resetElectionTimeout
+    }
+
+    init(term: Term, leaderId: PeerId) {
+      self.term = term
+      self.leaderId = leaderId
+    }
+
+    func toMessage() -> Message {
+      var payload = ByteBuffer()
+      payload.writeInteger(Int64(term))
+      payload.writePeerId(leaderId)
+      return Message(type: .appendEntries, payload: payload)
+    }
+
+    init?(from message: Message) {
+      guard message.type == .appendEntries else { return nil }
+      var payload = message.payload
+      guard
+        let term = payload.readInteger(as: Int64.self),
+        let leaderId = payload.readPeerId()
+      else { return nil }
+      self.term = Int(term)
+      self.leaderId = leaderId
+    }
+  }
+}
+
+enum Role: Equatable {
   case follower
   case leader
   case candidate

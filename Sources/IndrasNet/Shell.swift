@@ -9,11 +9,25 @@ extension Shell {
   private func startElectionTimer() async {
     resetElectionTimeout()
     while !Task.isCancelled {
+      if instance.role == .leader {
+        let heartbeat = AppendEntries.Args(term: instance.currentTerm, leaderId: instance.id)
+        for peer in instance.peers {
+          sendAppendEntries(to: peer, args: heartbeat)
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        continue
+      }
+
       guard let nextElectionTimeout else { return }
 
       let timeout = ContinuousClock.now.duration(to: nextElectionTimeout)
       if timeout > .zero {
         try? await Task.sleep(for: timeout)
+      }
+
+      guard instance.role == .follower else {
+        resetElectionTimeout()
+        continue
       }
 
       for action in instance.onElectionTimeOut() {
@@ -42,8 +56,8 @@ extension Shell {
     self.enqueue { await self.deliverRequestVoteReply(to: peer, term: term, voteGranted: voteGranted) }
   }
 
-  private func sendAppendEntries(to peer: PeerId) {
-    self.enqueue { await self.deliverAppendEntries(to: peer) }
+  private func sendAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
+    self.enqueue { await self.deliverAppendEntries(to: peer, args: args) }
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
@@ -58,8 +72,8 @@ extension Shell {
     )
   }
 
-  private func deliverAppendEntries(to peer: PeerId) async {
-    await deliver(to: peer, message: .appendEntries, kind: "appendEntries")
+  private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) async {
+    await deliver(to: peer, message: .appendEntries(args), kind: "appendEntries")
   }
 
   func receiveMessage(message: AppMessage, from peer: PeerId) {
@@ -70,8 +84,9 @@ extension Shell {
     case .requestVoteReply(let reply):
       logEvent(kind: "requestVoteResponse", direction: "in", peer: peer)
       onRequestVoteResponse(from: peer, reply: reply)
-    case .appendEntries:
+    case .appendEntries(let args):
       logEvent(kind: "appendEntries", direction: "in", peer: peer)
+      onAppendEntries(from: peer, args: args)
     }
   }
 
@@ -91,8 +106,17 @@ extension Shell {
   private func onRequestVoteResponse(from peer: PeerId, reply: RequestVote.Reply) {
     for action in instance.onRequestVoteReply(peer, reply) {
       switch action {
-      case .sendAppendEntry(let peer):
-        sendAppendEntries(to: peer)
+      case .sendAppendEntry(let peer, let args):
+        sendAppendEntries(to: peer, args: args)
+      }
+    }
+  }
+
+  private func onAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+    for action in instance.onAppendEntries(leader, args) {
+      switch action {
+      case .resetElectionTimeout:
+        resetElectionTimeout()
       }
     }
   }
@@ -115,7 +139,7 @@ public actor Shell {
   public init(_ node: NodeAddress, transport: TCPTransport, logger: Logger? = nil) {
     self.peerId = node.addressKey
     self.transport = transport
-    self.instance = Instance(node.addressKey)
+    self.instance = Instance(id: node.addressKey)
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
@@ -130,7 +154,7 @@ public actor Shell {
     }
 
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance.peers = Set(self.endpoints.keys)
+    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys))
 
     let (stream, continuation) = AsyncStream.makeStream(of: Job.self)
     self.cancelableJobs = continuation
