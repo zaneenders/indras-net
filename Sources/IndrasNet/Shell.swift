@@ -7,45 +7,24 @@ import NIOCore
 extension Shell {
 
   private func startElectionTimer() async {
-    resetElectionTimeout()
+    var sleep = instance.getNextTimeout()
     while !Task.isCancelled {
-      if instance.role == .leader {
-        let heartbeat = AppendEntries.Args(term: instance.currentTerm, leaderId: instance.id)
-        for peer in instance.peers {
-          await deliverAppendEntries(to: peer, args: heartbeat)
-        }
-        try? await Task.sleep(for: .milliseconds(500))
-        continue
-      }
-
-      guard let nextElectionTimeout else { return }
-
-      let timeout = ContinuousClock.now.duration(to: nextElectionTimeout)
-      if timeout > .zero {
-        try? await Task.sleep(for: timeout)
-      }
-
-      guard instance.role == .follower else {
-        resetElectionTimeout()
-        continue
-      }
-
-      for action in instance.onElectionTimeOut() {
-        switch action {
-        case .requstVote(let peer, let args):
-          await deliverRequestVote(to: peer, args: args)
-        }
-      }
-      resetElectionTimeout()
+      try? await Task.sleep(for: sleep)
+      let tick = instance.onElectionTimeout()
+      await performTimerActions(tick.actions)
+      sleep = tick.sleep
     }
   }
 
-  private func resetElectionTimeout() {
-    self.nextElectionTimeout = ContinuousClock.now.advanced(by: randomElectionTimeout())
-  }
-
-  private func randomElectionTimeout() -> Duration {
-    Duration(.milliseconds(Int64.random(in: 1500..<3000)))
+  private func performTimerActions(_ actions: [TimerAction]) async {
+    for action in actions {
+      switch action {
+      case .requestVote(let peer, let args):
+        await deliverRequestVote(to: peer, args: args)
+      case .sendAppendEntry(let peer, let args):
+        await deliverAppendEntries(to: peer, args: args)
+      }
+    }
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
@@ -86,7 +65,7 @@ extension Shell {
       case .roleChanged, .persist:
         ()
       case .resetElectionTimeout:
-        resetElectionTimeout()
+        instance.resetElectionTimeout()
       }
     }
   }
@@ -104,16 +83,13 @@ extension Shell {
     for action in instance.onAppendEntries(leader, args) {
       switch action {
       case .resetElectionTimeout:
-        resetElectionTimeout()
+        instance.resetElectionTimeout()
       }
     }
   }
 }
 
 public actor Shell {
-  // Raft
-  private var nextElectionTimeout: ContinuousClock.Instant?
-
   // Node
   var instance: Instance
   let peerId: PeerId

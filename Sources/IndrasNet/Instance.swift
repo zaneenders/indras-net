@@ -3,12 +3,16 @@ import NIOCore
 typealias Term = Int
 
 struct Instance {
+  static let heartbeatInterval = Duration.milliseconds(50)
+  static let electionTimeoutRange: Range<Int64> = 150..<300
+
   let id: PeerId
   private(set) var role: Role
   private(set) var currentTerm: Term
   private(set) var votedFor: PeerId?
   private(set) var peers: Set<PeerId>
   private(set) var votes: [PeerId: Bool]
+  private(set) var electionTimeout: Duration
 
   init(
     id: PeerId,
@@ -16,7 +20,8 @@ struct Instance {
     role: Role = .follower,
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
-    votes: [PeerId: Bool] = [:]
+    votes: [PeerId: Bool] = [:],
+    electionTimeout: Duration = Instance.randomElectionTimeout()
   ) {
     self.id = id
     self.peers = peers
@@ -24,6 +29,47 @@ struct Instance {
     self.currentTerm = currentTerm
     self.votedFor = votedFor
     self.votes = votes
+    self.electionTimeout = electionTimeout
+  }
+
+  mutating func getNextTimeout() -> Duration {
+    resetElectionTimeout()
+    return timerSleepDuration()
+  }
+
+  mutating func onElectionTimeout() -> TimerTick {
+    switch role {
+    case .leader:
+      var actions: [TimerAction] = []
+      let heartbeat = AppendEntries.Args(term: currentTerm, leaderId: id)
+      for peer in peers {
+        actions.append(.sendAppendEntry(to: peer, args: heartbeat))
+      }
+      return TimerTick(sleep: Self.heartbeatInterval, actions: actions)
+    case .follower:
+      let actions = beginElection()
+      resetElectionTimeout()
+      return TimerTick(sleep: electionTimeout, actions: actions)
+
+    case .candidate:
+      resetElectionTimeout()
+      return TimerTick(sleep: electionTimeout, actions: [])
+    }
+  }
+
+  mutating func resetElectionTimeout() {
+    electionTimeout = Self.randomElectionTimeout()
+  }
+
+  private static func randomElectionTimeout() -> Duration {
+    Duration(.milliseconds(Int64.random(in: electionTimeoutRange)))
+  }
+
+  private func timerSleepDuration() -> Duration {
+    switch role {
+    case .leader: Self.heartbeatInterval
+    case .follower, .candidate: electionTimeout
+    }
   }
 
   mutating func onRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
@@ -56,23 +102,20 @@ struct Instance {
     return actions
   }
 
-  mutating func onElectionTimeOut() -> [ElectionTimeoutAction] {
-    var actions: [ElectionTimeoutAction] = []
-    guard role == .follower else { return actions }
+  private mutating func beginElection() -> [TimerAction] {
+    guard role == .follower else { return [] }
 
-    self.currentTerm += 1
-    self.role = .candidate
-    self.votedFor = self.id
-    self.votes = [self.id: true]
+    currentTerm += 1
+    role = .candidate
+    votedFor = id
+    votes = [id: true]
 
-    for peer in peers {
-      actions.append(
-        .requstVote(
-          to: peer,
-          args: RequestVote.Args(
-            term: self.currentTerm, candidateId: self.id, lostLogIndex: 0, lastLogTerm: 0)))
+    return peers.map { peer in
+      .requestVote(
+        to: peer,
+        args: RequestVote.Args(
+          term: currentTerm, candidateId: id, lostLogIndex: 0, lastLogTerm: 0))
     }
-    return actions
   }
 
   mutating func onRequestVoteReply(_ peer: PeerId, _ reply: RequestVote.Reply) -> [RequestVote.Reply.Action] {
@@ -90,6 +133,7 @@ struct Instance {
 
     self.votes[peer] = reply.granted
     if self.votes.isLeader(peers.count) {
+      print("I AM LEADER!")
       self.role = .leader
       let heartbeat = AppendEntries.Args(term: currentTerm, leaderId: id)
       for peer in peers {
@@ -132,8 +176,14 @@ extension [PeerId: Bool] {
   }
 }
 
-enum ElectionTimeoutAction: Equatable {
-  case requstVote(to: PeerId, args: RequestVote.Args)
+struct TimerTick: Equatable {
+  let sleep: Duration
+  let actions: [TimerAction]
+}
+
+enum TimerAction: Equatable {
+  case requestVote(to: PeerId, args: RequestVote.Args)
+  case sendAppendEntry(to: PeerId, args: AppendEntries.Args)
 }
 
 enum RequestVote {

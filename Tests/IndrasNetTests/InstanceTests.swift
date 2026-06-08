@@ -13,34 +13,34 @@ import Testing
     #expect(instance.peers.isEmpty)
   }
 
-  @Test func electionTimeoutStartsCandidacyAndRequestsVotesFromPeers() {
+  @Test func followerTimerFiredStartsCandidacyAndRequestsVotesFromPeers() {
     var instance = Instance(id: "a", peers: ["b", "c"])
 
-    let actions = instance.onElectionTimeOut()
+    let tick = instance.onElectionTimeout()
 
     #expect(instance.role == .candidate)
     #expect(instance.currentTerm == 1)
     #expect(instance.votedFor == "a")
     #expect(instance.votes == ["a": true])
-    #expect(actions.count == 2)
+    #expect(tick.actions.count == 2)
     #expect(
-      actions.contains(
-        .requstVote(
+      tick.actions.contains(
+        .requestVote(
           to: "b",
           args: RequestVote.Args(term: 1, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
     #expect(
-      actions.contains(
-        .requstVote(
+      tick.actions.contains(
+        .requestVote(
           to: "c",
           args: RequestVote.Args(term: 1, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
   }
 
-  @Test func candidateElectionTimeoutDoesNotRestartElection() {
+  @Test func candidateTimerFiredDoesNotRestartElection() {
     var instance = Instance(id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
-    let actions = instance.onElectionTimeOut()
+    let tick = instance.onElectionTimeout()
 
-    #expect(actions.isEmpty)
+    #expect(tick.actions.isEmpty)
     #expect(instance.role == .candidate)
     #expect(instance.currentTerm == 1)
   }
@@ -55,14 +55,35 @@ import Testing
     #expect(actions == [.sendRequestVoteReply(to: "b", term: 2, voteGranted: false)])
   }
 
-  @Test func leaderDoesNotTriggerElectionOnTimeout() {
+  @Test func leaderTimerFiredSendsHeartbeats() {
     var instance = Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2)
 
-    let actions = instance.onElectionTimeOut()
+    let tick = instance.onElectionTimeout()
 
-    #expect(actions.isEmpty)
     #expect(instance.role == .leader)
     #expect(instance.currentTerm == 2)
+    #expect(tick.sleep == Instance.heartbeatInterval)
+    #expect(tick.actions.count == 2)
+    #expect(
+      tick.actions.contains(.sendAppendEntry(to: "b", args: AppendEntries.Args(term: 2, leaderId: "a"))))
+    #expect(
+      tick.actions.contains(.sendAppendEntry(to: "c", args: AppendEntries.Args(term: 2, leaderId: "a"))))
+  }
+
+  @Test func prepareTimerReturnsHeartbeatIntervalForLeader() {
+    var instance = Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
+
+    let sleep = instance.getNextTimeout()
+
+    #expect(sleep == Instance.heartbeatInterval)
+  }
+
+  @Test func prepareTimerReturnsElectionTimeoutForFollower() {
+    var instance = Instance(id: "a", peers: ["b"], electionTimeout: .milliseconds(2000))
+
+    let sleep = instance.getNextTimeout()
+
+    #expect(sleep == instance.electionTimeout)
   }
 
   @Test func grantsVoteToFirstCandidateInTerm() {
