@@ -57,18 +57,7 @@ struct Instance {
     electionTimeout = Self.randomElectionTimeout()
   }
 
-  private static func randomElectionTimeout() -> Duration {
-    Duration(.milliseconds(Int64.random(in: electionTimeoutRange)))
-  }
-
-  private func timerSleepDuration() -> Duration {
-    switch role {
-    case .leader: Self.heartbeatInterval
-    case .follower, .candidate: electionTimeout
-    }
-  }
-
-  mutating func onRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
+  mutating func receiveRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
 
@@ -98,21 +87,7 @@ struct Instance {
     return actions
   }
 
-  private mutating func convertToCandidate() -> [TimerAction] {
-    currentTerm += 1
-    role = .candidate
-    votedFor = id
-    votes = [id: true]
-
-    return peers.map { peer in
-      .requestVote(
-        to: peer,
-        args: RequestVote.Args(
-          term: currentTerm, candidateId: id, lostLogIndex: 0, lastLogTerm: 0))
-    }
-  }
-
-  mutating func onRequestVoteReply(_ peer: PeerId, _ reply: RequestVote.Reply) -> [RequestVote.Reply.Action] {
+  mutating func receiveRequestVoteReply(_ peer: PeerId, _ reply: RequestVote.Reply) -> [RequestVote.Reply.Action] {
     var actions: [RequestVote.Reply.Action] = []
 
     if reply.term > currentTerm {
@@ -137,7 +112,7 @@ struct Instance {
     return actions
   }
 
-  mutating func onAppendEntries(_ leader: PeerId, _ args: AppendEntries.Args) -> [AppendEntries.Args.Action] {
+  mutating func receiveAppendEntries(_ leader: PeerId, _ args: AppendEntries.Args) -> [AppendEntries.Args.Action] {
     var actions: [AppendEntries.Args.Action] = []
 
     if args.term < currentTerm {
@@ -153,5 +128,33 @@ struct Instance {
     role = .follower
     actions.append(.resetElectionTimeout)
     return actions
+  }
+}
+
+extension Instance {
+
+  private static func randomElectionTimeout() -> Duration {
+    Duration(.milliseconds(Int64.random(in: electionTimeoutRange)))
+  }
+
+  private func timerSleepDuration() -> Duration {
+    switch role {
+    case .leader: Self.heartbeatInterval
+    case .follower, .candidate: electionTimeout
+    }
+  }
+
+  private mutating func convertToCandidate() -> [TimerAction] {
+    currentTerm += 1
+    role = .candidate
+    votedFor = id
+    votes = [id: true]
+
+    return peers.map { peer in
+      .requestVote(
+        to: peer,
+        args: RequestVote.Args(
+          term: currentTerm, candidateId: id, lostLogIndex: 0, lastLogTerm: 0))
+    }
   }
 }

@@ -49,19 +49,19 @@ extension Shell {
     switch message {
     case .requestVote(let args):
       logEvent(kind: "requestVote", direction: "in", peer: peer)
-      await onRequestVote(from: peer, request: args)
+      await receiveRequestVote(from: peer, request: args)
     case .requestVoteReply(let reply):
       logEvent(kind: "requestVoteResponse", direction: "in", peer: peer)
-      await onRequestVoteResponse(from: peer, reply: reply)
+      await receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
       logEvent(kind: "appendEntries", direction: "in", peer: peer)
-      onAppendEntries(from: peer, args: args)
+      receiveAppendEntries(from: peer, args: args)
     }
   }
 
-  private func onRequestVote(from peer: PeerId, request: RequestVote.Args) async {
+  private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) async {
     let previousRole = instance.role
-    for action in instance.onRequestVote(peer, request) {
+    for action in instance.receiveRequestVote(peer, request) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         await deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
@@ -74,9 +74,9 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func onRequestVoteResponse(from peer: PeerId, reply: RequestVote.Reply) async {
+  private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) async {
     let previousRole = instance.role
-    for action in instance.onRequestVoteReply(peer, reply) {
+    for action in instance.receiveRequestVoteReply(peer, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
         await deliverAppendEntries(to: peer, args: args)
@@ -85,9 +85,9 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func onAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
     let previousRole = instance.role
-    for action in instance.onAppendEntries(leader, args) {
+    for action in instance.receiveAppendEntries(leader, args) {
       switch action {
       case .resetElectionTimeout:
         instance.resetElectionTimeout()

@@ -61,7 +61,7 @@ import Testing
     var instance = Instance(id: "leader", peers: ["b"], role: .leader, currentTerm: 2)
     let request = RequestVote.Args(term: 2, candidateId: "b", lostLogIndex: 0, lastLogTerm: 0)
 
-    let actions = instance.onRequestVote("b", request)
+    let actions = instance.receiveRequestVote("b", request)
 
     #expect(instance.role == .leader)
     #expect(actions == [.sendRequestVoteReply(to: "b", term: 2, voteGranted: false)])
@@ -103,7 +103,7 @@ import Testing
 
     let request = RequestVote.Args(
       term: 1, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.onRequestVote("candidate", request)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == "candidate")
     #expect(actions == [.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)])
@@ -113,7 +113,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 1, votedFor: "first")
 
     let request = RequestVote.Args(term: 1, candidateId: "second", lostLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.onRequestVote("second", request)
+    let actions = instance.receiveRequestVote("second", request)
 
     #expect(instance.votedFor == "first")
     #expect(actions == [.sendRequestVoteReply(to: "second", term: 1, voteGranted: false)])
@@ -123,7 +123,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 3)
 
     let request = RequestVote.Args(term: 2, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.onRequestVote("candidate", request)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == nil)
     #expect(actions == [.sendRequestVoteReply(to: "candidate", term: 3, voteGranted: false)])
@@ -134,7 +134,7 @@ import Testing
       id: "follower", role: .candidate, currentTerm: 1, votes: ["follower": true])
 
     let request = RequestVote.Args(term: 3, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
-    _ = instance.onRequestVote("candidate", request)
+    _ = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 3)
@@ -146,7 +146,7 @@ import Testing
     var instance = Instance(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
-    let actions = instance.onRequestVoteReply("b", .init(granted: true, term: 1))
+    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1))
 
     #expect(instance.role == .leader)
     #expect(instance.votes == ["a": true, "b": true])
@@ -160,7 +160,7 @@ import Testing
   @Test func ignoresVoteReplyWhenNotCandidate() {
     var instance = Instance(id: "a", peers: ["b", "c"], currentTerm: 1)
 
-    let actions = instance.onRequestVoteReply("b", .init(granted: true, term: 1))
+    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .follower)
@@ -171,7 +171,7 @@ import Testing
     var instance = Instance(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 2, votes: ["a": true])
 
-    let actions = instance.onRequestVoteReply("b", .init(granted: true, term: 1))
+    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .candidate)
@@ -182,7 +182,7 @@ import Testing
     var instance = Instance(
       id: "a", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
-    let actions = instance.onRequestVoteReply("b", .init(granted: false, term: 2))
+    let actions = instance.receiveRequestVoteReply("b", .init(granted: false, term: 2))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .follower)
@@ -194,7 +194,7 @@ import Testing
   @Test func appendEntriesFromLeaderResetsElectionTimeout() {
     var instance = Instance(id: "follower", role: .candidate, currentTerm: 2)
 
-    let actions = instance.onAppendEntries("leader", .init(term: 2, leaderId: "leader"))
+    let actions = instance.receiveAppendEntries("leader", .init(term: 2, leaderId: "leader"))
 
     #expect(instance.role == .follower)
     #expect(actions == [.resetElectionTimeout])
@@ -203,7 +203,7 @@ import Testing
   @Test func ignoresStaleAppendEntries() {
     var instance = Instance(id: "follower", role: .candidate, currentTerm: 5)
 
-    let actions = instance.onAppendEntries("leader", .init(term: 3, leaderId: "leader"))
+    let actions = instance.receiveAppendEntries("leader", .init(term: 3, leaderId: "leader"))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .candidate)
@@ -214,7 +214,7 @@ import Testing
     var instance = Instance(
       id: "follower", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
-    let actions = instance.onAppendEntries("leader", .init(term: 4, leaderId: "leader"))
+    let actions = instance.receiveAppendEntries("leader", .init(term: 4, leaderId: "leader"))
 
     #expect(instance.currentTerm == 4)
     #expect(instance.votedFor == nil)
