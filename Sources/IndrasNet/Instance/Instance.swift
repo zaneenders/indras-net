@@ -1,6 +1,4 @@
 struct Instance {
-  static let heartbeatInterval = Duration.milliseconds(50)
-  static let electionTimeoutRange: Range<Int64> = 150..<300
 
   let id: PeerId
   private(set) var role: Role
@@ -8,7 +6,9 @@ struct Instance {
   private(set) var votedFor: PeerId?
   private(set) var peers: Set<PeerId>
   private(set) var votes: [PeerId: Bool]
-  private(set) var electionTimeout: Duration
+  private(set) var nextTimeout: Duration
+  private let heartbeatInterval = Duration.milliseconds(50)
+  private let electionTimeoutRange: Range<Int64> = 150..<300
 
   init(
     id: PeerId,
@@ -17,7 +17,7 @@ struct Instance {
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
     votes: [PeerId: Bool] = [:],
-    electionTimeout: Duration = Instance.randomElectionTimeout()
+    nextTimeout: Duration = .zero
   ) {
     self.id = id
     self.peers = peers
@@ -25,7 +25,7 @@ struct Instance {
     self.currentTerm = currentTerm
     self.votedFor = votedFor
     self.votes = votes
-    self.electionTimeout = electionTimeout
+    self.nextTimeout = nextTimeout
   }
 
   mutating func getNextTimeout() -> Duration {
@@ -41,20 +41,20 @@ struct Instance {
       for peer in peers {
         actions.append(.sendAppendEntry(to: peer, args: heartbeat))
       }
-      return TimerTick(sleep: Self.heartbeatInterval, actions: actions)
+      return TimerTick(sleep: heartbeatInterval, actions: actions)
     case .follower:
       let actions = convertToCandidate()
       resetElectionTimeout()
-      return TimerTick(sleep: electionTimeout, actions: actions)
+      return TimerTick(sleep: nextTimeout, actions: actions)
     case .candidate:
       let actions = convertToCandidate()
       resetElectionTimeout()
-      return TimerTick(sleep: electionTimeout, actions: actions)
+      return TimerTick(sleep: nextTimeout, actions: actions)
     }
   }
 
   mutating func resetElectionTimeout() {
-    electionTimeout = Self.randomElectionTimeout()
+    nextTimeout = randomElectionTimeout()
   }
 
   mutating func receiveRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
@@ -133,14 +133,14 @@ struct Instance {
 
 extension Instance {
 
-  private static func randomElectionTimeout() -> Duration {
+  private func randomElectionTimeout() -> Duration {
     Duration(.milliseconds(Int64.random(in: electionTimeoutRange)))
   }
 
   private func timerSleepDuration() -> Duration {
     switch role {
-    case .leader: Self.heartbeatInterval
-    case .follower, .candidate: electionTimeout
+    case .leader: heartbeatInterval
+    case .follower, .candidate: nextTimeout
     }
   }
 
