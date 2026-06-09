@@ -10,7 +10,9 @@ extension Shell {
     var sleep = instance.getNextTimeout()
     while !Task.isCancelled {
       try? await Task.sleep(for: sleep)
+      let previousRole = instance.role
       let tick = instance.onElectionTimeout()
+      logRoleChangeIfNeeded(from: previousRole)
       await performTimerActions(tick.actions)
       sleep = tick.sleep
     }
@@ -58,33 +60,46 @@ extension Shell {
   }
 
   private func onRequestVote(from peer: PeerId, request: RequestVote.Args) async {
+    let previousRole = instance.role
     for action in instance.onRequestVote(peer, request) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         await deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
-      case .roleChanged, .persist:
+      case .persist:
         ()
       case .resetElectionTimeout:
         instance.resetElectionTimeout()
       }
     }
+    logRoleChangeIfNeeded(from: previousRole)
   }
 
   private func onRequestVoteResponse(from peer: PeerId, reply: RequestVote.Reply) async {
+    let previousRole = instance.role
     for action in instance.onRequestVoteReply(peer, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
         await deliverAppendEntries(to: peer, args: args)
       }
     }
+    logRoleChangeIfNeeded(from: previousRole)
   }
 
   private func onAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+    let previousRole = instance.role
     for action in instance.onAppendEntries(leader, args) {
       switch action {
       case .resetElectionTimeout:
         instance.resetElectionTimeout()
       }
+    }
+    logRoleChangeIfNeeded(from: previousRole)
+  }
+
+  private func logRoleChangeIfNeeded(from previousRole: Role) {
+    guard instance.role != previousRole else { return }
+    if instance.role == .leader {
+      logger.info("[\(peerId)] became leader in term \(instance.currentTerm)")
     }
   }
 }

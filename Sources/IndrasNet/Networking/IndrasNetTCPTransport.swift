@@ -3,7 +3,6 @@ import NIO
 import NIOCore
 import NIOPosix
 
-typealias PeerId = String
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
 typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerId) async -> Void

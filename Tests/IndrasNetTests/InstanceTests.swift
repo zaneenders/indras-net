@@ -35,14 +35,26 @@ import Testing
           args: RequestVote.Args(term: 1, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
   }
 
-  @Test func candidateTimerFiredDoesNotRestartElection() {
+  @Test func candidateTimerFiredRestartsElection() {
     var instance = Instance(id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
     let tick = instance.onElectionTimeout()
 
-    #expect(tick.actions.isEmpty)
     #expect(instance.role == .candidate)
-    #expect(instance.currentTerm == 1)
+    #expect(instance.currentTerm == 2)
+    #expect(instance.votedFor == "a")
+    #expect(instance.votes == ["a": true])
+    #expect(tick.actions.count == 2)
+    #expect(
+      tick.actions.contains(
+        .requestVote(
+          to: "b",
+          args: RequestVote.Args(term: 2, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
+    #expect(
+      tick.actions.contains(
+        .requestVote(
+          to: "c",
+          args: RequestVote.Args(term: 2, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
   }
 
   @Test func leaderRejectsRequestVote() {
