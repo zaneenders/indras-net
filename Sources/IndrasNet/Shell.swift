@@ -112,21 +112,28 @@ public actor Shell {
   private let logger: Logger
   private var endpoints: [PeerId: NodeAddress] = [:]
   private var electionTimer: Task<Void, Never>?
+  private let timing: NodeTiming
 
-  public init(_ node: NodeAddress, transport: TCPTransport, logger: Logger? = nil) {
+  public init(
+    _ node: NodeAddress,
+    timing: NodeTiming = .default,
+    transport: TCPTransport,
+    logger: Logger? = nil
+  ) {
     self.peerId = node.addressKey
+    self.timing = timing
     self.transport = transport
-    self.instance = Instance(id: node.addressKey)
+    self.instance = Instance(id: node.addressKey, timing: timing)
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
-  public init(_ node: NodeAddress, logger: Logger? = nil) {
-    self.init(node, transport: TCPTransport(configuration: node.tcpConfiguration()), logger: logger)
+  public init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
+    self.init(node, timing: timing, transport: TCPTransport(configuration: node.tcpConfiguration()), logger: logger)
   }
 
   public func start(with peers: [NodeAddress]) async throws -> Int {
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys))
+    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing)
 
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)

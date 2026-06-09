@@ -17,8 +17,9 @@ struct IndrasNetCommand {
       }
 
       let (local, clusterPath) = try parseArguments()
-      let peers = try loadPeers(from: clusterPath, excluding: local)
-      try await runNode(local: local, peers: peers)
+      let cluster = try ClusterConfig.load(from: clusterPath)
+      let peers = cluster.peers(excluding: local)
+      try await runNode(local: local, peers: peers, timing: cluster.timing)
     } catch let error as CLIError {
       fputs("error: \(error.message)\n\n\(usage)\n", stderr)
       exit(1)
@@ -40,7 +41,10 @@ struct IndrasNetCommand {
         "peers": [
           { "host": "127.0.0.1", "port": 9001 },
           { "host": "127.0.0.1", "port": 9002 }
-        ]
+        ],
+        "heartbeatIntervalMs": 50,
+        "electionTimeoutMinMs": 150,
+        "electionTimeoutMaxMs": 300
       }
 
     Options:
@@ -49,10 +53,6 @@ struct IndrasNetCommand {
 
   private struct CLIError: Error {
     let message: String
-  }
-
-  private struct ClusterFile: Decodable {
-    var peers: [NodeAddress]
   }
 
   private static func parseArguments() throws -> (NodeAddress, String) {
@@ -79,17 +79,8 @@ struct IndrasNetCommand {
     return (NodeAddress(host: host, port: port), clusterPath)
   }
 
-  private static func loadPeers(
-    from path: String,
-    excluding local: NodeAddress
-  ) throws -> [NodeAddress] {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
-    let cluster = try JSONDecoder().decode(ClusterFile.self, from: data)
-    return cluster.peers.filter { $0.host != local.host || $0.port != local.port }
-  }
-
-  private static func runNode(local: NodeAddress, peers: [NodeAddress]) async throws {
-    let shell = Shell(local)
+  private static func runNode(local: NodeAddress, peers: [NodeAddress], timing: NodeTiming) async throws {
+    let shell = Shell(local, timing: timing)
     let port = try await shell.start(with: peers)
 
     log.info("node \(local.addressKey) mesh \(local.host):\(port)")

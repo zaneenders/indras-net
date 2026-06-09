@@ -7,8 +7,7 @@ struct Instance {
   private(set) var peers: Set<PeerId>
   private(set) var votes: [PeerId: Bool]
   private(set) var nextTimeout: Duration
-  private let heartbeatInterval = Duration.milliseconds(50)
-  private let electionTimeoutRange: Range<Int64> = 150..<300
+  private let timing: NodeTiming
 
   init(
     id: PeerId,
@@ -17,7 +16,8 @@ struct Instance {
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
     votes: [PeerId: Bool] = [:],
-    nextTimeout: Duration = .zero
+    nextTimeout: Duration = .zero,
+    timing: NodeTiming = .default
   ) {
     self.id = id
     self.peers = peers
@@ -26,6 +26,7 @@ struct Instance {
     self.votedFor = votedFor
     self.votes = votes
     self.nextTimeout = nextTimeout
+    self.timing = timing
   }
 
   mutating func getNextTimeout() -> Duration {
@@ -41,7 +42,7 @@ struct Instance {
       for peer in peers {
         actions.append(.sendAppendEntry(to: peer, args: heartbeat))
       }
-      return TimerTick(sleep: heartbeatInterval, actions: actions)
+      return TimerTick(sleep: timing.heartbeatInterval, actions: actions)
     case .follower:
       let actions = convertToCandidate()
       resetElectionTimeout()
@@ -134,12 +135,12 @@ struct Instance {
 extension Instance {
 
   private func randomElectionTimeout() -> Duration {
-    Duration(.milliseconds(Int64.random(in: electionTimeoutRange)))
+    Duration(.milliseconds(Int64.random(in: timing.electionTimeoutRange)))
   }
 
   private func timerSleepDuration() -> Duration {
     switch role {
-    case .leader: heartbeatInterval
+    case .leader: timing.heartbeatInterval
     case .follower, .candidate: nextTimeout
     }
   }

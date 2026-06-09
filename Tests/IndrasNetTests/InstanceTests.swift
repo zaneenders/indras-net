@@ -74,7 +74,7 @@ import Testing
 
     #expect(instance.role == .leader)
     #expect(instance.currentTerm == 2)
-    #expect(tick.sleep == .milliseconds(50))
+    #expect(tick.sleep == NodeTiming.default.heartbeatInterval)
     #expect(tick.actions.count == 2)
     #expect(
       tick.actions.contains(.sendAppendEntry(to: "b", args: AppendEntries.Args(term: 2, leaderId: "a"))))
@@ -87,7 +87,7 @@ import Testing
 
     let sleep = instance.getNextTimeout()
 
-    #expect(sleep == .milliseconds(50))
+    #expect(sleep == NodeTiming.default.heartbeatInterval)
   }
 
   @Test func prepareTimerReturnsElectionTimeoutForFollower() {
@@ -95,9 +95,10 @@ import Testing
 
     let sleep = instance.getNextTimeout()
 
+    let timing = NodeTiming.default
     #expect(sleep == instance.nextTimeout)
-    #expect(sleep >= .milliseconds(150))
-    #expect(sleep < .milliseconds(300))
+    #expect(sleep >= .milliseconds(timing.electionTimeoutRange.lowerBound))
+    #expect(sleep < .milliseconds(timing.electionTimeoutRange.upperBound))
   }
 
   @Test func grantsVoteToFirstCandidateInTerm() {
