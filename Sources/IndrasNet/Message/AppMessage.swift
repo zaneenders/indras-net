@@ -4,6 +4,7 @@ enum AppMessage: Equatable, Sendable {
   case requestVote(RequestVote.Args)
   case requestVoteReply(RequestVote.Reply)
   case appendEntries(AppendEntries.Args)
+  case appendEntriesReply(AppendEntries.Reply)
 }
 
 extension AppMessage {
@@ -18,6 +19,9 @@ extension AppMessage {
     case .appendEntries:
       guard let args = AppendEntries.Args(from: message) else { return nil }
       self = .appendEntries(args)
+    case .appendEntriesResponse:
+      guard let reply = AppendEntries.Reply(from: message) else { return nil }
+      self = .appendEntriesReply(reply)
     default:
       return nil
     }
@@ -31,6 +35,8 @@ extension AppMessage {
       return reply.toMessage()
     case .appendEntries(let args):
       return args.toMessage()
+    case .appendEntriesReply(let reply):
+      return reply.toMessage()
     }
   }
 }
@@ -39,4 +45,5 @@ extension MessageType {
   static let requestVote = MessageType(rawValue: 0x0003)
   static let requestVoteResponse = MessageType(rawValue: 0x0004)
   static let appendEntries = MessageType(rawValue: 0x0005)
+  static let appendEntriesResponse = MessageType(rawValue: 0x0006)
 }

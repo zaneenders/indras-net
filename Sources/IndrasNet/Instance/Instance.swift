@@ -117,6 +117,7 @@ struct Instance {
     var actions: [AppendEntries.Args.Action] = []
 
     if args.term < currentTerm {
+      actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: false))
       return actions
     }
 
@@ -127,8 +128,21 @@ struct Instance {
     }
 
     role = .follower
+    actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: true))
     actions.append(.resetElectionTimeout)
     return actions
+  }
+
+  mutating func receiveAppendEntriesReply(_ peer: PeerId, _ reply: AppendEntries.Reply) -> [AppendEntries.Reply.Action]
+  {
+    if reply.term > currentTerm {
+      role = .follower
+      currentTerm = reply.term
+      votedFor = nil
+      votes = [:]
+    }
+
+    return []
   }
 }
 

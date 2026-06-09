@@ -45,6 +45,14 @@ extension Shell {
     await deliver(to: peer, message: .appendEntries(args), kind: "appendEntries")
   }
 
+  private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) async {
+    await deliver(
+      to: peer,
+      message: .appendEntriesReply(.init(term: term, success: success)),
+      kind: "appendEntriesResponse"
+    )
+  }
+
   func receiveMessage(message: AppMessage, from peer: PeerId) async {
     switch message {
     case .requestVote(let args):
@@ -55,7 +63,10 @@ extension Shell {
       await receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
       logEvent(kind: "appendEntries", direction: "in", peer: peer)
-      receiveAppendEntries(from: peer, args: args)
+      await receiveAppendEntries(from: peer, args: args)
+    case .appendEntriesReply(let reply):
+      logEvent(kind: "appendEntriesResponse", direction: "in", peer: peer)
+      await receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
 
@@ -85,14 +96,22 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) async {
     let previousRole = instance.role
     for action in instance.receiveAppendEntries(leader, args) {
       switch action {
+      case .sendAppendEntriesReply(let to, let term, let success):
+        await deliverAppendEntriesReply(to: to, term: term, success: success)
       case .resetElectionTimeout:
         instance.resetElectionTimeout()
       }
     }
+    logRoleChangeIfNeeded(from: previousRole)
+  }
+
+  private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) async {
+    let previousRole = instance.role
+    _ = instance.receiveAppendEntriesReply(peer, reply)
     logRoleChangeIfNeeded(from: previousRole)
   }
 

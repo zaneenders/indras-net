@@ -50,6 +50,25 @@ import Testing
     #expect(roundTripped == args)
   }
 
+  @Test func appendEntriesReplyRoundTripThroughCodec() throws {
+    let reply = AppendEntries.Reply(term: 7, success: true)
+    let original = reply.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(AppendEntries.Reply(from: decoded))
+    #expect(roundTripped == reply)
+  }
+
+  @Test func appendEntriesReplyWireFormatMatchesProtocolLayout() throws {
+    let reply = AppendEntries.Reply(term: 1, success: false)
+    var wire = reply.toMessage().encodeToByteBuffer()
+
+    #expect(wire.readableBytes == Message.headerLength + 9)
+    #expect(wire.readInteger(as: UInt16.self) == MessageType.appendEntriesResponse.rawValue)
+    #expect(wire.readInteger(as: UInt32.self) == 9)
+    #expect(wire.readInteger(as: Int64.self) == 1)
+    #expect(wire.readInteger(as: UInt8.self) == 0)
+  }
+
   @Test func requestVoteReplyWireFormatMatchesProtocolLayout() throws {
     let reply = RequestVote.Reply(granted: true, term: 1)
     var wire = reply.toMessage().encodeToByteBuffer()

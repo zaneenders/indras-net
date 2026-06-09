@@ -200,15 +200,19 @@ import Testing
     let actions = instance.receiveAppendEntries("leader", .init(term: 2, leaderId: "leader"))
 
     #expect(instance.role == .follower)
-    #expect(actions == [.resetElectionTimeout])
+    #expect(
+      actions == [
+        .sendAppendEntriesReply(to: "leader", term: 2, success: true),
+        .resetElectionTimeout,
+      ])
   }
 
-  @Test func ignoresStaleAppendEntries() {
+  @Test func rejectsStaleAppendEntries() {
     var instance = Instance(id: "follower", role: .candidate, currentTerm: 5)
 
     let actions = instance.receiveAppendEntries("leader", .init(term: 3, leaderId: "leader"))
 
-    #expect(actions.isEmpty)
+    #expect(actions == [.sendAppendEntriesReply(to: "leader", term: 5, success: false)])
     #expect(instance.role == .candidate)
     #expect(instance.currentTerm == 5)
   }
@@ -223,6 +227,22 @@ import Testing
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
     #expect(instance.role == .follower)
-    #expect(actions == [.resetElectionTimeout])
+    #expect(
+      actions == [
+        .sendAppendEntriesReply(to: "leader", term: 4, success: true),
+        .resetElectionTimeout,
+      ])
+  }
+
+  @Test func stepsDownWhenAppendEntriesReplyHasHigherTerm() {
+    var instance = Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
+
+    let actions = instance.receiveAppendEntriesReply("b", .init(term: 2, success: false))
+
+    #expect(actions.isEmpty)
+    #expect(instance.role == .follower)
+    #expect(instance.currentTerm == 2)
+    #expect(instance.votedFor == nil)
+    #expect(instance.votes.isEmpty)
   }
 }
