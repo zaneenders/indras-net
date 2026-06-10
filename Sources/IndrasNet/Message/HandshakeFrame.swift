@@ -8,8 +8,8 @@ extension MessageType {
 
 enum HandshakeFrame: Equatable, Sendable {
   case signal(magic: UInt8, version: UInt8)
-  case greet(PeerID)
-  case hello(PeerID)
+  case greet(PeerId)
+  case hello(PeerId)
 
   static let magic: UInt8 = 0x66
   static let version: UInt8 = 0x0
@@ -52,9 +52,9 @@ extension HandshakeFrame {
 }
 
 extension ByteBuffer {
-  fileprivate func readingPeerID() -> PeerID? {
+  fileprivate func readingPeerID() -> PeerId? {
     var copy = self
     guard let raw = copy.readString(length: copy.readableBytes) else { return nil }
-    return PeerID(raw)
+    return PeerId(raw)
   }
 }

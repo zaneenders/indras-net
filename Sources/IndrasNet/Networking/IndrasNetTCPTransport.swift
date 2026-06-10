@@ -3,10 +3,9 @@ import NIO
 import NIOCore
 import NIOPosix
 
-typealias PeerID = String
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
-typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerID) async -> Void
+typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerId) async -> Void
 
 public actor TCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
@@ -31,8 +30,8 @@ public actor TCPTransport {
   private var supervisorTask: Task<Void, Never>?
   private var jobContinuation: AsyncStream<ConnectionJob>.Continuation?
 
-  private var connections: [PeerID: Connection] = [:]
-  private var dialing: Set<PeerID> = []
+  private var connections: [PeerId: Connection] = [:]
+  private var dialing: Set<PeerId> = []
   private var nextConnectionID: UInt64 = 0
 
   public init(
@@ -52,15 +51,15 @@ public actor TCPTransport {
     return address.port
   }
 
-  func connectedPeers() -> Set<PeerID> {
+  func connectedPeers() -> Set<PeerId> {
     Set(self.connections.keys)
   }
 
-  func isConnected(to peer: PeerID) -> Bool {
+  func isConnected(to peer: PeerId) -> Bool {
     self.connections[peer] != nil
   }
 
-  func send(_ message: AppMessage, to peer: PeerID) async throws {
+  func send(_ message: AppMessage, to peer: PeerId) async throws {
     guard let connection = self.connections[peer] else {
       throw IndrasNetTransportError.peerNotConnected(peer)
     }
@@ -109,7 +108,7 @@ public actor TCPTransport {
     }
   }
 
-  private func finishDialing(_ key: PeerID) {
+  private func finishDialing(_ key: PeerId) {
     self.dialing.remove(key)
   }
 
@@ -185,7 +184,7 @@ public actor TCPTransport {
     }
 
     let connectionID = self.mintConnectionID()
-    var peerID: PeerID?
+    var peerID: PeerId?
     defer {
       if let peerID, self.connections[peerID]?.id == connectionID {
         self.connections.removeValue(forKey: peerID)
@@ -244,7 +243,7 @@ public actor TCPTransport {
           guard self.adopt(connection, peerID: peerID, origin: origin) else {
             return
           }
-          self.logger.info("Connection: \(peerID)")
+          self.logger.debug("Connection: \(peerID)")
         }
       }
     } catch {
@@ -253,7 +252,7 @@ public actor TCPTransport {
   }
 
   // Weather to adopt the given connection over an existing one
-  private func adopt(_ connection: Connection, peerID: PeerID, origin: ConnectionOrigin) -> Bool {
+  private func adopt(_ connection: Connection, peerID: PeerId, origin: ConnectionOrigin) -> Bool {
     if let existing = self.connections[peerID] {
       // Both ends keep the connection initiated by the lower peer ID, so they
       // deterministically converge on the same surviving socket.
@@ -263,7 +262,7 @@ public actor TCPTransport {
         return false
       }
       existing.channel.close(promise: nil)
-      self.logger.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
+      self.logger.debug("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }
     self.connections[peerID] = connection
     return true
@@ -292,5 +291,5 @@ private func asyncChannelInitializer(
 }
 
 enum IndrasNetTransportError: Error, Equatable, Sendable {
-  case peerNotConnected(PeerID)
+  case peerNotConnected(PeerId)
 }

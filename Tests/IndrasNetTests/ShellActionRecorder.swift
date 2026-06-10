@@ -37,13 +37,21 @@ final class ShellActionRecorder: Sendable {
       }
     }
   }
+
+  func totalCount(kind: String, direction: String) -> Int {
+    events.withLock {
+      $0.count { event in
+        event.kind == kind && event.direction == direction
+      }
+    }
+  }
 }
 
 struct ShellActionLogHandler: LogHandler {
   let selfNode: String
   let recorder: ShellActionRecorder
 
-  var logLevel: Logger.Level = .info
+  var logLevel: Logger.Level = .trace
   var metadata: Logger.Metadata = [:]
 
   subscript(metadataKey key: String) -> Logger.Metadata.Value? {
@@ -69,38 +77,16 @@ struct ShellActionLogHandler: LogHandler {
 extension TestHelpers {
   static func shellLogger(node: NodeAddress, recorder: ShellActionRecorder) -> Logger {
     let handler = ShellActionLogHandler(selfNode: node.addressKey, recorder: recorder)
-    return Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
+    var logger = Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
+    logger.logLevel = .trace
+    return logger
   }
 
-  static func meshTrafficMet(
-    recorder: ShellActionRecorder,
-    nodes: [NodeAddress],
-    minimum: Int
-  ) -> Bool {
-    for local in nodes {
-      for remote in nodes where remote.addressKey != local.addressKey {
-        if recorder.count(
-          selfNode: local.addressKey, kind: "ping", direction: "out", peer: remote.addressKey
-        ) < minimum {
-          return false
-        }
-        if recorder.count(
-          selfNode: local.addressKey, kind: "pong", direction: "out", peer: remote.addressKey
-        ) < minimum {
-          return false
-        }
-        if recorder.count(
-          selfNode: remote.addressKey, kind: "ping", direction: "in", peer: local.addressKey
-        ) < minimum {
-          return false
-        }
-        if recorder.count(
-          selfNode: remote.addressKey, kind: "pong", direction: "in", peer: local.addressKey
-        ) < minimum {
-          return false
-        }
-      }
-    }
-    return true
+  static func electionOccurred(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+    recorder.totalCount(kind: "requestVote", direction: "out") >= minimumOutbound
+  }
+
+  static func leaderHeartbeatsStarted(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+    recorder.totalCount(kind: "appendEntries", direction: "out") >= minimumOutbound
   }
 }

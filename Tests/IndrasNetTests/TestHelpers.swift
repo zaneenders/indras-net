@@ -45,15 +45,15 @@ extension TestHelpers {
 }
 
 actor MessageCollector {
-  private var entries: [(AppMessage, PeerID)] = []
+  private var entries: [(AppMessage, PeerId)] = []
 
-  func record(_ message: AppMessage, from peerID: PeerID) {
+  func record(_ message: AppMessage, from peerID: PeerId) {
     self.entries.append((message, peerID))
   }
 
   func waitForMessage(
     type: AppMessage,
-    from peerID: PeerID,
+    from peerID: PeerId,
     timeout: Duration
   ) async throws -> AppMessage {
     let clock = ContinuousClock()
@@ -68,31 +68,31 @@ actor MessageCollector {
     throw MessageCollectorError.timeout
   }
 
-  func count(type: AppMessage, from peerID: PeerID) -> Int {
+  func count(type: AppMessage, from peerID: PeerId) -> Int {
     self.entries.lazy.filter { $0.0 == type && $0.1 == peerID }.count
   }
 
-  func waitForCount(
-    type: AppMessage,
-    from peerID: PeerID,
-    atLeast minimum: Int,
-    timeout: Duration
-  ) async throws {
+  func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> AppMessage {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
-      if self.count(type: type, from: peerID) >= minimum {
-        return
+      if let match = self.entries.first(where: { $0.1 == peerID }) {
+        return match.0
       }
       try? await Task.sleep(for: .milliseconds(25))
     }
-    Issue.record(
-      "Received \(self.count(type: type, from: peerID)) \(type) from \(peerID), expected \(minimum)"
-    )
+    Issue.record("Did not receive any message from \(peerID)")
     throw MessageCollectorError.timeout
   }
 }
 
 enum MessageCollectorError: Error {
   case timeout
+}
+
+extension TestHelpers {
+  /// Opaque app payload for transport tests — exercises send/receive without asserting Raft semantics.
+  static let transportProbe = AppMessage.appendEntries(
+    AppendEntries.Args(term: 0, leaderId: "transport-probe")
+  )
 }

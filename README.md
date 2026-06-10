@@ -10,9 +10,14 @@ One file for the whole cluster (copy the same file to every node):
     { "host": "127.0.0.1", "port": 9001 },
     { "host": "127.0.0.1", "port": 9002 },
     { "host": "127.0.0.1", "port": 9003 }
-  ]
+  ],
+  "heartbeatIntervalMs": 50,
+  "electionTimeoutMinMs": 150,
+  "electionTimeoutMaxMs": 300
 }
 ```
+
+Timing fields are optional; omitted values use the defaults above.
 
 Each process picks its own listen address on the command line. The node dials every peer in the file except itself (matching `host` + `port`).
 
