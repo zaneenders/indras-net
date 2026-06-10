@@ -9,18 +9,23 @@ llvm_cov() {
 swift test --enable-code-coverage || true
 
 PROFDATA=$(find .build -name '*.profdata' -print -quit)
-BIN=$(find .build \( \
-  -name 'indras-netPackageTests' -o \
-  -name 'indras_netPackageTests' -o \
-  -name 'indras-netPackageTests.xctest' -o \
-  -name 'indras_netPackageTests.xctest' -o \
-  -name 'IndrasNetTests.so' \
-  \) -type f ! -path '*/dSYM/*' -print -quit)
 
-if [[ -z "$PROFDATA" || -z "$BIN" ]]; then
+BINS=()
+while IFS= read -r bin; do
+  BINS+=("$bin")
+done < <(
+  find .build \( \
+    -path '*/Products/Debug/*.xctest/Contents/MacOS/*' -o \
+    -name 'indras-netPackageTests' -o \
+    -name 'indras_netPackageTests' -o \
+    -name 'IndrasNetTests.so' \
+    \) -type f ! -path '*/dSYM/*' | sort -u
+)
+
+if [[ -z "$PROFDATA" || ${#BINS[@]} -eq 0 ]]; then
   echo "error: coverage data not found under .build" >&2
   exit 1
 fi
 
-llvm_cov report "$BIN" --instr-profile="$PROFDATA" \
+llvm_cov report "${BINS[@]}" --instr-profile="$PROFDATA" \
   --ignore-filename-regex='(\.build/|Tests/)'
