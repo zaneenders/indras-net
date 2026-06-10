@@ -1,5 +1,5 @@
-import NIOPosix
 import Testing
+import TestUtils
 
 @testable import IndrasNet
 

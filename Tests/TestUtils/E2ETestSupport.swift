@@ -1,16 +1,17 @@
 import Foundation
 import Subprocess
+import Testing
+
+@testable import IndrasNet
+
 #if canImport(System)
 import System
 #else
 import SystemPackage
 #endif
-import Testing
 
-@testable import IndrasNet
-
-enum E2ETestSupport {
-  static func packageRoot() throws -> FilePath {
+public enum E2ETestSupport {
+  public static func packageRoot() throws -> FilePath {
     var url = URL(fileURLWithPath: #filePath)
     let fileManager = FileManager.default
     while url.path != "/" {
@@ -23,7 +24,7 @@ enum E2ETestSupport {
     throw MissingPackageRoot()
   }
 
-  static func locateExecutable(named name: String) throws -> FilePath? {
+  public static func locateExecutable(named name: String) throws -> FilePath? {
     let root = try packageRoot()
     let fileManager = FileManager.default
 
@@ -45,7 +46,7 @@ enum E2ETestSupport {
     return nil
   }
 
-  static func buildProduct(named binary: String) async throws -> FilePath {
+  public static func buildProduct(named binary: String) async throws -> FilePath {
     if let path = try locateExecutable(named: binary) {
       return path
     }
@@ -72,7 +73,7 @@ enum E2ETestSupport {
     return path
   }
 
-  static func processPlatformOptions() -> PlatformOptions {
+  public static func processPlatformOptions() -> PlatformOptions {
     var options = PlatformOptions()
     options.teardownSequence = [
       .send(signal: .interrupt, allowedDurationToNextStep: .seconds(2)),
@@ -82,7 +83,7 @@ enum E2ETestSupport {
   }
 
   @discardableResult
-  static func runNode(
+  public static func runNode(
     binary: FilePath,
     arguments: [String],
     log: NodeLog,
@@ -109,7 +110,7 @@ enum E2ETestSupport {
     }
   }
 
-  static func waitForRunning(log: NodeLog, timeout: Duration) async throws {
+  public static func waitForRunning(log: NodeLog, timeout: Duration) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
@@ -123,7 +124,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForAllMinRequestVoteSent(
+  public static func waitForAllMinRequestVoteSent(
     logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
@@ -164,7 +165,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForAllMinRequestVoteReceived(
+  public static func waitForAllMinRequestVoteReceived(
     logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
@@ -205,7 +206,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForMinAppendEntriesSent(
+  public static func waitForMinAppendEntriesSent(
     logs: [NodeLog],
     nodes: [String],
     baselines: [Int],
@@ -232,7 +233,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForMinClusterRequestVoteReceived(
+  public static func waitForMinClusterRequestVoteReceived(
     logs: [NodeLog],
     nodes: [String],
     minimum: Int,
@@ -255,7 +256,7 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
-  static func waitForMinRequestVoteReceived(
+  public static func waitForMinRequestVoteReceived(
     log: NodeLog,
     node: String,
     minimum: Int,
@@ -278,26 +279,28 @@ enum E2ETestSupport {
 
 }
 
-actor NodeLog {
+public actor NodeLog {
   private var lines: [String] = []
 
-  func record(_ line: String) {
+  public init() {}
+
+  public func record(_ line: String) {
     lines.append(line)
   }
 
-  func allLines() -> [String] {
+  public func allLines() -> [String] {
     lines
   }
 
-  func hasRunning() -> Bool {
+  public func hasRunning() -> Bool {
     lines.contains { $0.contains("running (Ctrl+C to stop)") }
   }
 
-  func lineCount() -> Int {
+  public func lineCount() -> Int {
     lines.count
   }
 
-  func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
+  public func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
     MeshEventCounts(
       requestVoteSent: requestVoteSentCount(node: node, since: startIndex),
       requestVoteReceived: requestVoteReceivedCount(node: node, since: startIndex),
@@ -312,31 +315,45 @@ actor NodeLog {
     lines.dropFirst(startIndex)
   }
 
-  func requestVoteSentCount(node: String, since startIndex: Int = 0) -> Int {
+  public func requestVoteSentCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] requestVote ->") }
   }
 
-  func requestVoteReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+  public func requestVoteReceivedCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] requestVote <-") }
   }
 
-  func requestVoteResponseSentCount(node: String, since startIndex: Int = 0) -> Int {
+  public func requestVoteResponseSentCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse ->") }
   }
 
-  func requestVoteResponseReceivedCount(node: String, since startIndex: Int = 0) -> Int {
+  public func requestVoteResponseReceivedCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse <-") }
   }
 
-  func appendEntriesSentCount(node: String, since startIndex: Int = 0) -> Int {
+  public func appendEntriesSentCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] appendEntries ->") }
   }
 }
 
-struct MeshEventCounts: Equatable {
-  var requestVoteSent: Int
-  var requestVoteReceived: Int
-  var requestVoteResponseSent: Int
-  var requestVoteResponseReceived: Int
-  var appendEntriesSent: Int
+public struct MeshEventCounts: Equatable, Sendable {
+  public var requestVoteSent: Int
+  public var requestVoteReceived: Int
+  public var requestVoteResponseSent: Int
+  public var requestVoteResponseReceived: Int
+  public var appendEntriesSent: Int
+
+  public init(
+    requestVoteSent: Int,
+    requestVoteReceived: Int,
+    requestVoteResponseSent: Int,
+    requestVoteResponseReceived: Int,
+    appendEntriesSent: Int
+  ) {
+    self.requestVoteSent = requestVoteSent
+    self.requestVoteReceived = requestVoteReceived
+    self.requestVoteResponseSent = requestVoteResponseSent
+    self.requestVoteResponseReceived = requestVoteResponseReceived
+    self.appendEntriesSent = appendEntriesSent
+  }
 }
