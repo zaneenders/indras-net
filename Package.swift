@@ -32,6 +32,10 @@ let package = Package(
       ]
     ),
     .testTarget(
+      name: "IndrasNetInstanceTests",
+      dependencies: ["IndrasNet"]
+    ),
+    .testTarget(
       name: "IndrasNetTests",
       dependencies: [
         "IndrasNet",
