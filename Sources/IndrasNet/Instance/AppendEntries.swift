@@ -7,6 +7,9 @@ enum AppendEntries {
 
     enum Action: Equatable {
       case scheduleNext(delay: Duration)
+      case sendAppendEntry(to: PeerId, args: Args)
+      case apply(entry: LogEntry)
+      case persist
     }
 
     init(term: Term, success: Bool) {
@@ -36,21 +39,42 @@ enum AppendEntries {
   struct Args: Equatable, Sendable {
     let term: Term
     let leaderId: PeerId
+    let prevLogIndex: LogIndex
+    let prevLogTerm: Term
+    let entries: [LogEntry]
+    let leaderCommit: LogIndex
 
     enum Action: Equatable {
       case sendAppendEntriesReply(to: PeerId, term: Term, success: Bool)
       case scheduleNext(delay: Duration)
+      case apply(entry: LogEntry)
+      case persist
     }
 
-    init(term: Term, leaderId: PeerId) {
+    init(
+      term: Term,
+      leaderId: PeerId,
+      prevLogIndex: LogIndex = 0,
+      prevLogTerm: Term = 0,
+      entries: [LogEntry] = [],
+      leaderCommit: LogIndex = 0
+    ) {
       self.term = term
       self.leaderId = leaderId
+      self.prevLogIndex = prevLogIndex
+      self.prevLogTerm = prevLogTerm
+      self.entries = entries
+      self.leaderCommit = leaderCommit
     }
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
       payload.writeInteger(term)
       payload.writePeerId(leaderId)
+      payload.writeInteger(prevLogIndex)
+      payload.writeInteger(prevLogTerm)
+      payload.writeInteger(leaderCommit)
+      payload.writeLogEntries(entries)
       return Message(type: .appendEntries, payload: payload)
     }
 
@@ -59,10 +83,18 @@ enum AppendEntries {
       var payload = message.payload
       guard
         let term = payload.readInteger(as: Term.self),
-        let leaderId = payload.readPeerId()
+        let leaderId = payload.readPeerId(),
+        let prevLogIndex = payload.readInteger(as: LogIndex.self),
+        let prevLogTerm = payload.readInteger(as: Term.self),
+        let leaderCommit = payload.readInteger(as: LogIndex.self),
+        let entries = payload.readLogEntries()
       else { return nil }
       self.term = term
       self.leaderId = leaderId
+      self.prevLogIndex = prevLogIndex
+      self.prevLogTerm = prevLogTerm
+      self.entries = entries
+      self.leaderCommit = leaderCommit
     }
   }
 }

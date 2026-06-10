@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import IndrasNet
@@ -27,12 +28,12 @@ import Testing
       directives.contains(
         .requestVote(
           to: "b",
-          args: RequestVote.Args(term: 1, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
+          args: RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
     #expect(
       directives.contains(
         .requestVote(
           to: "c",
-          args: RequestVote.Args(term: 1, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
+          args: RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
     let scheduleNext = directives.compactMap {
       if case .scheduleNext(let delay) = $0 { delay } else { nil }
     }.last
@@ -58,12 +59,12 @@ import Testing
       directives.contains(
         .requestVote(
           to: "b",
-          args: RequestVote.Args(term: 2, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
+          args: RequestVote.Args(term: 2, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
     #expect(
       directives.contains(
         .requestVote(
           to: "c",
-          args: RequestVote.Args(term: 2, candidateId: "a", lostLogIndex: 0, lastLogTerm: 0))))
+          args: RequestVote.Args(term: 2, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
     let scheduleNext = directives.compactMap {
       if case .scheduleNext(let delay) = $0 { delay } else { nil }
     }.last
@@ -77,7 +78,7 @@ import Testing
 
   @Test func leaderRejectsRequestVote() {
     var instance = Instance(id: "leader", peers: ["b"], role: .leader, currentTerm: 2)
-    let request = RequestVote.Args(term: 2, candidateId: "b", lostLogIndex: 0, lastLogTerm: 0)
+    let request = RequestVote.Args(term: 2, candidateId: "b", lastLogIndex: 0, lastLogTerm: 0)
 
     let actions = instance.receiveRequestVote("b", request, at: ContinuousClock.now)
 
@@ -127,7 +128,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 1)
 
     let request = RequestVote.Args(
-      term: 1, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
+      term: 1, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
 
     #expect(instance.votedFor == "candidate")
@@ -146,7 +147,7 @@ import Testing
   @Test func rejectsVoteForSecondCandidateInSameTerm() {
     var instance = Instance(id: "follower", currentTerm: 1, votedFor: "first")
 
-    let request = RequestVote.Args(term: 1, candidateId: "second", lostLogIndex: 0, lastLogTerm: 0)
+    let request = RequestVote.Args(term: 1, candidateId: "second", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVote("second", request, at: ContinuousClock.now)
 
     #expect(instance.votedFor == "first")
@@ -156,7 +157,7 @@ import Testing
   @Test func rejectsVoteFromStaleTerm() {
     var instance = Instance(id: "follower", currentTerm: 3)
 
-    let request = RequestVote.Args(term: 2, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
+    let request = RequestVote.Args(term: 2, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
 
     #expect(instance.votedFor == nil)
@@ -167,7 +168,7 @@ import Testing
     var instance = Instance(
       id: "follower", role: .candidate, currentTerm: 1, votes: ["follower": true])
 
-    let request = RequestVote.Args(term: 3, candidateId: "candidate", lostLogIndex: 0, lastLogTerm: 0)
+    let request = RequestVote.Args(term: 3, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
 
     #expect(instance.role == .follower)
@@ -313,6 +314,184 @@ import Testing
         $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
           && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
       } == true)
+  }
+
+  @Test func rejectsVoteWhenCandidateLogIsStale() {
+    let entry = LogEntry(term: 1, command: Data("x".utf8))
+    var instance = Instance(id: "follower", currentTerm: 1, log: .sentinel + [entry])
+
+    let request = RequestVote.Args(term: 1, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+
+    #expect(instance.votedFor == nil)
+    #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: false)))
+  }
+
+  @Test func grantsVoteWhenCandidateLogIsMoreUpToDate() {
+    let entry = LogEntry(term: 2, command: Data("x".utf8))
+    var instance = Instance(id: "follower", currentTerm: 1, log: .sentinel + [entry])
+
+    let request = RequestVote.Args(term: 1, candidateId: "candidate", lastLogIndex: 1, lastLogTerm: 2)
+    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+
+    #expect(instance.votedFor == "candidate")
+    #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)))
+  }
+
+  @Test func appendEntriesReplicatesLogEntries() {
+    var instance = Instance(id: "follower", currentTerm: 1)
+    let entries = [LogEntry(term: 1, command: Data("cmd".utf8))]
+
+    let actions = instance.receiveAppendEntries(
+      "leader",
+      .init(
+        term: 1,
+        leaderId: "leader",
+        prevLogIndex: 0,
+        prevLogTerm: 0,
+        entries: entries,
+        leaderCommit: 1
+      ),
+      at: ContinuousClock.now
+    )
+
+    #expect(instance.log.count == 2)
+    #expect(instance.log[1] == entries[0])
+    #expect(instance.commitIndex == 1)
+    #expect(actions.contains(.apply(entry: entries[0])))
+    #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 1, success: true)))
+  }
+
+  @Test func appendEntriesRejectsMismatchedPreviousEntry() {
+    let stale = LogEntry(term: 1, command: Data("old".utf8))
+    var instance = Instance(id: "follower", currentTerm: 2, log: .sentinel + [stale])
+
+    let actions = instance.receiveAppendEntries(
+      "leader",
+      .init(
+        term: 2,
+        leaderId: "leader",
+        prevLogIndex: 1,
+        prevLogTerm: 9,
+        entries: [LogEntry(term: 2, command: Data("new".utf8))],
+        leaderCommit: 1
+      ),
+      at: ContinuousClock.now
+    )
+
+    #expect(instance.log.count == 2)
+    #expect(actions == [.sendAppendEntriesReply(to: "leader", term: 2, success: false)])
+  }
+
+  @Test func appendEntriesTruncatesConflictingSuffix() {
+    let first = LogEntry(term: 1, command: Data("a".utf8))
+    let conflict = LogEntry(term: 1, command: Data("b".utf8))
+    var instance = Instance(id: "follower", currentTerm: 2, log: .sentinel + [first, conflict])
+
+    let replacement = LogEntry(term: 2, command: Data("c".utf8))
+    _ = instance.receiveAppendEntries(
+      "leader",
+      .init(
+        term: 2,
+        leaderId: "leader",
+        prevLogIndex: 1,
+        prevLogTerm: 1,
+        entries: [replacement, LogEntry(term: 2, command: Data("d".utf8))],
+        leaderCommit: 2
+      ),
+      at: ContinuousClock.now
+    )
+
+    #expect(instance.log.map(\.command) == [Data(), first.command, replacement.command, Data("d".utf8)])
+    #expect(instance.lastLogIndex == 3)
+  }
+
+  @Test func leaderBackoffSendsMissingLogEntries() throws {
+    let entry = LogEntry(term: 2, command: Data("set z=3".utf8))
+    var leader = Instance(
+      id: "a", peers: ["b"], role: .leader, currentTerm: 2, log: .sentinel + [entry])
+
+    _ = leader.onTimerTick(at: ContinuousClock.now)
+    let backoffActions = leader.receiveAppendEntriesReply(
+      "b", .init(term: 2, success: false), at: ContinuousClock.now)
+
+    let resendArgs = try #require(
+      backoffActions.compactMap { action -> AppendEntries.Args? in
+        if case .sendAppendEntry(_, let args) = action { args } else { nil }
+      }.first)
+    #expect(resendArgs.prevLogIndex == 0)
+    #expect(resendArgs.entries == [entry])
+  }
+
+  @Test func leaderReplicationRoundTripReachesFollower() throws {
+    let entry = LogEntry(term: 2, command: Data("set z=3".utf8))
+    var leader = Instance(
+      id: "a", peers: ["b"], role: .leader, currentTerm: 2, log: .sentinel + [entry])
+    var follower = Instance(id: "b", currentTerm: 2)
+
+    _ = leader.onTimerTick(at: ContinuousClock.now)
+    let backoffActions = leader.receiveAppendEntriesReply(
+      "b", .init(term: 2, success: false), at: ContinuousClock.now)
+    let resendArgs = try #require(
+      backoffActions.compactMap { action -> AppendEntries.Args? in
+        if case .sendAppendEntry(_, let args) = action { args } else { nil }
+      }.first)
+
+    _ = follower.receiveAppendEntries("a", resendArgs, at: ContinuousClock.now)
+    #expect(follower.log[1] == entry)
+
+    _ = leader.receiveAppendEntriesReply("b", .init(term: 2, success: true), at: ContinuousClock.now)
+    #expect(leader.commitIndex == 1)
+
+    let heartbeat = try #require(
+      leader.onTimerTick(at: ContinuousClock.now).compactMap { directive -> AppendEntries.Args? in
+        if case .sendAppendEntry(_, let args) = directive { args } else { nil }
+      }.first)
+    #expect(heartbeat.leaderCommit == 1)
+
+    let followerActions = follower.receiveAppendEntries("a", heartbeat, at: ContinuousClock.now)
+    #expect(follower.commitIndex == 1)
+    #expect(followerActions.contains(.apply(entry: entry)))
+  }
+
+  @Test func leaderAdvancesCommitIndexWithMajorityMatch() {
+    let entry = LogEntry(term: 2, command: Data("x".utf8))
+    var instance = Instance(
+      id: "a",
+      peers: ["b", "c"],
+      role: .leader,
+      currentTerm: 2,
+      log: .sentinel + [entry]
+    )
+
+    _ = instance.onTimerTick(at: ContinuousClock.now)
+    let actions = instance.receiveAppendEntriesReply("b", .init(term: 2, success: true), at: ContinuousClock.now)
+
+    #expect(instance.commitIndex == 1)
+    #expect(actions.contains(.apply(entry: entry)))
+  }
+
+  @Test func leaderStepsBackNextIndexOnReplicationFailure() {
+    let first = LogEntry(term: 1, command: Data("a".utf8))
+    let second = LogEntry(term: 2, command: Data("b".utf8))
+    var instance = Instance(
+      id: "a",
+      peers: ["b"],
+      role: .leader,
+      currentTerm: 2,
+      log: .sentinel + [first, second]
+    )
+
+    _ = instance.onTimerTick(at: ContinuousClock.now)
+    let actions = instance.receiveAppendEntriesReply("b", .init(term: 2, success: false), at: ContinuousClock.now)
+
+    #expect(
+      actions.contains { action in
+        if case .sendAppendEntry(let peer, let args) = action {
+          return peer == "b" && args.prevLogIndex == 1 && args.entries == [second]
+        }
+        return false
+      })
   }
 
   @Test func stepsDownWhenAppendEntriesReplyHasHigherTerm() {

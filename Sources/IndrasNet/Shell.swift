@@ -119,6 +119,10 @@ extension Shell {
         deliverAppendEntriesReply(to: to, term: term, success: success)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .apply(let entry):
+        applyLogEntry(entry)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
@@ -132,10 +136,20 @@ extension Shell {
       switch action {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .sendAppendEntry(let peer, let args):
+        deliverAppendEntries(to: peer, args: args)
+      case .apply(let entry):
+        applyLogEntry(entry)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
+  }
+
+  private func applyLogEntry(_ entry: LogEntry) {
+    logger.info("[\(peerId)] applied log entry term=\(entry.term) bytes=\(entry.command.count)")
   }
 
   private func logRoleChangeIfNeeded(from previousRole: Role) {

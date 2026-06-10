@@ -1,3 +1,4 @@
+import Foundation
 import NIOCore
 import NIOEmbedded
 import Testing
@@ -27,7 +28,7 @@ import Testing
   }
 
   @Test func requestVoteArgsRoundTripThroughCodec() throws {
-    let args = RequestVote.Args(term: 2, candidateId: "node-a", lostLogIndex: 3, lastLogTerm: 4)
+    let args = RequestVote.Args(term: 2, candidateId: "node-a", lastLogIndex: 3, lastLogTerm: 4)
     let original = args.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())
     let roundTripped = try #require(RequestVote.Args(from: decoded))
@@ -43,6 +44,25 @@ import Testing
   }
 
   @Test func appendEntriesArgsRoundTripThroughCodec() throws {
+    let entries = [
+      LogEntry(term: 1, command: Data("set x=1".utf8)),
+      LogEntry(term: 3, command: Data("set y=2".utf8)),
+    ]
+    let args = AppendEntries.Args(
+      term: 3,
+      leaderId: "leader-1",
+      prevLogIndex: 2,
+      prevLogTerm: 1,
+      entries: entries,
+      leaderCommit: 3
+    )
+    let original = args.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(AppendEntries.Args(from: decoded))
+    #expect(roundTripped == args)
+  }
+
+  @Test func appendEntriesHeartbeatRoundTripThroughCodec() throws {
     let args = AppendEntries.Args(term: 3, leaderId: "leader-1")
     let original = args.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())

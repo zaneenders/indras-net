@@ -1,13 +1,14 @@
 import Foundation
 import Subprocess
+import Testing
+
+@testable import IndrasNet
+
 #if canImport(System)
 import System
 #else
 import SystemPackage
 #endif
-import Testing
-
-@testable import IndrasNet
 
 enum E2ETestSupport {
   static func packageRoot() throws -> FilePath {

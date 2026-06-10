@@ -1,0 +1,1 @@
+typealias LogIndex = UInt128
