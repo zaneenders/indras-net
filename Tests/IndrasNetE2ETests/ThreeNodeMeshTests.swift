@@ -17,7 +17,7 @@ import Testing
     let minimumLeaderHeartbeats = 2
 
     func nodeArguments(port: Int) -> [String] {
-      [host, String(port), "--cluster", clusterPath]
+      [host, String(port), "--cluster", clusterPath, "--log-level", "trace"]
     }
 
     var countsDuringWindow: [(String, MeshEventCounts)] = []

@@ -243,7 +243,7 @@ public actor TCPTransport {
           guard self.adopt(connection, peerID: peerID, origin: origin) else {
             return
           }
-          self.logger.info("Connection: \(peerID)")
+          self.logger.debug("Connection: \(peerID)")
         }
       }
     } catch {
@@ -262,7 +262,7 @@ public actor TCPTransport {
         return false
       }
       existing.channel.close(promise: nil)
-      self.logger.info("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
+      self.logger.debug("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }
     self.connections[peerID] = connection
     return true

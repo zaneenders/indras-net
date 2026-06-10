@@ -51,7 +51,7 @@ struct ShellActionLogHandler: LogHandler {
   let selfNode: String
   let recorder: ShellActionRecorder
 
-  var logLevel: Logger.Level = .info
+  var logLevel: Logger.Level = .trace
   var metadata: Logger.Metadata = [:]
 
   subscript(metadataKey key: String) -> Logger.Metadata.Value? {
@@ -77,7 +77,9 @@ struct ShellActionLogHandler: LogHandler {
 extension TestHelpers {
   static func shellLogger(node: NodeAddress, recorder: ShellActionRecorder) -> Logger {
     let handler = ShellActionLogHandler(selfNode: node.addressKey, recorder: recorder)
-    return Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
+    var logger = Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
+    logger.logLevel = .trace
+    return logger
   }
 
   static func electionOccurred(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {

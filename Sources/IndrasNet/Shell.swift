@@ -37,42 +37,42 @@ extension Shell {
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
-    await deliver(to: peer, message: .requestVote(args), kind: "requestVote")
+    await deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
   }
 
   private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) async {
     await deliver(
       to: peer,
       message: .requestVoteReply(.init(granted: voteGranted, term: term)),
-      kind: "requestVoteResponse"
+      context: .requestVoteResponse(direction: "out", peer: peer, term: term, granted: voteGranted)
     )
   }
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) async {
-    await deliver(to: peer, message: .appendEntries(args), kind: "appendEntries")
+    await deliver(to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
   }
 
   private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) async {
     await deliver(
       to: peer,
       message: .appendEntriesReply(.init(term: term, success: success)),
-      kind: "appendEntriesResponse"
+      context: .appendEntriesResponse(direction: "out", peer: peer, term: term, success: success)
     )
   }
 
   func receiveMessage(message: AppMessage, from peer: PeerId) async {
     switch message {
     case .requestVote(let args):
-      logEvent(kind: "requestVote", direction: "in", peer: peer)
+      logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
       await receiveRequestVote(from: peer, request: args)
     case .requestVoteReply(let reply):
-      logEvent(kind: "requestVoteResponse", direction: "in", peer: peer)
+      logRaftEvent(.requestVoteResponse(direction: "in", peer: peer, term: reply.term, granted: reply.granted))
       await receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
-      logEvent(kind: "appendEntries", direction: "in", peer: peer)
+      logRaftEvent(.appendEntries(direction: "in", peer: peer, term: args.term))
       await receiveAppendEntries(from: peer, args: args)
     case .appendEntriesReply(let reply):
-      logEvent(kind: "appendEntriesResponse", direction: "in", peer: peer)
+      logRaftEvent(.appendEntriesResponse(direction: "in", peer: peer, term: reply.term, success: reply.success))
       await receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
@@ -139,9 +139,19 @@ extension Shell {
 
   private func logRoleChangeIfNeeded(from previousRole: Role) {
     guard instance.role != previousRole else { return }
-    if instance.role == .leader {
-      logger.info("[\(peerId)] became leader in term \(instance.currentTerm)")
+    let term = instance.currentTerm
+    switch instance.role {
+    case .leader:
+      logger.info("[\(peerId)] became leader in term \(term)")
+    case .candidate:
+      logger.info("[\(peerId)] became candidate in term \(term)")
+    case .follower:
+      logger.info("[\(peerId)] became follower in term \(term)")
     }
+  }
+
+  private func logRaftEvent(_ context: RaftLogContext) {
+    logger.log(level: context.level, "\(context.message(selfNode: peerId))", metadata: context.metadata)
   }
 }
 
@@ -190,17 +200,17 @@ public actor Shell {
     return port
   }
 
-  private func deliver(to peer: PeerId, message: AppMessage, kind: String) async {
+  private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
     do {
       guard await ensureConnected(to: peer) else { return }
       try await transport.send(message, to: peer)
-      logEvent(kind: kind, direction: "out", peer: peer)
+      logRaftEvent(context)
     } catch is CancellationError {
       return
     } catch IndrasNetTransportError.peerNotConnected {
       return
     } catch {
-      self.logger.notice("[\(self.peerId)] \(kind) -> \(peer) failed: \(error)")
+      self.logger.notice("[\(self.peerId)] \(context.kind) -> \(peer) failed: \(error)")
     }
   }
 
@@ -240,24 +250,85 @@ public actor Shell {
     }
     return false
   }
-
-  private func logEvent(kind: String, direction: String, peer: PeerId) {
-    let arrow = direction == "out" ? "->" : "<-"
-    self.logger.info(
-      "[\(self.peerId)] \(kind) \(arrow) \(peer)",
-      metadata: [
-        ShellLogKey.kind: .string(kind),
-        ShellLogKey.direction: .string(direction),
-        ShellLogKey.peer: .string(peer),
-      ]
-    )
-  }
 }
 
 enum ShellLogKey {
   static let kind = "shell.kind"
   static let direction = "shell.direction"
   static let peer = "shell.peer"
+}
+
+private struct RaftLogContext {
+  let kind: String
+  let direction: String
+  let peer: PeerId
+  let term: Term
+  var granted: Bool?
+  var success: Bool?
+
+  var level: Logger.Level {
+    switch kind {
+    case "appendEntries", "appendEntriesResponse":
+      if success == false { return .info }
+      return .trace
+    default:
+      return .info
+    }
+  }
+
+  var metadata: Logger.Metadata {
+    var metadata: Logger.Metadata = [
+      ShellLogKey.kind: .string(kind),
+      ShellLogKey.direction: .string(direction),
+      ShellLogKey.peer: .string(peer),
+    ]
+    metadata["shell.term"] = .stringConvertible(term)
+    if let granted {
+      metadata["shell.granted"] = .stringConvertible(granted)
+    }
+    if let success {
+      metadata["shell.success"] = .stringConvertible(success)
+    }
+    return metadata
+  }
+
+  func message(selfNode: PeerId) -> String {
+    let arrow = direction == "out" ? "->" : "<-"
+    var text = "[\(selfNode)] \(kind) \(arrow) \(peer) term=\(term)"
+    if let granted {
+      text += granted ? " granted" : " denied"
+    }
+    if success == false {
+      text += " rejected"
+    }
+    return text
+  }
+
+  static func requestVote(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
+    RaftLogContext(kind: "requestVote", direction: direction, peer: peer, term: term)
+  }
+
+  static func requestVoteResponse(
+    direction: String,
+    peer: PeerId,
+    term: Term,
+    granted: Bool
+  ) -> RaftLogContext {
+    RaftLogContext(kind: "requestVoteResponse", direction: direction, peer: peer, term: term, granted: granted)
+  }
+
+  static func appendEntries(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
+    RaftLogContext(kind: "appendEntries", direction: direction, peer: peer, term: term)
+  }
+
+  static func appendEntriesResponse(
+    direction: String,
+    peer: PeerId,
+    term: Term,
+    success: Bool
+  ) -> RaftLogContext {
+    RaftLogContext(kind: "appendEntriesResponse", direction: direction, peer: peer, term: term, success: success)
+  }
 }
 
 public enum ShellError: Error, LocalizedError {

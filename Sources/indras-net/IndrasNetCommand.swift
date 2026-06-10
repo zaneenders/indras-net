@@ -3,23 +3,25 @@ import IndrasNet
 import Logging
 import Synchronization
 
-private let log = Logger(label: "indras-net")
-
 @main
 struct IndrasNetCommand {
   static func main() async {
-    LoggingSystem.bootstrap { StreamLogHandler.standardError(label: $0) }
-
     do {
       if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
         print(usage)
         return
       }
 
-      let (local, clusterPath) = try parseArguments()
+      let (local, clusterPath, logLevel) = try parseArguments()
+      LoggingSystem.bootstrap { label in
+        var handler = StreamLogHandler.standardError(label: label)
+        handler.logLevel = logLevel
+        return handler
+      }
+
       let cluster = try ClusterConfig.load(from: clusterPath)
       let peers = cluster.peers(excluding: local)
-      try await runNode(local: local, peers: peers, timing: cluster.timing)
+      try await runNode(local: local, peers: peers, timing: cluster.timing, logLevel: logLevel)
     } catch let error as CLIError {
       fputs("error: \(error.message)\n\n\(usage)\n", stderr)
       exit(1)
@@ -49,22 +51,35 @@ struct IndrasNetCommand {
 
     Options:
       --cluster <path>       Shared cluster file (default: ./cluster.json)
+      --log-level <level>    Log level: trace, debug, info, notice, warning, error (default: info)
     """
 
   private struct CLIError: Error {
     let message: String
   }
 
-  private static func parseArguments() throws -> (NodeAddress, String) {
+  private static func parseArguments() throws -> (NodeAddress, String, Logger.Level) {
     var args = Array(CommandLine.arguments.dropFirst())
     var clusterPath = "cluster.json"
+    var logLevel: Logger.Level = .info
 
-    if let index = args.firstIndex(of: "--cluster") {
-      args.remove(at: index)
-      guard index < args.count else {
-        throw CLIError(message: "missing path for --cluster")
+    while let flagIndex = args.firstIndex(where: { $0 == "--cluster" || $0 == "--log-level" }) {
+      let flag = args.remove(at: flagIndex)
+      guard flagIndex < args.count else {
+        throw CLIError(message: "missing value for \(flag)")
       }
-      clusterPath = args.remove(at: index)
+      let value = args.remove(at: flagIndex)
+      switch flag {
+      case "--cluster":
+        clusterPath = value
+      case "--log-level":
+        guard let parsed = Logger.Level(rawValue: value.lowercased()) else {
+          throw CLIError(message: "invalid log level '\(value)'")
+        }
+        logLevel = parsed
+      default:
+        break
+      }
     }
 
     guard args.count >= 2 else {
@@ -76,11 +91,32 @@ struct IndrasNetCommand {
       throw CLIError(message: "port must be an integer")
     }
 
-    return (NodeAddress(host: host, port: port), clusterPath)
+    return (NodeAddress(host: host, port: port), clusterPath, logLevel)
   }
 
-  private static func runNode(local: NodeAddress, peers: [NodeAddress], timing: NodeTiming) async throws {
-    let shell = Shell(local, timing: timing)
+  private static func makeLogger(label: String, level: Logger.Level) -> Logger {
+    var logger = Logger(label: label)
+    logger.logLevel = level
+    return logger
+  }
+
+  private static func runNode(
+    local: NodeAddress,
+    peers: [NodeAddress],
+    timing: NodeTiming,
+    logLevel: Logger.Level
+  ) async throws {
+    let log = makeLogger(label: "indras-net", level: logLevel)
+    let transport = TCPTransport(
+      configuration: local.tcpConfiguration(),
+      logger: makeLogger(label: "indras-net.transport", level: logLevel)
+    )
+    let shell = Shell(
+      local,
+      timing: timing,
+      transport: transport,
+      logger: makeLogger(label: "indras-net.shell", level: logLevel)
+    )
     let port = try await shell.start(with: peers)
 
     log.info("node \(local.addressKey) mesh \(local.host):\(port)")
