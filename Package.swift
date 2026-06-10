@@ -10,12 +10,16 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     .package(url: "https://github.com/apple/swift-nio.git", branch: "2.100.0"),
+    .package(url: "https://github.com/apple/swift-system.git", from: "1.6.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", branch: "0.5"),
   ],
   targets: [
     .executableTarget(
       name: "indras-net",
-      dependencies: ["IndrasNet"],
+      dependencies: [
+        "IndrasNet",
+        .product(name: "SystemPackage", package: "swift-system"),
+      ],
       swiftSettings: [
         .treatAllWarnings(as: .error)
       ]
@@ -48,6 +52,7 @@ let package = Package(
       dependencies: [
         "IndrasNet",
         .product(name: "Subprocess", package: "swift-subprocess"),
+        .product(name: "SystemPackage", package: "swift-system"),
       ]
     ),
   ],

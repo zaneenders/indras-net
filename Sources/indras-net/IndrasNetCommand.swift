@@ -2,6 +2,7 @@ import Foundation
 import IndrasNet
 import Logging
 import Synchronization
+import SystemPackage
 
 @main
 struct IndrasNetCommand {
@@ -23,10 +24,10 @@ struct IndrasNetCommand {
       let peers = cluster.peers(excluding: local)
       try await runNode(local: local, peers: peers, timing: cluster.timing, logLevel: logLevel)
     } catch let error as CLIError {
-      fputs("error: \(error.message)\n\n\(usage)\n", stderr)
+      writeStderr("error: \(error.message)\n\n\(usage)\n")
       exit(1)
     } catch {
-      fputs("error: \(error)\n", stderr)
+      writeStderr("error: \(error)\n")
       exit(1)
     }
   }
@@ -56,6 +57,10 @@ struct IndrasNetCommand {
 
   private struct CLIError: Error {
     let message: String
+  }
+
+  private static func writeStderr(_ text: String) {
+    _ = try? FileDescriptor.standardError.writeAll(text.utf8)
   }
 
   private static func parseArguments() throws -> (NodeAddress, String, Logger.Level) {
