@@ -41,11 +41,7 @@ struct Instance {
     return directives
   }
 
-  func initialTimerDelay(at now: ContinuousClock.Instant) -> Duration {
-    getNextDelay(at: now)
-  }
-
-  private func getNextDelay(at now: ContinuousClock.Instant) -> Duration {
+  func getNextDelay(at now: ContinuousClock.Instant) -> Duration {
     switch role {
     case .leader:
       return timing.heartbeatInterval

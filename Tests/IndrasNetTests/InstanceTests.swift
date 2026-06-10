@@ -105,7 +105,7 @@ import Testing
 
   @Test func initialTimerDelayReturnsElectionTimeoutForFollower() {
     let instance = Instance(id: "a", peers: ["b"])
-    let delay = instance.initialTimerDelay(at: ContinuousClock.now)
+    let delay = instance.getNextDelay(at: .now)
     let timing = NodeTiming.default
 
     #expect(
@@ -260,6 +260,25 @@ import Testing
         $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
           && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
       } == true)
+  }
+
+  @Test func sameTermAppendEntriesFromOtherLeaderStepsDownToFollower() {
+    var instance = Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2)
+
+    let actions = instance.receiveAppendEntries(
+      "b", .init(term: 2, leaderId: "b"), at: ContinuousClock.now)
+
+    #expect(instance.role == .follower)
+    #expect(instance.currentTerm == 2)
+    #expect(actions.contains(.sendAppendEntriesReply(to: "b", term: 2, success: true)))
+  }
+
+  @Test func majorityRequiresMoreThanHalfOfCluster() {
+    #expect([PeerId: Bool]().isLeader(2) == false)
+    #expect(["a": true].isLeader(2) == false)
+    #expect(["a": true, "b": true].isLeader(2) == true)
+    #expect(["a": true, "b": true].isLeader(3) == false)
+    #expect(["a": true, "b": true, "c": true].isLeader(3) == true)
   }
 
   @Test func rejectsStaleAppendEntries() {

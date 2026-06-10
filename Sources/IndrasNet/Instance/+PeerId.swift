@@ -1,12 +1,9 @@
 extension [PeerId: Bool] {
-  func isLeader(_ peers: Int) -> Bool {
-    let votes = self.values.reduce(
-      into: 0,
-      { count, votedFor in
-        if votedFor {
-          count += 1
-        }
-      })
-    return votes > peers / 2
+  func isLeader(_ peerCount: Int) -> Bool {
+    let granted = self.values.reduce(into: 0) { count, vote in
+      if vote { count += 1 }
+    }
+    let clusterSize = peerCount + 1
+    return granted * 2 > clusterSize
   }
 }

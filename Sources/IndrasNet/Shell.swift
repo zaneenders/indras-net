@@ -12,21 +12,28 @@ extension Shell {
       var nextDelay: Duration = delay
       repeat {
         try? await Task.sleep(for: nextDelay)
-        let previousRole = instance.role
-
-        for directive in instance.onTimerTick() {
-          switch directive {
-          case .scheduleNext(let delay):
-            nextDelay = delay
-          case .requestVote(let peer, let args):
-            await deliverRequestVote(to: peer, args: args)
-          case .sendAppendEntry(let peer, let args):
-            await deliverAppendEntries(to: peer, args: args)
-          }
-        }
-        logRoleChangeIfNeeded(from: previousRole)
+        if Task.isCancelled { break }
+        nextDelay = await self.handleTimerTick()
       } while !Task.isCancelled
     }
+  }
+
+  private func handleTimerTick() async -> Duration {
+    let previousRole = instance.role
+    var nextDelay = timing.heartbeatInterval
+
+    for directive in instance.onTimerTick() {
+      switch directive {
+      case .scheduleNext(let delay):
+        nextDelay = delay
+      case .requestVote(let peer, let args):
+        await deliverRequestVote(to: peer, args: args)
+      case .sendAppendEntry(let peer, let args):
+        await deliverAppendEntries(to: peer, args: args)
+      }
+    }
+    logRoleChangeIfNeeded(from: previousRole)
+    return nextDelay
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
