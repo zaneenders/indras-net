@@ -6,7 +6,7 @@ import NIOCore
 // This might be able to be a protocl for someone to implment that Shell can run/drive
 extension Shell {
 
-  private func scheduleNext(delay: Duration = .zero) {
+  private func scheduleNext(delay: Duration) {
     timerTask?.cancel()
     timerTask = Task {
       var nextDelay: Duration = delay
@@ -37,7 +37,8 @@ extension Shell {
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
-    await deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
+    await deliver(
+      to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
   }
 
   private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) async {
@@ -49,7 +50,8 @@ extension Shell {
   }
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) async {
-    await deliver(to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
+    await deliver(
+      to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
   }
 
   private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) async {
@@ -190,7 +192,7 @@ public actor Shell {
       await self.receiveMessage(message: message, from: from)
     }
 
-    scheduleNext()
+    scheduleNext(delay: instance.getNextDelay(at: .now))
 
     guard let port = await transport.listenPort() else {
       await stop()

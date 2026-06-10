@@ -6,7 +6,7 @@ struct Instance {
   private(set) var votedFor: PeerId?
   private(set) var peers: Set<PeerId>
   private(set) var votes: [PeerId: Bool]
-  private let timing: NodeTiming
+  let timing: NodeTiming
 
   init(
     id: PeerId,
