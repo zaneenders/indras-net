@@ -19,6 +19,10 @@ public struct ClusterConfig: Decodable, Sendable {
     heartbeatIntervalMs = try container.decodeIfPresent(Int64.self, forKey: .heartbeatIntervalMs) ?? 50
     electionTimeoutMinMs = try container.decodeIfPresent(Int64.self, forKey: .electionTimeoutMinMs) ?? 150
     electionTimeoutMaxMs = try container.decodeIfPresent(Int64.self, forKey: .electionTimeoutMaxMs) ?? 300
+    guard electionTimeoutMinMs < electionTimeoutMaxMs else {
+      throw ClusterConfigError.invalidElectionTimeoutRange(
+        min: electionTimeoutMinMs, max: electionTimeoutMaxMs)
+    }
   }
 
   public var timing: NodeTiming {
@@ -36,5 +40,16 @@ public struct ClusterConfig: Decodable, Sendable {
   public static func load(from path: String) throws -> ClusterConfig {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     return try JSONDecoder().decode(ClusterConfig.self, from: data)
+  }
+}
+
+public enum ClusterConfigError: Error, LocalizedError {
+  case invalidElectionTimeoutRange(min: Int64, max: Int64)
+
+  public var errorDescription: String? {
+    switch self {
+    case .invalidElectionTimeoutRange(let min, let max):
+      "electionTimeoutMinMs (\(min)) must be less than electionTimeoutMaxMs (\(max))"
+    }
   }
 }
