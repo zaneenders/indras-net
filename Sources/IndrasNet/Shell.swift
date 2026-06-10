@@ -204,7 +204,10 @@ public actor Shell {
 
   private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
     do {
-      guard await ensureConnected(to: peer) else { return }
+      guard await ensureConnected(to: peer) else {
+        self.logger.notice("[\(self.peerId)] \(context.kind) -> \(peer) dropped: could not connect")
+        return
+      }
       try await transport.send(message, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
