@@ -13,12 +13,12 @@ extension Shell {
       repeat {
         try? await Task.sleep(for: nextDelay)
         if Task.isCancelled { break }
-        nextDelay = await self.handleTimerTick()
+        nextDelay = self.handleTimerTick()
       } while !Task.isCancelled
     }
   }
 
-  private func handleTimerTick() async -> Duration {
+  private func handleTimerTick() -> Duration {
     let previousRole = instance.role
     var nextDelay = timing.heartbeatInterval
 
@@ -27,67 +27,66 @@ extension Shell {
       case .scheduleNext(let delay):
         nextDelay = delay
       case .requestVote(let peer, let args):
-        await deliverRequestVote(to: peer, args: args)
+        deliverRequestVote(to: peer, args: args)
       case .sendAppendEntry(let peer, let args):
-        await deliverAppendEntries(to: peer, args: args)
+        deliverAppendEntries(to: peer, args: args)
       }
     }
     logRoleChangeIfNeeded(from: previousRole)
     return nextDelay
   }
 
-  private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) async {
-    await deliver(
-      to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
+  private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) {
+    deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
   }
 
-  private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) async {
-    await deliver(
+  private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) {
+    deliver(
       to: peer,
       message: .requestVoteReply(.init(granted: voteGranted, term: term)),
       context: .requestVoteResponse(direction: "out", peer: peer, term: term, granted: voteGranted)
     )
   }
 
-  private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) async {
-    await deliver(
+  private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
+    deliver(
       to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
   }
 
-  private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) async {
-    await deliver(
+  private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) {
+    deliver(
       to: peer,
       message: .appendEntriesReply(.init(term: term, success: success)),
       context: .appendEntriesResponse(direction: "out", peer: peer, term: term, success: success)
     )
   }
 
-  func receiveMessage(message: AppMessage, from peer: PeerId) async {
+  func receiveMessage(message: AppMessage, from peer: PeerId) {
     switch message {
     case .requestVote(let args):
       logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
-      await receiveRequestVote(from: peer, request: args)
+      receiveRequestVote(from: peer, request: args)
     case .requestVoteReply(let reply):
       logRaftEvent(.requestVoteResponse(direction: "in", peer: peer, term: reply.term, granted: reply.granted))
-      await receiveRequestVoteReply(from: peer, reply: reply)
+      receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
       logRaftEvent(.appendEntries(direction: "in", peer: peer, term: args.term))
-      await receiveAppendEntries(from: peer, args: args)
+      receiveAppendEntries(from: peer, args: args)
     case .appendEntriesReply(let reply):
       logRaftEvent(.appendEntriesResponse(direction: "in", peer: peer, term: reply.term, success: reply.success))
-      await receiveAppendEntriesReply(from: peer, reply: reply)
+      receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
 
-  private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) async {
+  private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) {
     let previousRole = instance.role
 
     for action in instance.receiveRequestVote(peer, request) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
-        await deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
+        deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
       case .persist:
-        ()
+        ()  // TODO: persist state
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       }
@@ -96,13 +95,13 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) async {
+  private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
     let previousRole = instance.role
 
     for action in instance.receiveRequestVoteReply(peer, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
-        await deliverAppendEntries(to: peer, args: args)
+        deliverAppendEntries(to: peer, args: args)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       }
@@ -111,13 +110,13 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) async {
+  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
     let previousRole = instance.role
 
     for action in instance.receiveAppendEntries(leader, args) {
       switch action {
       case .sendAppendEntriesReply(let to, let term, let success):
-        await deliverAppendEntriesReply(to: to, term: term, success: success)
+        deliverAppendEntriesReply(to: to, term: term, success: success)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       }
@@ -126,7 +125,7 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) async {
+  private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
     let previousRole = instance.role
 
     for action in instance.receiveAppendEntriesReply(peer, reply) {
@@ -165,6 +164,8 @@ public actor Shell {
   private let logger: Logger
   private var endpoints: [PeerId: NodeAddress] = [:]
   private var timerTask: Task<Void, Never>?
+  private var isStopped = false
+  private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
   private let timing: NodeTiming
 
   public init(
@@ -185,6 +186,7 @@ public actor Shell {
   }
 
   public func start(with peers: [NodeAddress]) async throws -> Int {
+    isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
     self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing)
 
@@ -202,10 +204,23 @@ public actor Shell {
     return port
   }
 
-  private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
+  private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) {
+    guard !isStopped else { return }
+
+    let id = UUID()
+
+    inflightDeliveries[id] = Task {
+      await self.performDelivery(to: peer, message: message, context: context)
+      await self.deliveryFinished(id: id)
+    }
+  }
+
+  private func performDelivery(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
+    guard !Task.isCancelled else { return }
+
     do {
       guard await ensureConnected(to: peer) else {
-        self.logger.notice("[\(self.peerId)] \(context.kind) -> \(peer) dropped: could not connect")
+        logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
@@ -215,8 +230,12 @@ public actor Shell {
     } catch IndrasNetTransportError.peerNotConnected {
       return
     } catch {
-      self.logger.notice("[\(self.peerId)] \(context.kind) -> \(peer) failed: \(error)")
+      logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
     }
+  }
+
+  private func deliveryFinished(id: UUID) async {
+    inflightDeliveries.removeValue(forKey: id)
   }
 
   public func shutdown() async throws {
@@ -229,9 +248,20 @@ public actor Shell {
   }
 
   public func stop() async {
+    isStopped = true
+
     timerTask?.cancel()
     _ = await timerTask?.value
     timerTask = nil
+
+    let deliveries = Array(inflightDeliveries.values)
+    inflightDeliveries.removeAll()
+    for task in deliveries {
+      task.cancel()
+    }
+    for task in deliveries {
+      _ = await task.value
+    }
   }
 
   private func ensureConnected(to peer: PeerId) async -> Bool {
