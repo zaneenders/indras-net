@@ -5,8 +5,8 @@ import Testing
 
 @testable import IndrasNet
 
-enum TestHelpers {
-  static let quietLogger: Logger = {
+public enum TestHelpers {
+  public static let quietLogger: Logger = {
     var logger = Logger(label: "indras-net.test")
     logger.logLevel = .error
     return logger
@@ -14,7 +14,7 @@ enum TestHelpers {
 }
 
 extension TestHelpers {
-  static func withEventLoopGroup<R>(
+  public static func withEventLoopGroup<R>(
     numberOfThreads: Int = 2,
     _ body: (MultiThreadedEventLoopGroup) async throws -> R
   ) async rethrows -> R {
@@ -27,7 +27,7 @@ extension TestHelpers {
     return try await body(group)
   }
 
-  static func waitUntil(
+  public static func waitUntil(
     timeout: Duration,
     pollInterval: Duration = .milliseconds(25),
     condition: () async -> Bool
@@ -44,14 +44,16 @@ extension TestHelpers {
   }
 }
 
-actor MessageCollector {
+public actor MessageCollector {
   private var entries: [(AppMessage, PeerId)] = []
 
-  func record(_ message: AppMessage, from peerID: PeerId) {
+  public init() {}
+
+  public func record(_ message: AppMessage, from peerID: PeerId) {
     self.entries.append((message, peerID))
   }
 
-  func waitForMessage(
+  public func waitForMessage(
     type: AppMessage,
     from peerID: PeerId,
     timeout: Duration
@@ -68,11 +70,11 @@ actor MessageCollector {
     throw MessageCollectorError.timeout
   }
 
-  func count(type: AppMessage, from peerID: PeerId) -> Int {
+  public func count(type: AppMessage, from peerID: PeerId) -> Int {
     self.entries.lazy.filter { $0.0 == type && $0.1 == peerID }.count
   }
 
-  func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> AppMessage {
+  public func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> AppMessage {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
@@ -86,13 +88,13 @@ actor MessageCollector {
   }
 }
 
-enum MessageCollectorError: Error {
+public enum MessageCollectorError: Error {
   case timeout
 }
 
 extension TestHelpers {
   /// Opaque app payload for transport tests — exercises send/receive without asserting Raft semantics.
-  static let transportProbe = AppMessage.appendEntries(
+  public static let transportProbe = AppMessage.appendEntries(
     AppendEntries.Args(term: 0, leaderId: "transport-probe")
   )
 }

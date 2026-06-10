@@ -35,25 +35,32 @@ let package = Package(
         .treatAllWarnings(as: .error)
       ]
     ),
+    .target(
+      name: "TestUtils",
+      dependencies: [
+        "IndrasNet",
+        .product(name: "Logging", package: "swift-log"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "Subprocess", package: "swift-subprocess"),
+        .product(name: "SystemPackage", package: "swift-system"),
+      ],
+      path: "Tests/TestUtils"
+    ),
     .testTarget(
       name: "IndrasNetInstanceTests",
-      dependencies: ["IndrasNet"]
+      dependencies: ["IndrasNet", "TestUtils"]
     ),
     .testTarget(
       name: "IndrasNetTests",
       dependencies: [
         "IndrasNet",
+        "TestUtils",
         .product(name: "NIOEmbedded", package: "swift-nio"),
-        .product(name: "NIOPosix", package: "swift-nio"),
       ]
     ),
     .testTarget(
       name: "IndrasNetE2ETests",
-      dependencies: [
-        "IndrasNet",
-        .product(name: "Subprocess", package: "swift-subprocess"),
-        .product(name: "SystemPackage", package: "swift-system"),
-      ]
+      dependencies: ["IndrasNet", "TestUtils"]
     ),
   ],
   swiftLanguageModes: [.v6]
