@@ -17,7 +17,7 @@ enum RequestVote {
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
-      payload.writeInteger(Int64(term))
+      payload.writeInteger(term)
       payload.writeInteger(granted ? UInt8(1) : UInt8(0))
       return Message(type: .requestVoteResponse, payload: payload)
     }
@@ -26,16 +26,16 @@ enum RequestVote {
       guard message.type == .requestVoteResponse else { return nil }
       var payload = message.payload
       guard
-        let term = payload.readInteger(as: Int64.self),
+        let term = payload.readInteger(as: Term.self),
         let voteGranted = payload.readInteger(as: UInt8.self)
       else { return nil }
       self.granted = voteGranted != 0
-      self.term = Int(term)
+      self.term = term
     }
   }
 
   struct Args: Equatable, Sendable {
-    let term: Int
+    let term: Term
     let candidateId: PeerId
     let lostLogIndex: Int
     let lastLogTerm: Int
@@ -46,7 +46,7 @@ enum RequestVote {
       case persist
     }
 
-    init(term: Int, candidateId: PeerId, lostLogIndex: Int, lastLogTerm: Int) {
+    init(term: Term, candidateId: PeerId, lostLogIndex: Int, lastLogTerm: Int) {
       self.term = term
       self.candidateId = candidateId
       self.lostLogIndex = lostLogIndex
@@ -55,7 +55,7 @@ enum RequestVote {
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
-      payload.writeInteger(Int64(term))
+      payload.writeInteger(term)
       payload.writeInteger(Int64(lostLogIndex))
       payload.writeInteger(Int64(lastLogTerm))
       payload.writePeerId(candidateId)
@@ -66,12 +66,12 @@ enum RequestVote {
       guard message.type == .requestVote else { return nil }
       var payload = message.payload
       guard
-        let term = payload.readInteger(as: Int64.self),
+        let term = payload.readInteger(as: Term.self),
         let lostLogIndex = payload.readInteger(as: Int64.self),
         let lastLogTerm = payload.readInteger(as: Int64.self),
         let candidateId = payload.readPeerId()
       else { return nil }
-      self.term = Int(term)
+      self.term = term
       self.lostLogIndex = Int(lostLogIndex)
       self.lastLogTerm = Int(lastLogTerm)
       self.candidateId = candidateId

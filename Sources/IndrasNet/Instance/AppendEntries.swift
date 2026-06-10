@@ -16,7 +16,7 @@ enum AppendEntries {
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
-      payload.writeInteger(Int64(term))
+      payload.writeInteger(term)
       payload.writeInteger(success ? UInt8(1) : UInt8(0))
       return Message(type: .appendEntriesResponse, payload: payload)
     }
@@ -25,10 +25,10 @@ enum AppendEntries {
       guard message.type == .appendEntriesResponse else { return nil }
       var payload = message.payload
       guard
-        let term = payload.readInteger(as: Int64.self),
+        let term = payload.readInteger(as: Term.self),
         let success = payload.readInteger(as: UInt8.self)
       else { return nil }
-      self.term = Int(term)
+      self.term = term
       self.success = success != 0
     }
   }
@@ -49,7 +49,7 @@ enum AppendEntries {
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
-      payload.writeInteger(Int64(term))
+      payload.writeInteger(term)
       payload.writePeerId(leaderId)
       return Message(type: .appendEntries, payload: payload)
     }
@@ -58,10 +58,10 @@ enum AppendEntries {
       guard message.type == .appendEntries else { return nil }
       var payload = message.payload
       guard
-        let term = payload.readInteger(as: Int64.self),
+        let term = payload.readInteger(as: Term.self),
         let leaderId = payload.readPeerId()
       else { return nil }
-      self.term = Int(term)
+      self.term = term
       self.leaderId = leaderId
     }
   }

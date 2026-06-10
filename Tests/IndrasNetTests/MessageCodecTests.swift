@@ -62,10 +62,10 @@ import Testing
     let reply = AppendEntries.Reply(term: 1, success: false)
     var wire = reply.toMessage().encodeToByteBuffer()
 
-    #expect(wire.readableBytes == Message.headerLength + 9)
+    #expect(wire.readableBytes == Message.headerLength + 17)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.appendEntriesResponse.rawValue)
-    #expect(wire.readInteger(as: UInt32.self) == 9)
-    #expect(wire.readInteger(as: Int64.self) == 1)
+    #expect(wire.readInteger(as: UInt32.self) == 17)
+    #expect(wire.readInteger(as: UInt128.self) == 1)
     #expect(wire.readInteger(as: UInt8.self) == 0)
   }
 
@@ -73,10 +73,10 @@ import Testing
     let reply = RequestVote.Reply(granted: true, term: 1)
     var wire = reply.toMessage().encodeToByteBuffer()
 
-    #expect(wire.readableBytes == Message.headerLength + 9)
+    #expect(wire.readableBytes == Message.headerLength + 17)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.requestVoteResponse.rawValue)
-    #expect(wire.readInteger(as: UInt32.self) == 9)
-    #expect(wire.readInteger(as: Int64.self) == 1)
+    #expect(wire.readInteger(as: UInt32.self) == 17)
+    #expect(wire.readInteger(as: UInt128.self) == 1)
     #expect(wire.readInteger(as: UInt8.self) == 1)
   }
 

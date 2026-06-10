@@ -1,1 +1,1 @@
-typealias Term = Int
+typealias Term = UInt128
