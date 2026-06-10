@@ -4,17 +4,26 @@ import Testing
 
 @testable import IndrasNet
 
-struct ShellActionEvent: Equatable, Sendable {
-  let selfNode: String
-  let kind: String
-  let direction: String
-  let peer: String
+public struct ShellActionEvent: Equatable, Sendable {
+  public let selfNode: String
+  public let kind: String
+  public let direction: String
+  public let peer: String
+
+  public init(selfNode: String, kind: String, direction: String, peer: String) {
+    self.selfNode = selfNode
+    self.kind = kind
+    self.direction = direction
+    self.peer = peer
+  }
 }
 
-final class ShellActionRecorder: Sendable {
+public final class ShellActionRecorder: Sendable {
   private let events = Mutex<[ShellActionEvent]>([])
 
-  func record(selfNode: String, kind: String, direction: String, peer: String) {
+  public init() {}
+
+  public func record(selfNode: String, kind: String, direction: String, peer: String) {
     events.withLock {
       $0.append(
         ShellActionEvent(selfNode: selfNode, kind: kind, direction: direction, peer: peer)
@@ -22,7 +31,7 @@ final class ShellActionRecorder: Sendable {
     }
   }
 
-  func count(
+  public func count(
     selfNode: String,
     kind: String,
     direction: String,
@@ -38,7 +47,7 @@ final class ShellActionRecorder: Sendable {
     }
   }
 
-  func totalCount(kind: String, direction: String) -> Int {
+  public func totalCount(kind: String, direction: String) -> Int {
     events.withLock {
       $0.count { event in
         event.kind == kind && event.direction == direction
@@ -75,18 +84,18 @@ struct ShellActionLogHandler: LogHandler {
 }
 
 extension TestHelpers {
-  static func shellLogger(node: NodeAddress, recorder: ShellActionRecorder) -> Logger {
+  public static func shellLogger(node: NodeAddress, recorder: ShellActionRecorder) -> Logger {
     let handler = ShellActionLogHandler(selfNode: node.addressKey, recorder: recorder)
     var logger = Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
     logger.logLevel = .trace
     return logger
   }
 
-  static func electionOccurred(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+  public static func electionOccurred(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
     recorder.totalCount(kind: "requestVote", direction: "out") >= minimumOutbound
   }
 
-  static func leaderHeartbeatsStarted(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+  public static func leaderHeartbeatsStarted(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
     recorder.totalCount(kind: "appendEntries", direction: "out") >= minimumOutbound
   }
 }
