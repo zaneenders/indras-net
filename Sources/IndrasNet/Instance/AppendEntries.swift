@@ -5,7 +5,9 @@ enum AppendEntries {
     let term: Term
     let success: Bool
 
-    enum Action: Equatable {}
+    enum Action: Equatable {
+      case scheduleNext(delay: Duration)
+    }
 
     init(term: Term, success: Bool) {
       self.term = term
@@ -37,7 +39,7 @@ enum AppendEntries {
 
     enum Action: Equatable {
       case sendAppendEntriesReply(to: PeerId, term: Term, success: Bool)
-      case resetElectionTimeout
+      case scheduleNext(delay: Duration)
     }
 
     init(term: Term, leaderId: PeerId) {

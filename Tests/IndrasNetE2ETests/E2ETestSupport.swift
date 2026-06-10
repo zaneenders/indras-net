@@ -201,6 +201,56 @@ enum E2ETestSupport {
     throw Timeout()
   }
 
+  static func waitForMinAppendEntriesSent(
+    logs: [NodeLog],
+    nodes: [String],
+    baselines: [Int],
+    minimum: Int,
+    timeout: Duration
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      var total = 0
+      for index in logs.indices {
+        total += await logs[index].appendEntriesSentCount(
+          node: nodes[index],
+          since: baselines[index]
+        )
+      }
+      if total >= minimum {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    Issue.record("cluster did not send \(minimum) appendEntries heartbeats in time")
+    struct Timeout: Error {}
+    throw Timeout()
+  }
+
+  static func waitForMinClusterRequestVoteReceived(
+    logs: [NodeLog],
+    nodes: [String],
+    minimum: Int,
+    timeout: Duration
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      var total = 0
+      for (log, node) in zip(logs, nodes) {
+        total += await log.requestVoteReceivedCount(node: node)
+      }
+      if total >= minimum {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    Issue.record("cluster did not receive \(minimum) request votes in time")
+    struct Timeout: Error {}
+    throw Timeout()
+  }
+
   static func waitForMinRequestVoteReceived(
     log: NodeLog,
     node: String,
@@ -249,7 +299,8 @@ actor NodeLog {
       requestVoteReceived: requestVoteReceivedCount(node: node, since: startIndex),
       requestVoteResponseSent: requestVoteResponseSentCount(node: node, since: startIndex),
       requestVoteResponseReceived: requestVoteResponseReceivedCount(
-        node: node, since: startIndex)
+        node: node, since: startIndex),
+      appendEntriesSent: appendEntriesSentCount(node: node, since: startIndex)
     )
   }
 
@@ -272,6 +323,10 @@ actor NodeLog {
   func requestVoteResponseReceivedCount(node: String, since startIndex: Int = 0) -> Int {
     slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse <-") }
   }
+
+  func appendEntriesSentCount(node: String, since startIndex: Int = 0) -> Int {
+    slice(since: startIndex).count { $0.contains("[\(node)] appendEntries ->") }
+  }
 }
 
 struct MeshEventCounts: Equatable {
@@ -279,4 +334,5 @@ struct MeshEventCounts: Equatable {
   var requestVoteReceived: Int
   var requestVoteResponseSent: Int
   var requestVoteResponseReceived: Int
+  var appendEntriesSent: Int
 }

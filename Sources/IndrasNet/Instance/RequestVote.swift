@@ -7,6 +7,7 @@ enum RequestVote {
 
     enum Action: Equatable {
       case sendAppendEntry(to: PeerId, args: AppendEntries.Args)
+      case scheduleNext(delay: Duration)
     }
 
     init(granted: Bool, term: Term) {
@@ -41,7 +42,7 @@ enum RequestVote {
 
     enum Action: Equatable {
       case sendRequestVoteReply(to: PeerId, term: Term, voteGranted: Bool)
-      case resetElectionTimeout
+      case scheduleNext(delay: Duration)
       case persist
     }
 

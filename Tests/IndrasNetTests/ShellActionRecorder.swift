@@ -37,6 +37,14 @@ final class ShellActionRecorder: Sendable {
       }
     }
   }
+
+  func totalCount(kind: String, direction: String) -> Int {
+    events.withLock {
+      $0.count { event in
+        event.kind == kind && event.direction == direction
+      }
+    }
+  }
 }
 
 struct ShellActionLogHandler: LogHandler {
@@ -72,25 +80,11 @@ extension TestHelpers {
     return Logger(label: "test.shell.\(node.addressKey)") { _ in handler }
   }
 
-  static func electionTrafficMet(
-    recorder: ShellActionRecorder,
-    nodes: [NodeAddress],
-    minimum: Int
-  ) -> Bool {
-    for local in nodes {
-      for remote in nodes where remote.addressKey != local.addressKey {
-        if recorder.count(
-          selfNode: local.addressKey, kind: "requestVote", direction: "out", peer: remote.addressKey
-        ) < minimum {
-          return false
-        }
-        if recorder.count(
-          selfNode: remote.addressKey, kind: "requestVote", direction: "in", peer: local.addressKey
-        ) < minimum {
-          return false
-        }
-      }
-    }
-    return true
+  static func electionOccurred(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+    recorder.totalCount(kind: "requestVote", direction: "out") >= minimumOutbound
+  }
+
+  static func leaderHeartbeatsStarted(recorder: ShellActionRecorder, minimumOutbound: Int) -> Bool {
+    recorder.totalCount(kind: "appendEntries", direction: "out") >= minimumOutbound
   }
 }

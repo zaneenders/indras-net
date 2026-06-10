@@ -13,13 +13,13 @@ import Testing
 
     let logs = [NodeLog(), NodeLog(), NodeLog()]
 
-    let minimumRequestVoteCount = 2
+    let minimumRequestVotesReceivedClusterWide = 2
+    let minimumLeaderHeartbeats = 2
 
     func nodeArguments(port: Int) -> [String] {
       [host, String(port), "--cluster", clusterPath]
     }
 
-    var baselines: [Int] = []
     var countsDuringWindow: [(String, MeshEventCounts)] = []
 
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -35,31 +35,22 @@ import Testing
         }
       }
 
-      for (log, key) in zip(logs, nodeKeys) {
+      for log in logs {
         try await E2ETestSupport.waitForRunning(log: log, timeout: .seconds(10))
-        try await E2ETestSupport.waitForMinRequestVoteReceived(
-          log: log,
-          node: key,
-          minimum: 1,
-          timeout: .seconds(15)
-        )
       }
 
-      baselines = await logs.asyncMap { await $0.lineCount() }
-
-      try await E2ETestSupport.waitForAllMinRequestVoteSent(
+      try await E2ETestSupport.waitForMinClusterRequestVoteReceived(
         logs: logs,
         nodes: nodeKeys,
-        baselines: baselines,
-        minimum: minimumRequestVoteCount,
-        timeout: .seconds(30)
+        minimum: minimumRequestVotesReceivedClusterWide,
+        timeout: .seconds(15)
       )
 
-      try await E2ETestSupport.waitForAllMinRequestVoteReceived(
+      try await E2ETestSupport.waitForMinAppendEntriesSent(
         logs: logs,
         nodes: nodeKeys,
-        baselines: baselines,
-        minimum: minimumRequestVoteCount,
+        baselines: Array(repeating: 0, count: logs.count),
+        minimum: minimumLeaderHeartbeats,
         timeout: .seconds(30)
       )
 
@@ -67,22 +58,16 @@ import Testing
       while (try? await group.next()) != nil {}
 
       for index in logs.indices {
-        let counts = await logs[index].meshEventCounts(
-          node: nodeKeys[index],
-          since: baselines[index]
-        )
+        let counts = await logs[index].meshEventCounts(node: nodeKeys[index])
         countsDuringWindow.append((nodeKeys[index], counts))
       }
     }
 
     #expect(countsDuringWindow.count == 3)
-    for (key, counts) in countsDuringWindow {
-      #expect(
-        counts.requestVoteSent >= minimumRequestVoteCount
-          && counts.requestVoteReceived >= minimumRequestVoteCount,
-        "unexpected counts for \(key) during measurement window: \(counts)"
-      )
-    }
+    let totalAppendEntriesSent = countsDuringWindow.reduce(0) { $0 + $1.1.appendEntriesSent }
+    let totalRequestVotesReceived = countsDuringWindow.reduce(0) { $0 + $1.1.requestVoteReceived }
+    #expect(totalAppendEntriesSent >= minimumLeaderHeartbeats)
+    #expect(totalRequestVotesReceived >= minimumRequestVotesReceivedClusterWide)
 
   }
 }

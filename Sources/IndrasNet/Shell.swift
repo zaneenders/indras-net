@@ -6,26 +6,26 @@ import NIOCore
 // This might be able to be a protocl for someone to implment that Shell can run/drive
 extension Shell {
 
-  private func startElectionTimer() async {
-    var sleep = instance.getNextTimeout()
-    while !Task.isCancelled {
-      try? await Task.sleep(for: sleep)
-      let previousRole = instance.role
-      let tick = instance.onElectionTimeout()
-      logRoleChangeIfNeeded(from: previousRole)
-      await performTimerActions(tick.actions)
-      sleep = tick.sleep
-    }
-  }
+  private func scheduleNext(delay: Duration = .zero) {
+    timerTask?.cancel()
+    timerTask = Task {
+      var nextDelay: Duration = delay
+      repeat {
+        try? await Task.sleep(for: nextDelay)
+        let previousRole = instance.role
 
-  private func performTimerActions(_ actions: [TimerAction]) async {
-    for action in actions {
-      switch action {
-      case .requestVote(let peer, let args):
-        await deliverRequestVote(to: peer, args: args)
-      case .sendAppendEntry(let peer, let args):
-        await deliverAppendEntries(to: peer, args: args)
-      }
+        for directive in instance.onTimerTick() {
+          switch directive {
+          case .scheduleNext(let delay):
+            nextDelay = delay
+          case .requestVote(let peer, let args):
+            await deliverRequestVote(to: peer, args: args)
+          case .sendAppendEntry(let peer, let args):
+            await deliverAppendEntries(to: peer, args: args)
+          }
+        }
+        logRoleChangeIfNeeded(from: previousRole)
+      } while !Task.isCancelled
     }
   }
 
@@ -72,46 +72,61 @@ extension Shell {
 
   private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) async {
     let previousRole = instance.role
+
     for action in instance.receiveRequestVote(peer, request) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         await deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
       case .persist:
         ()
-      case .resetElectionTimeout:
-        instance.resetElectionTimeout()
+      case .scheduleNext(let delay):
+        scheduleNext(delay: delay)
       }
     }
+
     logRoleChangeIfNeeded(from: previousRole)
   }
 
   private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) async {
     let previousRole = instance.role
+
     for action in instance.receiveRequestVoteReply(peer, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
         await deliverAppendEntries(to: peer, args: args)
+      case .scheduleNext(let delay):
+        scheduleNext(delay: delay)
       }
     }
+
     logRoleChangeIfNeeded(from: previousRole)
   }
 
   private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) async {
     let previousRole = instance.role
+
     for action in instance.receiveAppendEntries(leader, args) {
       switch action {
       case .sendAppendEntriesReply(let to, let term, let success):
         await deliverAppendEntriesReply(to: to, term: term, success: success)
-      case .resetElectionTimeout:
-        instance.resetElectionTimeout()
+      case .scheduleNext(let delay):
+        scheduleNext(delay: delay)
       }
     }
+
     logRoleChangeIfNeeded(from: previousRole)
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) async {
     let previousRole = instance.role
-    _ = instance.receiveAppendEntriesReply(peer, reply)
+
+    for action in instance.receiveAppendEntriesReply(peer, reply) {
+      switch action {
+      case .scheduleNext(let delay):
+        scheduleNext(delay: delay)
+      }
+    }
+
     logRoleChangeIfNeeded(from: previousRole)
   }
 
@@ -130,7 +145,7 @@ public actor Shell {
   let transport: TCPTransport
   private let logger: Logger
   private var endpoints: [PeerId: NodeAddress] = [:]
-  private var electionTimer: Task<Void, Never>?
+  private var timerTask: Task<Void, Never>?
   private let timing: NodeTiming
 
   public init(
@@ -158,9 +173,7 @@ public actor Shell {
       await self.receiveMessage(message: message, from: from)
     }
 
-    self.electionTimer = Task {
-      await self.startElectionTimer()
-    }
+    scheduleNext()
 
     guard let port = await transport.listenPort() else {
       await stop()
@@ -194,9 +207,9 @@ public actor Shell {
   }
 
   public func stop() async {
-    self.electionTimer?.cancel()
-    _ = await self.electionTimer?.value
-    self.electionTimer = nil
+    timerTask?.cancel()
+    _ = await timerTask?.value
+    timerTask = nil
   }
 
   private func ensureConnected(to peer: PeerId) async -> Bool {

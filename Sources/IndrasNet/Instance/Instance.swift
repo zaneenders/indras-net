@@ -6,7 +6,6 @@ struct Instance {
   private(set) var votedFor: PeerId?
   private(set) var peers: Set<PeerId>
   private(set) var votes: [PeerId: Bool]
-  private(set) var nextTimeout: Duration
   private let timing: NodeTiming
 
   init(
@@ -16,7 +15,6 @@ struct Instance {
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
     votes: [PeerId: Bool] = [:],
-    nextTimeout: Duration = .zero,
     timing: NodeTiming = .default
   ) {
     self.id = id
@@ -25,95 +23,113 @@ struct Instance {
     self.currentTerm = currentTerm
     self.votedFor = votedFor
     self.votes = votes
-    self.nextTimeout = nextTimeout
     self.timing = timing
   }
 
-  mutating func getNextTimeout() -> Duration {
-    resetElectionTimeout()
-    return timerSleepDuration()
-  }
-
-  mutating func onElectionTimeout() -> TimerTick {
+  mutating func onTimerTick(at now: ContinuousClock.Instant = .now) -> [TimerDirective] {
+    var directives: [TimerDirective] = []
     switch role {
     case .leader:
-      var actions: [TimerAction] = []
       let heartbeat = AppendEntries.Args(term: currentTerm, leaderId: id)
       for peer in peers {
-        actions.append(.sendAppendEntry(to: peer, args: heartbeat))
+        directives.append(.sendAppendEntry(to: peer, args: heartbeat))
       }
-      return TimerTick(sleep: timing.heartbeatInterval, actions: actions)
-    case .follower:
-      let actions = convertToCandidate()
-      resetElectionTimeout()
-      return TimerTick(sleep: nextTimeout, actions: actions)
-    case .candidate:
-      let actions = convertToCandidate()
-      resetElectionTimeout()
-      return TimerTick(sleep: nextTimeout, actions: actions)
+    case .follower, .candidate:
+      directives = convertToCandidate()
+    }
+    directives.append(.scheduleNext(delay: getNextDelay(at: now)))
+    return directives
+  }
+
+  func initialTimerDelay(at now: ContinuousClock.Instant) -> Duration {
+    getNextDelay(at: now)
+  }
+
+  private func getNextDelay(at now: ContinuousClock.Instant) -> Duration {
+    switch role {
+    case .leader:
+      return timing.heartbeatInterval
+    case .follower, .candidate:
+      return Duration(.milliseconds(Int64.random(in: timing.electionTimeoutRange)))
     }
   }
 
-  mutating func resetElectionTimeout() {
-    nextTimeout = randomElectionTimeout()
-  }
-
-  mutating func receiveRequestVote(_ peer: PeerId, _ requst: RequestVote.Args) -> [RequestVote.Args.Action] {
+  mutating func receiveRequestVote(
+    _ peer: PeerId,
+    _ request: RequestVote.Args,
+    at now: ContinuousClock.Instant = .now
+  ) -> [RequestVote.Args.Action] {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
+    var shouldResetElectionTimer = false
 
-    if requst.term > currentTerm {
-      currentTerm = requst.term
+    if request.term > currentTerm {
+      currentTerm = request.term
       votedFor = nil
       votes = [:]
       role = .follower
+      shouldResetElectionTimer = true
     }
 
-    if requst.term < currentTerm {
+    if request.term < currentTerm {
       actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
       return actions
     }
 
-    if role == .leader || (role == .candidate && requst.candidateId != id) {
+    if role == .leader || (role == .candidate && request.candidateId != id) {
       actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
       return actions
     }
 
-    if votedFor == nil || votedFor == requst.candidateId {
+    if votedFor == nil || votedFor == request.candidateId {
       // TODO: At least as upto date
       grantVote = true
-      votedFor = requst.candidateId
+      votedFor = request.candidateId
+      shouldResetElectionTimer = true
     }
     actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
+    if shouldResetElectionTimer {
+      actions.append(.scheduleNext(delay: getNextDelay(at: now)))
+    }
     return actions
   }
 
-  mutating func receiveRequestVoteReply(_ peer: PeerId, _ reply: RequestVote.Reply) -> [RequestVote.Reply.Action] {
+  mutating func receiveRequestVoteReply(
+    _ peer: PeerId,
+    _ reply: RequestVote.Reply,
+    at now: ContinuousClock.Instant = .now
+  ) -> [RequestVote.Reply.Action] {
     var actions: [RequestVote.Reply.Action] = []
 
     if reply.term > currentTerm {
-      self.role = .follower
-      self.currentTerm = reply.term
-      self.votedFor = nil
-      self.votes = [:]
+      role = .follower
+      currentTerm = reply.term
+      votedFor = nil
+      votes = [:]
+      actions.append(.scheduleNext(delay: getNextDelay(at: now)))
       return actions
     }
 
     guard role == .candidate, reply.term == currentTerm else { return actions }
 
-    self.votes[peer] = reply.granted
-    if self.votes.isLeader(peers.count) {
-      self.role = .leader
+    votes[peer] = reply.granted
+    if votes.isLeader(peers.count) {
+      role = .leader
       let heartbeat = AppendEntries.Args(term: currentTerm, leaderId: id)
       for peer in peers {
         actions.append(.sendAppendEntry(to: peer, args: heartbeat))
       }
+      actions.append(.scheduleNext(delay: timing.heartbeatInterval))
     }
 
     return actions
   }
 
-  mutating func receiveAppendEntries(_ leader: PeerId, _ args: AppendEntries.Args) -> [AppendEntries.Args.Action] {
+  mutating func receiveAppendEntries(
+    _ leader: PeerId,
+    _ args: AppendEntries.Args,
+    at now: ContinuousClock.Instant = .now
+  ) -> [AppendEntries.Args.Action] {
     var actions: [AppendEntries.Args.Action] = []
 
     if args.term < currentTerm {
@@ -129,37 +145,27 @@ struct Instance {
 
     role = .follower
     actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: true))
-    actions.append(.resetElectionTimeout)
+    actions.append(.scheduleNext(delay: getNextDelay(at: now)))
     return actions
   }
 
-  mutating func receiveAppendEntriesReply(_ peer: PeerId, _ reply: AppendEntries.Reply) -> [AppendEntries.Reply.Action]
-  {
+  mutating func receiveAppendEntriesReply(
+    _ peer: PeerId,
+    _ reply: AppendEntries.Reply,
+    at now: ContinuousClock.Instant = .now
+  ) -> [AppendEntries.Reply.Action] {
     if reply.term > currentTerm {
       role = .follower
       currentTerm = reply.term
       votedFor = nil
       votes = [:]
+      return [.scheduleNext(delay: getNextDelay(at: now))]
     }
 
     return []
   }
-}
 
-extension Instance {
-
-  private func randomElectionTimeout() -> Duration {
-    Duration(.milliseconds(Int64.random(in: timing.electionTimeoutRange)))
-  }
-
-  private func timerSleepDuration() -> Duration {
-    switch role {
-    case .leader: timing.heartbeatInterval
-    case .follower, .candidate: nextTimeout
-    }
-  }
-
-  private mutating func convertToCandidate() -> [TimerAction] {
+  private mutating func convertToCandidate() -> [TimerDirective] {
     currentTerm += 1
     role = .candidate
     votedFor = id
