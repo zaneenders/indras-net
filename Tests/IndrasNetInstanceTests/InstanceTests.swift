@@ -1,4 +1,5 @@
 import Foundation
+import TestUtils
 import Testing
 
 @testable import IndrasNet
@@ -406,52 +407,52 @@ import Testing
     #expect(instance.lastLogIndex == 3)
   }
 
-  @Test func leaderBackoffSendsMissingLogEntries() throws {
-    let entry = LogEntry(term: 2, command: Data("set z=3".utf8))
-    var leader = Instance(
-      id: "a", peers: ["b"], role: .leader, currentTerm: 2, log: .sentinel + [entry])
+  @Test func clientSubmitRejectsNonLeader() {
+    var follower = Instance(id: "b", peers: ["a"], currentTerm: 2)
+    _ = follower.receiveAppendEntries(
+      "a", AppendEntries.Args(term: 2, leaderId: "a"), at: ContinuousClock.now)
 
-    _ = leader.onTimerTick(at: ContinuousClock.now)
-    let backoffActions = leader.receiveAppendEntriesReply(
-      "b", .init(term: 2, success: false), at: ContinuousClock.now)
+    let actions = follower.receiveClientSubmit(
+      RaftClient.defaultClientID,
+      ClientSubmit.Args(requestId: 1, command: Data("set z=3".utf8)))
 
-    let resendArgs = try #require(
-      backoffActions.compactMap { action -> AppendEntries.Args? in
-        if case .sendAppendEntry(_, let args) = action { args } else { nil }
-      }.first)
-    #expect(resendArgs.prevLogIndex == 0)
-    #expect(resendArgs.entries == [entry])
+    #expect(
+      actions == [
+        .sendClientSubmitReply(
+          to: RaftClient.defaultClientID,
+          reply: ClientSubmit.Reply(requestId: 1, status: .notLeader, leaderId: "a"))
+      ])
   }
 
-  @Test func leaderReplicationRoundTripReachesFollower() throws {
-    let entry = LogEntry(term: 2, command: Data("set z=3".utf8))
-    var leader = Instance(
-      id: "a", peers: ["b"], role: .leader, currentTerm: 2, log: .sentinel + [entry])
-    var follower = Instance(id: "b", currentTerm: 2)
+  @Test func clientSubmitReplicatesAndCommitsOnLeader() {
+    var cluster = TestCluster(
+      nodes: [
+        "a": Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 2),
+        "b": Instance(id: "b", currentTerm: 2),
+      ])
 
-    _ = leader.onTimerTick(at: ContinuousClock.now)
-    let backoffActions = leader.receiveAppendEntriesReply(
-      "b", .init(term: 2, success: false), at: ContinuousClock.now)
-    let resendArgs = try #require(
-      backoffActions.compactMap { action -> AppendEntries.Args? in
-        if case .sendAppendEntry(_, let args) = action { args } else { nil }
-      }.first)
+    let reply = cluster.submit(command: Data("set z=3".utf8), to: "a")
 
-    _ = follower.receiveAppendEntries("a", resendArgs, at: ContinuousClock.now)
-    #expect(follower.log[1] == entry)
+    #expect(reply == ClientSubmit.Reply(requestId: 1, status: .ok, logIndex: 1))
+    #expect(cluster.nodes["a"]!.commitIndex == 1)
+    #expect(cluster.nodes["b"]!.log[1].command == Data("set z=3".utf8))
+  }
 
-    _ = leader.receiveAppendEntriesReply("b", .init(term: 2, success: true), at: ContinuousClock.now)
-    #expect(leader.commitIndex == 1)
+  @Test func clientSubmitReplicatesToMajorityInThreeNodeCluster() {
+    var cluster = TestCluster(
+      nodes: [
+        "a": Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2),
+        "b": Instance(id: "b", currentTerm: 2),
+        "c": Instance(id: "c", currentTerm: 2),
+      ])
 
-    let heartbeat = try #require(
-      leader.onTimerTick(at: ContinuousClock.now).compactMap { directive -> AppendEntries.Args? in
-        if case .sendAppendEntry(_, let args) = directive { args } else { nil }
-      }.first)
-    #expect(heartbeat.leaderCommit == 1)
+    let reply = cluster.submit(command: Data("set z=3".utf8), to: "a")
+    let command = Data("set z=3".utf8)
 
-    let followerActions = follower.receiveAppendEntries("a", heartbeat, at: ContinuousClock.now)
-    #expect(follower.commitIndex == 1)
-    #expect(followerActions.contains(.apply(entry: entry)))
+    #expect(reply == ClientSubmit.Reply(requestId: 1, status: .ok, logIndex: 1))
+    #expect(cluster.nodes["a"]!.commitIndex == 1)
+    #expect(cluster.nodes["b"]!.log[1].command == command)
+    #expect(cluster.nodes["c"]!.log[1].command == command)
   }
 
   @Test func leaderAdvancesCommitIndexWithMajorityMatch() {

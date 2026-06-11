@@ -61,8 +61,12 @@ extension Shell {
     )
   }
 
-  func receiveMessage(message: AppMessage, from peer: PeerId) {
+  func receiveMessage(message: RaftMessage, from peer: PeerId) {
     switch message {
+    case .clientSubmit(let args):
+      receiveClientSubmit(from: peer, args: args)
+    case .clientSubmitReply(let reply):
+      receiveClientSubmitReply(reply)
     case .requestVote(let args):
       logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
       receiveRequestVote(from: peer, request: args)
@@ -85,10 +89,10 @@ extension Shell {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
-      case .persist:
-        ()  // TODO: persist state
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
@@ -140,12 +144,51 @@ extension Shell {
         deliverAppendEntries(to: peer, args: args)
       case .apply(let entry):
         applyLogEntry(entry)
+      case .notifyClient(let requestId, let logIndex, let client):
+        completeClientSubmit(
+          reply: ClientSubmit.Reply(requestId: requestId, status: .ok, logIndex: logIndex),
+          to: client)
       case .persist:
         ()  // TODO: persist state
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
+  }
+
+  private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) {
+    handleClientSubmitActions(instance.receiveClientSubmit(clientPeer, args))
+  }
+
+  private func handleClientSubmitActions(_ actions: [ClientSubmit.Args.Action]) {
+    for action in actions {
+      switch action {
+      case .sendClientSubmitReply(let to, let reply):
+        completeClientSubmit(reply: reply, to: to)
+      case .sendAppendEntry(let peer, let appendArgs):
+        deliverAppendEntries(to: peer, args: appendArgs)
+      case .persist:
+        ()  // TODO: persist state
+      }
+    }
+  }
+
+  private func completeClientSubmit(reply: ClientSubmit.Reply, to clientPeer: PeerId) {
+    if let continuation = clientContinuations.removeValue(forKey: reply.requestId) {
+      continuation.resume(returning: reply)
+      return
+    }
+    deliverClientSubmitReply(to: clientPeer, reply: reply)
+  }
+
+  private func receiveClientSubmitReply(_ reply: ClientSubmit.Reply) {
+    if let continuation = clientContinuations.removeValue(forKey: reply.requestId) {
+      continuation.resume(returning: reply)
+    }
+  }
+
+  private func deliverClientSubmitReply(to client: PeerId, reply: ClientSubmit.Reply) {
+    deliver(to: client, message: .clientSubmitReply(reply), context: .clientSubmitResponse(peer: client))
   }
 
   private func applyLogEntry(_ entry: LogEntry) {
@@ -180,6 +223,8 @@ public actor Shell {
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
+  private var clientContinuations: [UInt128: CheckedContinuation<ClientSubmit.Reply, Never>] = [:]
+  private var client = RaftClient()
   private let timing: NodeTiming
 
   public init(
@@ -218,7 +263,7 @@ public actor Shell {
     return port
   }
 
-  private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) {
+  private func deliver(to peer: PeerId, message: RaftMessage, context: RaftLogContext) {
     guard !isStopped else { return }
 
     let id = UUID()
@@ -229,7 +274,7 @@ public actor Shell {
     }
   }
 
-  private func performDelivery(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
+  private func performDelivery(to peer: PeerId, message: RaftMessage, context: RaftLogContext) async {
     guard !Task.isCancelled else { return }
 
     do {
@@ -250,6 +295,14 @@ public actor Shell {
 
   private func deliveryFinished(id: UUID) async {
     inflightDeliveries.removeValue(forKey: id)
+  }
+
+  func submit(command: Data) async -> ClientSubmit.Reply {
+    let request = client.makeRequest(command: command)
+    return await withCheckedContinuation { continuation in
+      clientContinuations[request.requestId] = continuation
+      handleClientSubmitActions(instance.receiveClientSubmit(client.id, request))
+    }
   }
 
   public func shutdown() async throws {
@@ -298,94 +351,5 @@ public actor Shell {
       try? await Task.sleep(for: .milliseconds(25))
     }
     return false
-  }
-}
-
-enum ShellLogKey {
-  static let kind = "shell.kind"
-  static let direction = "shell.direction"
-  static let peer = "shell.peer"
-}
-
-private struct RaftLogContext {
-  let kind: String
-  let direction: String
-  let peer: PeerId
-  let term: Term
-  var granted: Bool?
-  var success: Bool?
-
-  var level: Logger.Level {
-    switch kind {
-    case "appendEntries", "appendEntriesResponse":
-      if success == false { return .info }
-      return .trace
-    default:
-      return .info
-    }
-  }
-
-  var metadata: Logger.Metadata {
-    var metadata: Logger.Metadata = [
-      ShellLogKey.kind: .string(kind),
-      ShellLogKey.direction: .string(direction),
-      ShellLogKey.peer: .string(peer),
-    ]
-    metadata["shell.term"] = .stringConvertible(term)
-    if let granted {
-      metadata["shell.granted"] = .stringConvertible(granted)
-    }
-    if let success {
-      metadata["shell.success"] = .stringConvertible(success)
-    }
-    return metadata
-  }
-
-  func message(selfNode: PeerId) -> String {
-    let arrow = direction == "out" ? "->" : "<-"
-    var text = "[\(selfNode)] \(kind) \(arrow) \(peer) term=\(term)"
-    if let granted {
-      text += granted ? " granted" : " denied"
-    }
-    if success == false {
-      text += " rejected"
-    }
-    return text
-  }
-
-  static func requestVote(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "requestVote", direction: direction, peer: peer, term: term)
-  }
-
-  static func requestVoteResponse(
-    direction: String,
-    peer: PeerId,
-    term: Term,
-    granted: Bool
-  ) -> RaftLogContext {
-    RaftLogContext(kind: "requestVoteResponse", direction: direction, peer: peer, term: term, granted: granted)
-  }
-
-  static func appendEntries(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntries", direction: direction, peer: peer, term: term)
-  }
-
-  static func appendEntriesResponse(
-    direction: String,
-    peer: PeerId,
-    term: Term,
-    success: Bool
-  ) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntriesResponse", direction: direction, peer: peer, term: term, success: success)
-  }
-}
-
-public enum ShellError: Error, LocalizedError {
-  case noListenPort
-
-  public var errorDescription: String? {
-    switch self {
-    case .noListenPort: "no port bound"
-    }
   }
 }

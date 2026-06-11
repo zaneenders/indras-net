@@ -62,6 +62,22 @@ import Testing
     #expect(roundTripped == args)
   }
 
+  @Test func clientSubmitArgsRoundTripThroughCodec() throws {
+    let args = ClientSubmit.Args(requestId: 9, command: Data("set z=3".utf8))
+    let original = args.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(ClientSubmit.Args(from: decoded))
+    #expect(roundTripped == args)
+  }
+
+  @Test func clientSubmitReplyRoundTripThroughCodec() throws {
+    let reply = ClientSubmit.Reply(requestId: 4, status: .notLeader, leaderId: "leader-1", logIndex: 0)
+    let original = reply.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(ClientSubmit.Reply(from: decoded))
+    #expect(roundTripped == reply)
+  }
+
   @Test func appendEntriesHeartbeatRoundTripThroughCodec() throws {
     let args = AppendEntries.Args(term: 3, leaderId: "leader-1")
     let original = args.toMessage()

@@ -11,10 +11,15 @@ struct Instance {
   private(set) var log: [LogEntry]
   private(set) var commitIndex: LogIndex
   private(set) var lastApplied: LogIndex
+  private(set) var leaderId: PeerId?
   private var nextIndex: [PeerId: LogIndex]
   private var matchIndex: [PeerId: LogIndex]
   private var lastSentEndIndex: [PeerId: LogIndex]
+  private var pendingClientRequests: [LogIndex: (requestId: UInt128, client: PeerId)]
   let timing: NodeTiming
+
+  var lastLogIndex: LogIndex { log.lastLogIndex }
+  var lastLogTerm: Term { log.lastLogTerm }
 
   init(
     id: PeerId,
@@ -23,9 +28,9 @@ struct Instance {
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
     votes: [PeerId: Bool] = [:],
-    log: [LogEntry] = .sentinel,
     commitIndex: LogIndex = 0,
     lastApplied: LogIndex = 0,
+    log: [LogEntry] = .sentinel,
     timing: NodeTiming = .default
   ) {
     self.id = id
@@ -40,11 +45,9 @@ struct Instance {
     self.nextIndex = [:]
     self.matchIndex = [:]
     self.lastSentEndIndex = [:]
+    self.pendingClientRequests = [:]
     self.timing = timing
   }
-
-  var lastLogIndex: LogIndex { log.lastLogIndex }
-  var lastLogTerm: Term { log.lastLogTerm() }
 
   mutating func onTimerTick(at now: ContinuousClock.Instant = .now) -> [TimerDirective] {
     var directives: [TimerDirective] = []
@@ -71,6 +74,44 @@ struct Instance {
     }
   }
 
+  private mutating func submit(
+    _ command: Data,
+    requestId: UInt128,
+    from client: PeerId,
+    at now: ContinuousClock.Instant = .now
+  ) -> [ClientSubmit.Args.Action] {
+    guard role == .leader else {
+      return [
+        .sendClientSubmitReply(
+          to: client,
+          reply: ClientSubmit.Reply(
+            requestId: requestId,
+            status: .notLeader,
+            leaderId: leaderId
+          ))
+      ]
+    }
+
+    log.append(LogEntry(term: currentTerm, command: command))
+    pendingClientRequests[lastLogIndex] = (requestId: requestId, client: client)
+
+    var actions: [ClientSubmit.Args.Action] = []
+    for peer in peers {
+      let args = makeAppendEntries(for: peer)
+      lastSentEndIndex[peer] = args.prevLogIndex + LogIndex(args.entries.count)
+      actions.append(.sendAppendEntry(to: peer, args: args))
+    }
+    return actions
+  }
+
+  mutating func receiveClientSubmit(
+    _ client: PeerId,
+    _ args: ClientSubmit.Args,
+    at now: ContinuousClock.Instant = .now
+  ) -> [ClientSubmit.Args.Action] {
+    submit(args.command, requestId: args.requestId, from: client, at: now)
+  }
+
   mutating func receiveRequestVote(
     _ peer: PeerId,
     _ request: RequestVote.Args,
@@ -85,6 +126,7 @@ struct Instance {
       votedFor = nil
       votes = [:]
       role = .follower
+      leaderId = nil
       shouldResetElectionTimer = true
     }
 
@@ -131,6 +173,7 @@ struct Instance {
       currentTerm = reply.term
       votedFor = nil
       votes = [:]
+      leaderId = nil
       actions.append(.scheduleNext(delay: getNextDelay(at: now)))
       return actions
     }
@@ -165,6 +208,7 @@ struct Instance {
     }
 
     role = .follower
+    leaderId = args.leaderId
 
     guard log.matches(prevLogIndex: args.prevLogIndex, prevLogTerm: args.prevLogTerm) else {
       actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: false))
@@ -178,7 +222,7 @@ struct Instance {
 
     if args.leaderCommit > commitIndex {
       commitIndex = min(args.leaderCommit, lastLogIndex)
-      for entry in drainCommittedEntries() {
+      for entry in drainAppliedEntries() {
         actions.append(.apply(entry: entry))
       }
     }
@@ -200,6 +244,7 @@ struct Instance {
       currentTerm = reply.term
       votedFor = nil
       votes = [:]
+      leaderId = nil
       actions.append(.scheduleNext(delay: getNextDelay(at: now)))
       return actions
     }
@@ -224,6 +269,7 @@ struct Instance {
 
   private mutating func becomeLeader(_ actions: inout [RequestVote.Reply.Action]) {
     role = .leader
+    leaderId = id
     nextIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, lastLogIndex + 1) })
     matchIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, LogIndex(0)) })
     lastSentEndIndex = [:]
@@ -234,6 +280,25 @@ struct Instance {
       actions.append(.sendAppendEntry(to: peer, args: args))
     }
     actions.append(.scheduleNext(delay: timing.heartbeatInterval))
+  }
+
+  private mutating func convertToCandidate() -> [TimerDirective] {
+    currentTerm += 1
+    role = .candidate
+    leaderId = nil
+    votedFor = id
+    votes = [id: true]
+
+    return peers.map { peer in
+      .requestVote(
+        to: peer,
+        args: RequestVote.Args(
+          term: currentTerm,
+          candidateId: id,
+          lastLogIndex: lastLogIndex,
+          lastLogTerm: lastLogTerm
+        ))
+    }
   }
 
   private func makeAppendEntries(for peer: PeerId) -> AppendEntries.Args {
@@ -273,13 +338,11 @@ struct Instance {
       }
     }
 
-    for entry in drainCommittedEntries() {
-      actions.append(.apply(entry: entry))
-    }
+    drainCommittedEntries(into: &actions)
     return actions
   }
 
-  private mutating func drainCommittedEntries() -> [LogEntry] {
+  private mutating func drainAppliedEntries() -> [LogEntry] {
     var entries: [LogEntry] = []
     while lastApplied < commitIndex {
       lastApplied += 1
@@ -288,21 +351,15 @@ struct Instance {
     return entries
   }
 
-  private mutating func convertToCandidate() -> [TimerDirective] {
-    currentTerm += 1
-    role = .candidate
-    votedFor = id
-    votes = [id: true]
-
-    return peers.map { peer in
-      .requestVote(
-        to: peer,
-        args: RequestVote.Args(
-          term: currentTerm,
-          candidateId: id,
-          lastLogIndex: lastLogIndex,
-          lastLogTerm: lastLogTerm
-        ))
+  private mutating func drainCommittedEntries(into actions: inout [AppendEntries.Reply.Action]) {
+    while lastApplied < commitIndex {
+      lastApplied += 1
+      let index = lastApplied
+      actions.append(.apply(entry: log[Int(index)]))
+      if let pending = pendingClientRequests.removeValue(forKey: index) {
+        actions.append(
+          .notifyClient(requestId: pending.requestId, logIndex: index, to: pending.client))
+      }
     }
   }
 }

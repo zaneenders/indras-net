@@ -1,6 +1,6 @@
 import NIOPosix
-import Testing
 import TestUtils
+import Testing
 
 @testable import IndrasNet
 
@@ -123,7 +123,7 @@ extension IndrasNetTCPTransportTests {
   private func makeTransport(
     local: NodeAddress,
     group: MultiThreadedEventLoopGroup,
-    onMessage: @escaping @Sendable (AppMessage, PeerId) async -> Void
+    onMessage: @escaping @Sendable (RaftMessage, PeerId) async -> Void
   ) async throws -> TCPTransport {
     let node = TCPTransport(
       configuration: TransportConfiguration(

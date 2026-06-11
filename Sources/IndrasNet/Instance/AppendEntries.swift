@@ -9,6 +9,7 @@ enum AppendEntries {
       case scheduleNext(delay: Duration)
       case sendAppendEntry(to: PeerId, args: Args)
       case apply(entry: LogEntry)
+      case notifyClient(requestId: UInt128, logIndex: LogIndex, to: PeerId)
       case persist
     }
 

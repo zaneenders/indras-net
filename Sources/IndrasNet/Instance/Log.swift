@@ -9,7 +9,7 @@ extension Log {
     LogIndex(count - 1)
   }
 
-  func lastLogTerm() -> Term {
+  var lastLogTerm: Term {
     self[Int(lastLogIndex)].term
   }
 

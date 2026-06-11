@@ -5,7 +5,7 @@ import NIOPosix
 
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
-typealias IndrasNetInboundHandler = @Sendable (AppMessage, PeerId) async -> Void
+typealias IndrasNetInboundHandler = @Sendable (RaftMessage, PeerId) async -> Void
 
 public actor TCPTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
@@ -59,7 +59,7 @@ public actor TCPTransport {
     self.connections[peer] != nil
   }
 
-  func send(_ message: AppMessage, to peer: PeerId) async throws {
+  func send(_ message: RaftMessage, to peer: PeerId) async throws {
     guard let connection = self.connections[peer] else {
       throw IndrasNetTransportError.peerNotConnected(peer)
     }
@@ -206,7 +206,7 @@ public actor TCPTransport {
 
         for try await wire in inbound {
           if let peerID {
-            guard let app = AppMessage(wire) else {
+            guard let app = RaftMessage(wire) else {
               self.logger.warning("Have: \(peerID) unable to decode AppMessage from \(wire)")
               continue
             }

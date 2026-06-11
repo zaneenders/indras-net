@@ -45,19 +45,19 @@ extension TestHelpers {
 }
 
 public actor MessageCollector {
-  private var entries: [(AppMessage, PeerId)] = []
+  private var entries: [(RaftMessage, PeerId)] = []
 
   public init() {}
 
-  public func record(_ message: AppMessage, from peerID: PeerId) {
+  public func record(_ message: RaftMessage, from peerID: PeerId) {
     self.entries.append((message, peerID))
   }
 
   public func waitForMessage(
-    type: AppMessage,
+    type: RaftMessage,
     from peerID: PeerId,
     timeout: Duration
-  ) async throws -> AppMessage {
+  ) async throws -> RaftMessage {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
@@ -70,11 +70,11 @@ public actor MessageCollector {
     throw MessageCollectorError.timeout
   }
 
-  public func count(type: AppMessage, from peerID: PeerId) -> Int {
+  public func count(type: RaftMessage, from peerID: PeerId) -> Int {
     self.entries.lazy.filter { $0.0 == type && $0.1 == peerID }.count
   }
 
-  public func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> AppMessage {
+  public func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> RaftMessage {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
@@ -94,7 +94,7 @@ public enum MessageCollectorError: Error {
 
 extension TestHelpers {
   /// Opaque app payload for transport tests — exercises send/receive without asserting Raft semantics.
-  public static let transportProbe = AppMessage.appendEntries(
+  public static let transportProbe = RaftMessage.appendEntries(
     AppendEntries.Args(term: 0, leaderId: "transport-probe")
   )
 }
