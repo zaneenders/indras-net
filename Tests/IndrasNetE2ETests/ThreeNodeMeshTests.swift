@@ -7,28 +7,28 @@ import TestUtils
   @Test func threeNodesRequestVoteWithSharedCluster() async throws {
     let binary = try await E2ETestSupport.buildProduct(named: "indras-net")
     let root = try E2ETestSupport.packageRoot()
-    let clusterPath = root.appending("cluster.json").string
-    let host = "127.0.0.1"
-    let ports = [9001, 9002, 9003]
-    let nodeKeys = ports.map { NodeAddress(host: host, port: $0).addressKey }
+    let clusterPath = root.appending("Tests/e2e-cluster.json").string
+    let cluster = try ClusterConfig.load(from: clusterPath)
+    let peers = cluster.peers
+    let nodeKeys = peers.map(\.addressKey)
 
-    let logs = [NodeLog(), NodeLog(), NodeLog()]
+    let logs = peers.map { _ in NodeLog() }
 
     let minimumRequestVotesReceivedClusterWide = 2
     let minimumLeaderHeartbeats = 2
 
-    func nodeArguments(port: Int) -> [String] {
-      [host, String(port), "--cluster", clusterPath, "--log-level", "trace"]
+    func nodeArguments(peer: NodeAddress) -> [String] {
+      [peer.host, String(peer.port), "--cluster", clusterPath, "--log-level", "trace"]
     }
 
     var countsDuringWindow: [(String, MeshEventCounts)] = []
 
     try await withThrowingTaskGroup(of: Void.self) { group in
-      for (port, log) in zip(ports, logs) {
+      for (peer, log) in zip(peers, logs) {
         group.addTask {
           try await E2ETestSupport.runNode(
             binary: binary,
-            arguments: nodeArguments(port: port),
+            arguments: nodeArguments(peer: peer),
             log: log,
             workingDirectory: root,
             platformOptions: E2ETestSupport.processPlatformOptions()
@@ -64,7 +64,7 @@ import TestUtils
       }
     }
 
-    #expect(countsDuringWindow.count == 3)
+    #expect(countsDuringWindow.count == peers.count)
     let totalAppendEntriesSent = countsDuringWindow.reduce(0) { $0 + $1.1.appendEntriesSent }
     let totalRequestVotesReceived = countsDuringWindow.reduce(0) { $0 + $1.1.requestVoteReceived }
     #expect(totalAppendEntriesSent >= minimumLeaderHeartbeats)
