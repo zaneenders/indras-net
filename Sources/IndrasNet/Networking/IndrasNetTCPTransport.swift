@@ -1,3 +1,4 @@
+import Foundation
 import Logging
 import NIO
 import NIOCore
@@ -21,6 +22,11 @@ public actor TCPTransport {
     let writer: NIOAsyncChannelOutboundWriter<Message>
   }
 
+  private struct ConnectionWaiter {
+    let id: UUID
+    let continuation: CheckedContinuation<Bool, Never>
+  }
+
   private let configuration: TransportConfiguration
   private let eventLoopGroup: MultiThreadedEventLoopGroup
   private let logger: Logger
@@ -32,6 +38,7 @@ public actor TCPTransport {
 
   private var connections: [PeerId: Connection] = [:]
   private var dialing: Set<PeerId> = []
+  private var connectionWaiters: [PeerId: [ConnectionWaiter]] = [:]
   private var nextConnectionID: UInt64 = 0
 
   public init(
@@ -57,6 +64,31 @@ public actor TCPTransport {
 
   func isConnected(to peer: PeerId) -> Bool {
     self.connections[peer] != nil
+  }
+
+  func waitForConnection(to peer: PeerId, timeout: Duration = .seconds(5)) async -> Bool {
+    if self.connections[peer] != nil {
+      return true
+    }
+    if Task.isCancelled {
+      return false
+    }
+
+    let waiterID = UUID()
+
+    return await withTaskGroup(of: Bool.self) { group in
+      group.addTask {
+        await self.awaitConnectionEvent(to: peer, waiterID: waiterID)
+      }
+      group.addTask {
+        try? await Task.sleep(for: timeout)
+        await self.removeConnectionWaiter(peer: peer, id: waiterID)
+        return false
+      }
+
+      defer { group.cancelAll() }
+      return await group.next() ?? false
+    }
   }
 
   func send(_ message: RaftMessage, to peer: PeerId) async throws {
@@ -110,6 +142,11 @@ public actor TCPTransport {
 
   private func finishDialing(_ key: PeerId) {
     self.dialing.remove(key)
+    if self.connections[key] != nil {
+      self.resumeConnectionWaiters(for: key, connected: true)
+    } else {
+      self.resumeConnectionWaiters(for: key, connected: false)
+    }
   }
 
   private func mintConnectionID() -> UInt64 {
@@ -122,6 +159,10 @@ public actor TCPTransport {
 
     self.jobContinuation?.finish()
     self.jobContinuation = nil
+
+    for peer in self.connectionWaiters.keys {
+      self.resumeConnectionWaiters(for: peer, connected: false)
+    }
 
     if let server = self.serverChannel {
       server.channel.close(promise: nil)
@@ -138,6 +179,49 @@ public actor TCPTransport {
     guard let continuation = self.jobContinuation else { return false }
     continuation.yield(job)
     return true
+  }
+
+  private func awaitConnectionEvent(to peer: PeerId, waiterID: UUID) async -> Bool {
+    if self.connections[peer] != nil {
+      return true
+    }
+
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        self.registerConnectionWaiter(peer: peer, id: waiterID, continuation: continuation)
+      }
+    } onCancel: {
+      Task { await self.removeConnectionWaiter(peer: peer, id: waiterID) }
+    }
+  }
+
+  private func registerConnectionWaiter(
+    peer: PeerId,
+    id: UUID,
+    continuation: CheckedContinuation<Bool, Never>
+  ) {
+    if self.connections[peer] != nil {
+      continuation.resume(returning: true)
+      return
+    }
+    self.connectionWaiters[peer, default: []].append(ConnectionWaiter(id: id, continuation: continuation))
+  }
+
+  private func removeConnectionWaiter(peer: PeerId, id: UUID) {
+    guard var waiters = self.connectionWaiters[peer] else { return }
+    waiters.removeAll { $0.id == id }
+    if waiters.isEmpty {
+      self.connectionWaiters.removeValue(forKey: peer)
+    } else {
+      self.connectionWaiters[peer] = waiters
+    }
+  }
+
+  private func resumeConnectionWaiters(for peer: PeerId, connected: Bool) {
+    guard let waiters = self.connectionWaiters.removeValue(forKey: peer) else { return }
+    for waiter in waiters {
+      waiter.continuation.resume(returning: connected)
+    }
   }
 
   private func runAcceptLoop(server: NIOAsyncChannel<MessageChannel, Never>) async {
@@ -265,6 +349,7 @@ public actor TCPTransport {
       self.logger.debug("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }
     self.connections[peerID] = connection
+    self.resumeConnectionWaiters(for: peerID, connected: true)
     return true
   }
 }

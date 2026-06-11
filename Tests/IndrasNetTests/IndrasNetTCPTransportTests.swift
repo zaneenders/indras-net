@@ -77,6 +77,43 @@ import Testing
     }
   }
 
+  @Test func waitForConnectionReturnsWhenPeerConnects() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_120)
+      let peerB = NodeAddress(host: host, port: 29_121)
+
+      let nodeB = try await makeTransport(local: peerB, group: group) { _, _ in }
+      let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
+
+      async let connected = nodeA.waitForConnection(to: peerB.addressKey, timeout: .seconds(100))
+      await nodeA.connect(to: peerB)
+
+      #expect(await connected)
+      #expect(await nodeA.isConnected(to: peerB.addressKey))
+
+      try await nodeA.shutdown()
+      try await nodeB.shutdown()
+    }
+  }
+
+  @Test func waitForConnectionTimesOutWhenPeerIsUnreachable() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_122)
+      let unreachable = NodeAddress(host: host, port: 29_199)
+
+      let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
+      await nodeA.connect(to: unreachable)
+
+      let connected = await nodeA.waitForConnection(to: unreachable.addressKey, timeout: .milliseconds(100))
+      #expect(!connected)
+      #expect(await !nodeA.isConnected(to: unreachable.addressKey))
+
+      try await nodeA.shutdown()
+    }
+  }
+
   @Test func mutualDialConvergesToSingleConnection() async throws {
     try await TestHelpers.withEventLoopGroup { group in
       let host = "127.0.0.1"
@@ -144,10 +181,9 @@ extension IndrasNetTCPTransportTests {
     peerA: NodeAddress,
     peerB: NodeAddress
   ) async {
-    await TestHelpers.waitUntil(timeout: .seconds(10)) {
-      let aReady = await nodeA.isConnected(to: peerB.addressKey)
-      let bReady = await nodeB.isConnected(to: peerA.addressKey)
-      return aReady && bReady
-    }
+    async let aReady = nodeA.waitForConnection(to: peerB.addressKey, timeout: .seconds(10))
+    async let bReady = nodeB.waitForConnection(to: peerA.addressKey, timeout: .seconds(10))
+    #expect(await aReady)
+    #expect(await bReady)
   }
 }

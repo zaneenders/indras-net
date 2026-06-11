@@ -339,17 +339,6 @@ public actor Shell {
       return false
     }
     await transport.connect(to: endpoint)
-
-    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-    while ContinuousClock.now < deadline {
-      if await transport.isConnected(to: peer) {
-        return true
-      }
-      if Task.isCancelled {
-        return false
-      }
-      try? await Task.sleep(for: .milliseconds(25))
-    }
-    return false
+    return await transport.waitForConnection(to: peer, timeout: .seconds(5))
   }
 }
