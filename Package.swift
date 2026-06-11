@@ -24,6 +24,16 @@ let package = Package(
         .treatAllWarnings(as: .error)
       ]
     ),
+    .executableTarget(
+      name: "indras-net-client",
+      dependencies: [
+        "IndrasNet",
+        .product(name: "SystemPackage", package: "swift-system"),
+      ],
+      swiftSettings: [
+        .treatAllWarnings(as: .error)
+      ]
+    ),
     .target(
       name: "IndrasNet",
       dependencies: [
