@@ -5,34 +5,28 @@ import Testing
 @testable import IndrasNet
 
 @Suite struct InstanceClusterTests {
-  @Test func clientSubmitReplicatesAndCommitsOnLeader() {
-    var cluster = TestCluster(
-      nodes: [
-        "a": Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 2),
-        "b": Instance(id: "b", currentTerm: 2),
-      ])
 
-    let reply = cluster.submit(command: Data("set z=3".utf8), to: "a")
+  @Test func disconnectNodeSubmitEntryThenReconnectNode() {
+    var cluster = TestCluster(peers: ["a", "b", "c"])
+    cluster.disconnect("a")
+    cluster.tick("a")
+    cluster.tick("b")
+    cluster.tick("c")
+    guard let leader = cluster.leader else {
+      Issue.record("No leader")
+      return
+    }
 
-    #expect(reply == ClientSubmit.Reply(requestId: 1, status: .ok, logIndex: 1))
-    #expect(cluster.nodes["a"]!.commitIndex == 1)
-    #expect(cluster.nodes["b"]!.log[1].command == Data("set z=3".utf8))
-  }
-
-  @Test func clientSubmitReplicatesToMajorityInThreeNodeCluster() {
-    var cluster = TestCluster(
-      nodes: [
-        "a": Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2),
-        "b": Instance(id: "b", currentTerm: 2),
-        "c": Instance(id: "c", currentTerm: 2),
-      ])
-
-    let reply = cluster.submit(command: Data("set z=3".utf8), to: "a")
-    let command = Data("set z=3".utf8)
-
-    #expect(reply == ClientSubmit.Reply(requestId: 1, status: .ok, logIndex: 1))
-    #expect(cluster.nodes["a"]!.commitIndex == 1)
-    #expect(cluster.nodes["b"]!.log[1].command == command)
-    #expect(cluster.nodes["c"]!.log[1].command == command)
+    _ = cluster.submit(command: Data("set z=3".utf8), to: leader)
+    #expect(cluster.nodes["a"]!.log.count == 1)
+    #expect(cluster.nodes["b"]!.log.count == 2)
+    #expect(cluster.nodes["c"]!.log.count == 2)
+    cluster.reconnect("a")
+    cluster.tick("a")
+    cluster.tick("b")
+    cluster.tick("c")
+    #expect(cluster.nodes["a"]!.log.count == 2)
+    #expect(cluster.nodes["b"]!.log.count == 2)
+    #expect(cluster.nodes["c"]!.log.count == 2)
   }
 }
