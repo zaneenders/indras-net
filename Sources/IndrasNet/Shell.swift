@@ -223,6 +223,9 @@ public actor Shell {
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
+  // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
+  // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
+  // lookup currently crashes IndrasNetTests with signal 6).
   private var clientContinuations: [UInt128: CheckedContinuation<ClientSubmit.Reply, Never>] = [:]
   private var client = RaftClient()
   private let timing: NodeTiming
