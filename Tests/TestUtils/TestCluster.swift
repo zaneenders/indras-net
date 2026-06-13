@@ -30,7 +30,7 @@ public struct TestCluster {
     return nil
   }
 
-  public mutating func tick(_ node: PeerId, at now: ContinuousClock.Instant = .now) {
+  public mutating func fireTimer(_ node: PeerId, at now: ContinuousClock.Instant = .now) {
     var nodeInstance = nodes[node]!
     let directives = nodeInstance.onTimerTick(at: now)
     nodes[node] = nodeInstance
