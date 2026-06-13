@@ -50,7 +50,7 @@ struct Instance {
     self.rng = rng
   }
 
-  mutating func onTimerTick(at now: ContinuousClock.Instant = .now) -> [TimerDirective] {
+  mutating func onTimerTick() -> [TimerDirective] {
     var directives: [TimerDirective] = []
     switch role {
     case .leader:
@@ -77,8 +77,7 @@ struct Instance {
   private mutating func submit(
     _ command: Data,
     requestId: UInt128,
-    from client: PeerId,
-    at now: ContinuousClock.Instant = .now
+    from client: PeerId
   ) -> [ClientSubmit.Args.Action] {
     guard role == .leader else {
       return [
@@ -105,16 +104,14 @@ struct Instance {
 
   mutating func receiveClientSubmit(
     _ peer: PeerId,
-    _ args: ClientSubmit.Args,
-    at now: ContinuousClock.Instant = .now
+    _ args: ClientSubmit.Args
   ) -> [ClientSubmit.Args.Action] {
-    submit(args.command, requestId: args.requestId, from: peer, at: now)
+    submit(args.command, requestId: args.requestId, from: peer)
   }
 
   mutating func receiveRequestVote(
     _ peer: PeerId,
-    _ args: RequestVote.Args,
-    at now: ContinuousClock.Instant = .now
+    _ args: RequestVote.Args
   ) -> [RequestVote.Args.Action] {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
@@ -163,8 +160,7 @@ struct Instance {
   mutating func receiveRequestVoteReply(
     _ peer: PeerId,
     _ sent: RequestVote.Args,
-    _ reply: RequestVote.Reply,
-    at now: ContinuousClock.Instant = .now
+    _ reply: RequestVote.Reply
   ) -> [RequestVote.Reply.Action] {
     var actions: [RequestVote.Reply.Action] = []
 
@@ -190,8 +186,7 @@ struct Instance {
 
   mutating func receiveAppendEntries(
     _ peer: PeerId,
-    _ args: AppendEntries.Args,
-    at now: ContinuousClock.Instant = .now
+    _ args: AppendEntries.Args
   ) -> [AppendEntries.Args.Action] {
     var actions: [AppendEntries.Args.Action] = []
 
@@ -235,8 +230,7 @@ struct Instance {
   mutating func receiveAppendEntriesReply(
     _ peer: PeerId,
     _ sent: AppendEntries.Args,
-    _ reply: AppendEntries.Reply,
-    at now: ContinuousClock.Instant = .now
+    _ reply: AppendEntries.Reply
   ) -> [AppendEntries.Reply.Action] {
     var actions: [AppendEntries.Reply.Action] = []
 

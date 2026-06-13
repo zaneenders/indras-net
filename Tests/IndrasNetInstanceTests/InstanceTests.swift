@@ -20,7 +20,7 @@ import Testing
   @Test func followerTimerFiredStartsCandidacyAndRequestsVotesFromPeers() {
     var instance = Instance.forTests(id: "a", peers: ["b", "c"])
 
-    let directives = instance.onTimerTick(at: ContinuousClock.now)
+    let directives = instance.onTimerTick()
 
     #expect(instance.role == .candidate)
     #expect(instance.currentTerm == 1)
@@ -44,7 +44,7 @@ import Testing
     var instance = Instance.forTests(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
-    let directives = instance.onTimerTick(at: ContinuousClock.now)
+    let directives = instance.onTimerTick()
 
     #expect(instance.role == .candidate)
     #expect(instance.currentTerm == 2)
@@ -68,7 +68,7 @@ import Testing
     var instance = Instance(id: "leader", peers: ["b"], role: .leader, currentTerm: 2)
     let request = RequestVote.Args(term: 2, candidateId: "b", lastLogIndex: 0, lastLogTerm: 0)
 
-    let actions = instance.receiveRequestVote("b", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("b", request)
 
     #expect(instance.role == .leader)
     #expect(actions == [.sendRequestVoteReply(to: "b", term: 2, voteGranted: false)])
@@ -77,7 +77,7 @@ import Testing
   @Test func leaderTimerFiredSendsHeartbeats() {
     var instance = Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2)
 
-    let directives = instance.onTimerTick(at: ContinuousClock.now)
+    let directives = instance.onTimerTick()
 
     #expect(instance.role == .leader)
     #expect(instance.currentTerm == 2)
@@ -100,7 +100,7 @@ import Testing
   @Test func timeUntilNextTimerReturnsHeartbeatIntervalForLeader() {
     var instance = Instance.forTests(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
 
-    let delay = instance.onTimerTick(at: ContinuousClock.now).scheduledDelay
+    let delay = instance.onTimerTick().scheduledDelay
 
     #expect(delay == NodeTiming.default.heartbeatInterval)
   }
@@ -110,7 +110,7 @@ import Testing
 
     let request = RequestVote.Args(
       term: 1, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == "candidate")
     #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)))
@@ -121,7 +121,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 1, votedFor: "first")
 
     let request = RequestVote.Args(term: 1, candidateId: "second", lastLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.receiveRequestVote("second", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("second", request)
 
     #expect(instance.votedFor == "first")
     #expect(actions == [.sendRequestVoteReply(to: "second", term: 1, voteGranted: false)])
@@ -131,7 +131,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 3)
 
     let request = RequestVote.Args(term: 2, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == nil)
     #expect(actions == [.sendRequestVoteReply(to: "candidate", term: 3, voteGranted: false)])
@@ -142,7 +142,7 @@ import Testing
       id: "follower", role: .candidate, currentTerm: 1, votes: ["follower": true])
 
     let request = RequestVote.Args(term: 3, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 3)
@@ -157,7 +157,7 @@ import Testing
 
     let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVoteReply(
-      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
+      "b", sent, .init(granted: true, term: 1))
 
     #expect(instance.role == .leader)
     #expect(instance.votes == ["a": true, "b": true])
@@ -171,7 +171,7 @@ import Testing
 
     let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVoteReply(
-      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
+      "b", sent, .init(granted: true, term: 1))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .follower)
@@ -184,7 +184,7 @@ import Testing
 
     let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVoteReply(
-      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
+      "b", sent, .init(granted: true, term: 1))
 
     #expect(actions.isEmpty)
     #expect(instance.role == .candidate)
@@ -197,7 +197,7 @@ import Testing
 
     let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
     let actions = instance.receiveRequestVoteReply(
-      "b", sent, .init(granted: false, term: 2), at: ContinuousClock.now)
+      "b", sent, .init(granted: false, term: 2))
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 2)
@@ -210,7 +210,7 @@ import Testing
     var instance = Instance.forTests(id: "follower", role: .candidate, currentTerm: 2)
 
     let actions = instance.receiveAppendEntries(
-      "leader", .init(term: 2, leaderId: "leader"), at: ContinuousClock.now)
+      "leader", .init(term: 2, leaderId: "leader"))
 
     #expect(instance.role == .follower)
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 2, success: true)))
@@ -221,7 +221,7 @@ import Testing
     var instance = Instance(id: "a", peers: ["b", "c"], role: .leader, currentTerm: 2)
 
     let actions = instance.receiveAppendEntries(
-      "b", .init(term: 2, leaderId: "b"), at: ContinuousClock.now)
+      "b", .init(term: 2, leaderId: "b"))
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 2)
@@ -240,7 +240,7 @@ import Testing
     var instance = Instance(id: "follower", role: .candidate, currentTerm: 5)
 
     let actions = instance.receiveAppendEntries(
-      "leader", .init(term: 3, leaderId: "leader"), at: ContinuousClock.now)
+      "leader", .init(term: 3, leaderId: "leader"))
 
     #expect(actions == [.sendAppendEntriesReply(to: "leader", term: 5, success: false)])
     #expect(instance.role == .candidate)
@@ -252,7 +252,7 @@ import Testing
       id: "follower", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
     let actions = instance.receiveAppendEntries(
-      "leader", .init(term: 4, leaderId: "leader"), at: ContinuousClock.now)
+      "leader", .init(term: 4, leaderId: "leader"))
 
     #expect(instance.currentTerm == 4)
     #expect(instance.votedFor == nil)
@@ -267,7 +267,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 1, log: .sentinel + [entry])
 
     let request = RequestVote.Args(term: 1, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
-    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == nil)
     #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: false)))
@@ -278,7 +278,7 @@ import Testing
     var instance = Instance(id: "follower", currentTerm: 1, log: .sentinel + [entry])
 
     let request = RequestVote.Args(term: 1, candidateId: "candidate", lastLogIndex: 1, lastLogTerm: 2)
-    let actions = instance.receiveRequestVote("candidate", request, at: ContinuousClock.now)
+    let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == "candidate")
     #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)))
@@ -297,8 +297,7 @@ import Testing
         prevLogTerm: 0,
         entries: entries,
         leaderCommit: 1
-      ),
-      at: ContinuousClock.now
+      )
     )
 
     #expect(instance.log.count == 2)
@@ -321,8 +320,7 @@ import Testing
         prevLogTerm: 9,
         entries: [LogEntry(term: 2, command: Data("new".utf8))],
         leaderCommit: 1
-      ),
-      at: ContinuousClock.now
+      )
     )
 
     #expect(instance.log.count == 2)
@@ -344,8 +342,7 @@ import Testing
         prevLogTerm: 1,
         entries: [replacement, LogEntry(term: 2, command: Data("d".utf8))],
         leaderCommit: 2
-      ),
-      at: ContinuousClock.now
+      )
     )
 
     #expect(instance.log.map(\.command) == [Data(), first.command, replacement.command, Data("d".utf8)])
@@ -355,7 +352,7 @@ import Testing
   @Test func clientSubmitRejectsNonLeader() {
     var follower = Instance(id: "b", peers: ["a"], currentTerm: 2)
     _ = follower.receiveAppendEntries(
-      "a", AppendEntries.Args(term: 2, leaderId: "a"), at: ContinuousClock.now)
+      "a", AppendEntries.Args(term: 2, leaderId: "a"))
 
     let actions = follower.receiveClientSubmit(
       RaftClient.defaultClientID,
@@ -379,11 +376,11 @@ import Testing
       log: .sentinel + [entry]
     )
 
-    _ = instance.onTimerTick(at: ContinuousClock.now)
+    _ = instance.onTimerTick()
     let sent = AppendEntries.Args(
       term: 2, leaderId: "a", prevLogIndex: 1, prevLogTerm: 2, entries: [], leaderCommit: 0)
     let actions = instance.receiveAppendEntriesReply(
-      "b", sent, .init(term: 2, success: true), at: ContinuousClock.now)
+      "b", sent, .init(term: 2, success: true))
 
     #expect(instance.commitIndex == 1)
     #expect(actions.contains(.apply(entry: entry)))
@@ -400,11 +397,11 @@ import Testing
       log: .sentinel + [first, second]
     )
 
-    _ = instance.onTimerTick(at: ContinuousClock.now)
+    _ = instance.onTimerTick()
     let sent = AppendEntries.Args(
       term: 2, leaderId: "a", prevLogIndex: 2, prevLogTerm: 2, entries: [], leaderCommit: 0)
     let actions = instance.receiveAppendEntriesReply(
-      "b", sent, .init(term: 2, success: false), at: ContinuousClock.now)
+      "b", sent, .init(term: 2, success: false))
 
     #expect(
       actions.contains { action in
@@ -420,7 +417,7 @@ import Testing
 
     let sent = AppendEntries.Args(term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0)
     let actions = instance.receiveAppendEntriesReply(
-      "b", sent, .init(term: 2, success: false), at: ContinuousClock.now)
+      "b", sent, .init(term: 2, success: false))
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 2)
@@ -444,7 +441,7 @@ import Testing
     let sent = AppendEntries.Args(
       term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0, entries: [entry1], leaderCommit: 0)
     let actions = leader.receiveAppendEntriesReply(
-      "b", sent, .init(term: 2, success: true), at: ContinuousClock.now)
+      "b", sent, .init(term: 2, success: true))
 
     #expect(leader.commitIndex == 1)
     #expect(!actions.contains(.apply(entry: entry2)))
@@ -466,9 +463,9 @@ import Testing
     let sentThrough1 = AppendEntries.Args(
       term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0, entries: [entry1], leaderCommit: 0)
     _ = leader.receiveAppendEntriesReply(
-      "b", sentThrough2, .init(term: 2, success: true), at: ContinuousClock.now)
+      "b", sentThrough2, .init(term: 2, success: true))
     let actions = leader.receiveAppendEntriesReply(
-      "b", sentThrough1, .init(term: 2, success: true), at: ContinuousClock.now)
+      "b", sentThrough1, .init(term: 2, success: true))
 
     #expect(leader.commitIndex == 2)
     #expect(!actions.contains(.apply(entry: entry2)))

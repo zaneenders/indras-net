@@ -47,9 +47,9 @@ public struct TestCluster {
     return nil
   }
 
-  public mutating func fireTimer(_ node: PeerId, at now: ContinuousClock.Instant = .now) {
+  public mutating func fireTimer(_ node: PeerId) {
     var nodeInstance = nodes[node]!
-    let directives = nodeInstance.onTimerTick(at: now)
+    let directives = nodeInstance.onTimerTick()
     nodes[node] = nodeInstance
     processTimerDirectives(from: node, directives)
   }
