@@ -39,6 +39,9 @@ public actor TCPTransport {
   private var connections: [PeerId: Connection] = [:]
   private var dialing: Set<PeerId> = []
   private var connectionWaiters: [PeerId: [ConnectionWaiter]] = [:]
+  // Channels that have been opened but not yet adopted (handshake in flight),
+  // keyed by connection ID so a timeout can close exactly the stalled channel.
+  private var pendingHandshakes: [UInt64: any Channel] = [:]
   private var nextConnectionID: UInt64 = 0
 
   public init(
@@ -164,6 +167,12 @@ public actor TCPTransport {
       self.resumeConnectionWaiters(for: peer, connected: false)
     }
 
+    for (connectionID, channel) in self.pendingHandshakes {
+      self.logger.debug("Closing pending handshake #\(connectionID) on shutdown")
+      channel.close(promise: nil)
+    }
+    self.pendingHandshakes.removeAll()
+
     if let server = self.serverChannel {
       server.channel.close(promise: nil)
       self.serverChannel = nil
@@ -269,8 +278,17 @@ public actor TCPTransport {
     }
 
     let connectionID = self.mintConnectionID()
+    self.pendingHandshakes[connectionID] = channel
+    let timeout = self.configuration.handshakeTimeout
+    let timeoutTask = Task {
+      try? await Task.sleep(for: timeout)
+      self.expireHandshake(connectionID)
+    }
+
     var peerID: PeerId?
     defer {
+      timeoutTask.cancel()
+      self.pendingHandshakes.removeValue(forKey: connectionID)
       if let peerID, self.connections[peerID]?.id == connectionID {
         self.connections.removeValue(forKey: peerID)
       }
@@ -361,8 +379,19 @@ public actor TCPTransport {
       self.logger.debug("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }
     self.connections[peerID] = connection
+    self.pendingHandshakes.removeValue(forKey: connection.id)
     self.resumeConnectionWaiters(for: peerID, connected: true)
     return true
+  }
+
+  // Closes a channel that opened but never completed its handshake. A no-op if
+  // the connection was already adopted or torn down (removed from the table).
+  private func expireHandshake(_ connectionID: UInt64) {
+    guard let channel = self.pendingHandshakes.removeValue(forKey: connectionID) else {
+      return
+    }
+    self.logger.debug("Handshake timed out for connection #\(connectionID)")
+    channel.close(promise: nil)
   }
 }
 

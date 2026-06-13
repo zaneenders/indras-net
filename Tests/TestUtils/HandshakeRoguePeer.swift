@@ -63,6 +63,86 @@ public enum HandshakeRoguePeer {
     return Acceptor(server: server, supervisor: supervisor)
   }
 
+  /// Accepts TCP connections but never sends a handshake frame, so a dialer's
+  /// handshake can never complete. Tracks how many connections the remote side
+  /// closed, which is the observable signal that the dialer reaped a stalled
+  /// handshake.
+  public actor SilentAcceptor {
+    private var server: NIOAsyncChannel<NIOAsyncChannel<Message, Message>, Never>?
+    private var supervisor: Task<Void, Never>?
+    private var closedConnections = 0
+
+    public init() {}
+
+    public var listenPort: Int? {
+      server?.channel.localAddress?.port
+    }
+
+    public var closedConnectionCount: Int {
+      closedConnections
+    }
+
+    fileprivate func start(
+      host: String,
+      port: Int,
+      eventLoopGroup: MultiThreadedEventLoopGroup
+    ) async throws {
+      let server = try await ServerBootstrap(group: eventLoopGroup)
+        .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+        .bind(host: host, port: port, childChannelInitializer: messageChannelInitializer())
+      self.server = server
+      self.supervisor = Task { [weak self] in
+        await withDiscardingTaskGroup { group in
+          do {
+            try await server.executeThenClose { inbound in
+              for try await child in inbound {
+                group.addTask {
+                  await Self.drainSilently(child)
+                  await self?.noteConnectionClosed()
+                }
+              }
+            }
+          } catch {
+            // Acceptor shut down.
+          }
+        }
+      }
+    }
+
+    private func noteConnectionClosed() {
+      closedConnections += 1
+    }
+
+    public func shutdown() async {
+      supervisor?.cancel()
+      server?.channel.close(promise: nil)
+      _ = await supervisor?.value
+      supervisor = nil
+      server = nil
+    }
+
+    private static func drainSilently(_ asyncChannel: NIOAsyncChannel<Message, Message>) async {
+      do {
+        try await asyncChannel.executeThenClose { inbound, _ in
+          for try await _ in inbound {}
+        }
+      } catch {
+        // Connection closed.
+      }
+    }
+  }
+
+  /// Starts a `SilentAcceptor` listening on the given port.
+  public static func startSilentAcceptor(
+    host: String = "127.0.0.1",
+    port: Int,
+    eventLoopGroup: MultiThreadedEventLoopGroup
+  ) async throws -> SilentAcceptor {
+    let acceptor = SilentAcceptor()
+    try await acceptor.start(host: host, port: port, eventLoopGroup: eventLoopGroup)
+    return acceptor
+  }
+
   /// Dials a listening peer and greets with the given identity.
   public static func dialAndGreet(
     target: NodeAddress,
@@ -125,7 +205,7 @@ extension HandshakeRoguePeer {
   }
 
   @Sendable
-  private static func messageChannelInitializer(
+  static func messageChannelInitializer(
     maxPayloadLength: UInt32 = Message.defaultMaxPayloadLength
   ) -> @Sendable (Channel) -> EventLoopFuture<NIOAsyncChannel<Message, Message>> {
     { channel in

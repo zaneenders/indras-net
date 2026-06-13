@@ -200,6 +200,57 @@ import Testing
     }
   }
 
+  @Test func reapsStalledHandshakeAfterTimeout() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_134)
+      let silentAddress = NodeAddress(host: host, port: 29_135)
+
+      let silent = try await HandshakeRoguePeer.startSilentAcceptor(
+        host: host,
+        port: silentAddress.port,
+        eventLoopGroup: group
+      )
+
+      let nodeA = TCPTransport(
+        configuration: TransportConfiguration(
+          localPeerID: peerA.addressKey,
+          host: host,
+          port: peerA.port,
+          handshakeTimeout: .milliseconds(250)
+        ),
+        eventLoopGroup: group,
+        logger: TestHelpers.quietLogger
+      )
+      try await nodeA.start { _, _ in }
+
+      await nodeA.connect(to: silentAddress)
+
+      // The peer never sends a handshake frame, so the only thing that can close
+      // the half-open connection is the dialer's handshake-timeout reaper.
+      await TestHelpers.waitUntil(timeout: .seconds(2)) {
+        await silent.closedConnectionCount > 0
+      }
+
+      #expect(await silent.closedConnectionCount > 0)
+      #expect(await !nodeA.isConnected(to: silentAddress.addressKey))
+      #expect(await nodeA.connectedPeers().isEmpty)
+
+      // The dialing slot is freed, so a fresh dial is admitted (not silently
+      // dropped as a duplicate of the still-pending one). Re-dial in the poll
+      // loop since `finishDialing` clears the slot only after the close
+      // propagates back to the dialer.
+      await TestHelpers.waitUntil(timeout: .seconds(3)) {
+        await nodeA.connect(to: silentAddress)
+        return await silent.closedConnectionCount > 1
+      }
+      #expect(await silent.closedConnectionCount > 1)
+
+      await silent.shutdown()
+      try await nodeA.shutdown()
+    }
+  }
+
   @Test func rejectsSelfDial() async throws {
     try await TestHelpers.withEventLoopGroup { group in
       let host = "127.0.0.1"
