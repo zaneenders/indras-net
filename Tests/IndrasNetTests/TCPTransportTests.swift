@@ -293,9 +293,10 @@ extension IndrasNetTCPTransportTests {
     peerA: NodeAddress,
     peerB: NodeAddress
   ) async {
-    async let aReady = nodeA.waitForConnection(to: peerB.addressKey, timeout: .seconds(10))
-    async let bReady = nodeB.waitForConnection(to: peerA.addressKey, timeout: .seconds(10))
-    #expect(await aReady)
-    #expect(await bReady)
+    await TestHelpers.waitUntil(timeout: .seconds(10)) {
+      let aConnected = await nodeA.isConnected(to: peerB.addressKey)
+      let bConnected = await nodeB.isConnected(to: peerA.addressKey)
+      return aConnected && bConnected
+    }
   }
 }

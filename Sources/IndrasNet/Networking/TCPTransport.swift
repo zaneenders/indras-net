@@ -6,14 +6,19 @@ import NIOPosix
 
 private typealias MessageChannel = NIOAsyncChannel<Message, Message>
 
-typealias IndrasNetInboundHandler = @Sendable (RaftMessage, PeerId) async -> Void
-
-public actor TCPTransport {
+public actor TCPTransport: NodeTransport {
   private typealias ConnectionJob = @Sendable () async -> Void
 
   private enum ConnectionOrigin {
     case accepted
     case created
+  }
+
+  private enum OutboundDialOutcome {
+    case connected
+    case failed
+    /// Handshake completed but duplicate resolution kept the peer's connection.
+    case lostDuplicateResolution
   }
 
   private struct Connection {
@@ -39,8 +44,6 @@ public actor TCPTransport {
   private var connections: [PeerId: Connection] = [:]
   private var dialing: Set<PeerId> = []
   private var connectionWaiters: [PeerId: [ConnectionWaiter]] = [:]
-  // Channels that have been opened but not yet adopted (handshake in flight),
-  // keyed by connection ID so a timeout can close exactly the stalled channel.
   private var pendingHandshakes: [UInt64: any Channel] = [:]
   private var nextConnectionID: UInt64 = 0
 
@@ -61,15 +64,15 @@ public actor TCPTransport {
     return address.port
   }
 
-  func connectedPeers() -> Set<PeerId> {
+  package func connectedPeers() async -> Set<PeerId> {
     Set(self.connections.keys)
   }
 
-  func isConnected(to peer: PeerId) -> Bool {
+  package func isConnected(to peer: PeerId) async -> Bool {
     self.connections[peer] != nil
   }
 
-  func waitForConnection(to peer: PeerId, timeout: Duration = .seconds(5)) async -> Bool {
+  package func waitForConnection(to peer: PeerId, timeout: Duration) async -> Bool {
     if self.connections[peer] != nil {
       return true
     }
@@ -94,14 +97,14 @@ public actor TCPTransport {
     }
   }
 
-  func send(_ message: RaftMessage, to peer: PeerId) async throws {
+  package func send(_ message: RaftMessage, to peer: PeerId) async throws {
     guard let connection = self.connections[peer] else {
       throw IndrasNetTransportError.peerNotConnected(peer)
     }
     try await connection.writer.write(message.message)
   }
 
-  func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
+  package func start(onMessage: @escaping IndrasNetInboundHandler) async throws {
     guard self.onMessage == nil else {
       return
     }
@@ -130,26 +133,28 @@ public actor TCPTransport {
     self.enqueue { await self.runAcceptLoop(server: server) }
   }
 
-  func connect(to peer: NodeAddress) {
+  package func connect(to peer: NodeAddress) async {
     let key = peer.addressKey
     guard self.connections[key] == nil, !self.dialing.contains(key) else { return }
     self.dialing.insert(key)
     let scheduled = self.enqueue {
-      await self.dial(peer)
-      await self.finishDialing(key)
+      let outcome = await self.dial(peer)
+      await self.finishDialing(key, outcome: outcome)
     }
     if !scheduled {
       self.dialing.remove(key)
     }
   }
 
-  private func finishDialing(_ key: PeerId) {
+  private func finishDialing(_ key: PeerId, outcome: OutboundDialOutcome) {
     self.dialing.remove(key)
     if self.connections[key] != nil {
       self.resumeConnectionWaiters(for: key, connected: true)
-    } else {
+    } else if outcome == .failed {
       self.resumeConnectionWaiters(for: key, connected: false)
     }
+    // A losing outbound duplicate may still be followed by the peer's inbound
+    // connection adopting and resuming waiters with `connected: true`.
   }
 
   private func mintConnectionID() -> UInt64 {
@@ -218,7 +223,9 @@ public actor TCPTransport {
 
   private func removeConnectionWaiter(peer: PeerId, id: UUID) {
     guard var waiters = self.connectionWaiters[peer] else { return }
-    waiters.removeAll { $0.id == id }
+    guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+    let waiter = waiters.remove(at: index)
+    waiter.continuation.resume(returning: false)
     if waiters.isEmpty {
       self.connectionWaiters.removeValue(forKey: peer)
     } else {
@@ -238,7 +245,7 @@ public actor TCPTransport {
       try await server.executeThenClose { inbound in
         for try await childChannel in inbound {
           let scheduled = self.enqueue {
-            await self.handleConnection(asyncChannel: childChannel, origin: .accepted)
+            _ = await self.handleConnection(asyncChannel: childChannel, origin: .accepted)
           }
           if !scheduled {
             childChannel.channel.close(promise: nil)
@@ -250,7 +257,7 @@ public actor TCPTransport {
     }
   }
 
-  private func dial(_ peer: NodeAddress) async {
+  private func dial(_ peer: NodeAddress) async -> OutboundDialOutcome {
     do {
       let asyncChannel = try await ClientBootstrap(group: self.eventLoopGroup)
         .channelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -260,23 +267,30 @@ public actor TCPTransport {
           channelInitializer: asyncChannelInitializer()
         )
 
-      await self.handleConnection(asyncChannel: asyncChannel, origin: .created, expectedPeerID: peer.addressKey)
+      return await self.handleConnection(
+        asyncChannel: asyncChannel,
+        origin: .created,
+        expectedPeerID: peer.addressKey
+      )
     } catch {
       self.logger.debug("Outbound dial failed: \(peer)")
+      return .failed
     }
   }
 
+  @discardableResult
   private func handleConnection(
     asyncChannel: MessageChannel,
     origin: ConnectionOrigin,
     expectedPeerID: PeerId? = nil
-  ) async {
+  ) async -> OutboundDialOutcome {
     let channel = asyncChannel.channel
     guard let onMessage = self.onMessage else {
       channel.close(promise: nil)
-      return
+      return .failed
     }
 
+    var outboundOutcome: OutboundDialOutcome = .failed
     let connectionID = self.mintConnectionID()
     self.pendingHandshakes[connectionID] = channel
     let timeout = self.configuration.handshakeTimeout
@@ -354,7 +368,13 @@ public actor TCPTransport {
           guard let peerID else { return }
           let connection = Connection(id: connectionID, channel: channel, writer: outbound)
           guard self.adopt(connection, peerID: peerID, origin: origin) else {
+            if origin == .created {
+              outboundOutcome = .lostDuplicateResolution
+            }
             return
+          }
+          if origin == .created {
+            outboundOutcome = .connected
           }
           self.logger.debug("Connection: \(peerID)")
         }
@@ -362,6 +382,8 @@ public actor TCPTransport {
     } catch {
       // Connection ended; fall through to unregister.
     }
+
+    return outboundOutcome
   }
 
   // Whether to adopt the given connection over an existing one.
@@ -416,6 +438,6 @@ private func asyncChannelInitializer(
   }
 }
 
-enum IndrasNetTransportError: Error, Equatable, Sendable {
+package enum IndrasNetTransportError: Error, Equatable, Sendable {
   case peerNotConnected(PeerId)
 }

@@ -1,13 +1,13 @@
 import Foundation
 import NIOCore
 
-enum ClientSubmit {
-  enum Status: UInt8, Equatable, Sendable {
+package enum ClientSubmit {
+  package enum Status: UInt8, Equatable, Sendable {
     case ok = 1
     case notLeader = 2
   }
 
-  struct Reply: Equatable, Sendable {
+  package struct Reply: Equatable, Sendable {
     let requestId: UInt128
     let status: Status
     let leaderId: PeerId?
@@ -53,7 +53,7 @@ enum ClientSubmit {
     }
   }
 
-  struct Args: Equatable, Sendable {
+  package struct Args: Equatable, Sendable {
     let requestId: UInt128
     let command: Data
 

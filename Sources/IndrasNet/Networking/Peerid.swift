@@ -1,1 +1,1 @@
-typealias PeerId = String
+public typealias PeerId = String

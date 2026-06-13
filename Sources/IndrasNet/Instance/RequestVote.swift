@@ -1,7 +1,7 @@
 import NIOCore
 
-enum RequestVote {
-  struct Reply: Equatable, Sendable {
+package enum RequestVote {
+  package struct Reply: Equatable, Sendable {
     let granted: Bool
     let term: Term
 
@@ -34,7 +34,7 @@ enum RequestVote {
     }
   }
 
-  struct Args: Equatable, Sendable {
+  package struct Args: Equatable, Sendable {
     let term: Term
     let candidateId: PeerId
     let lastLogIndex: LogIndex

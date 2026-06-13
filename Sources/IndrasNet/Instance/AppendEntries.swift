@@ -1,7 +1,7 @@
 import NIOCore
 
-enum AppendEntries {
-  struct Reply: Equatable, Sendable {
+package enum AppendEntries {
+  package struct Reply: Equatable, Sendable {
     let term: Term
     let success: Bool
 
@@ -37,7 +37,7 @@ enum AppendEntries {
     }
   }
 
-  struct Args: Equatable, Sendable {
+  package struct Args: Equatable, Sendable {
     let term: Term
     let leaderId: PeerId
     let prevLogIndex: LogIndex

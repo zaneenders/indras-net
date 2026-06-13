@@ -5,7 +5,7 @@ import Testing
 @testable import IndrasNet
 
 public struct InProcessMesh {
-  let shells: [Shell]
+  let shells: [TCPShell]
   public let recorder: ShellActionRecorder
 
   public static func start(
@@ -40,7 +40,7 @@ public struct InProcessMesh {
     return InProcessMesh(shells: shells, recorder: recorder)
   }
 
-  public func waitForLeader(timeout: Duration = .seconds(5)) async throws -> Shell {
+  public func waitForLeader(timeout: Duration = .seconds(5)) async throws -> TCPShell {
     await TestHelpers.waitUntil(timeout: timeout) {
       for shell in shells where await shell.instance.role == .leader {
         return true
@@ -57,7 +57,7 @@ public struct InProcessMesh {
     throw MissingLeader()
   }
 
-  public func waitForFollower(knownLeader leaderID: PeerId, timeout: Duration = .seconds(5)) async throws -> Shell {
+  public func waitForFollower(knownLeader leaderID: PeerId, timeout: Duration = .seconds(5)) async throws -> TCPShell {
     await TestHelpers.waitUntil(timeout: timeout) {
       for shell in shells where await shell.instance.role == .follower {
         if await shell.instance.leaderId == leaderID {

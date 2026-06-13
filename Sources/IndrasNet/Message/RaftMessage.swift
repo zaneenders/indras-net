@@ -1,6 +1,6 @@
 import NIOCore
 
-enum RaftMessage: Equatable, Sendable {
+package enum RaftMessage: Equatable, Sendable {
   case requestVote(RequestVote.Args)
   case requestVoteReply(RequestVote.Reply)
   case appendEntries(AppendEntries.Args)

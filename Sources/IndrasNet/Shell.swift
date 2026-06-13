@@ -225,11 +225,11 @@ extension Shell {
   }
 }
 
-public actor Shell {
+package actor Shell<Transport: NodeTransport> {
   // Node
   var instance: Instance
   let peerId: PeerId
-  let transport: TCPTransport
+  let transport: Transport
   private let logger: Logger
   private var endpoints: [PeerId: NodeAddress] = [:]
   private var timerTask: Task<Void, Never>?
@@ -244,10 +244,10 @@ public actor Shell {
   private var client = RaftClient()
   private let timing: NodeTiming
 
-  public init(
+  package init(
     _ node: NodeAddress,
     timing: NodeTiming = .default,
-    transport: TCPTransport,
+    transport: Transport,
     logger: Logger? = nil
   ) {
     self.peerId = node.addressKey
@@ -257,11 +257,7 @@ public actor Shell {
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
-  public init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
-    self.init(node, timing: timing, transport: TCPTransport(configuration: node.tcpConfiguration()), logger: logger)
-  }
-
-  public func start(with peers: [NodeAddress]) async throws -> Int {
+  package func start(with peers: [NodeAddress]) async throws -> Int {
     isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
     self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing)
@@ -343,7 +339,7 @@ public actor Shell {
     }
   }
 
-  public func shutdown() async throws {
+  package func shutdown() async throws {
     await stop()
     try await transport.shutdown()
   }
@@ -380,5 +376,18 @@ public actor Shell {
     }
     await transport.connect(to: endpoint)
     return await transport.waitForConnection(to: peer, timeout: .seconds(5))
+  }
+}
+
+typealias TCPShell = Shell<TCPTransport>
+
+extension Shell where Transport == TCPTransport {
+  init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
+    self.init(
+      node,
+      timing: timing,
+      transport: TCPTransport(configuration: node.tcpConfiguration()),
+      logger: logger
+    )
   }
 }
