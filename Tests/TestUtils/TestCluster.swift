@@ -13,11 +13,28 @@ public struct TestCluster {
 
   /// Fresh cluster: every node is a follower in term 0 with only the sentinel log entry.
   /// Each node's `peers` is the full mesh minus itself.
-  public init(peers: [PeerId]) {
+  /// When `seed` is set, each node gets a deterministic RNG derived from it.
+  public init(peers: [PeerId], seed: UInt64? = nil) {
     let peerSet = Set(peers)
+    let nodeSeeds: [UInt64]
+    if let seed {
+      var clusterRNG = SeededRandomNumberGenerator(seed: seed)
+      nodeSeeds = peers.map { _ in clusterRNG.next() }
+    } else {
+      nodeSeeds = []
+    }
+
     self.nodes = Dictionary(
-      uniqueKeysWithValues: peers.map { id in
-        (id, Instance(id: id, peers: peerSet.subtracting([id])))
+      uniqueKeysWithValues: peers.enumerated().map { index, id in
+        let peers = peerSet.subtracting([id])
+        if index < nodeSeeds.count {
+          let instance = Instance(
+            id: id,
+            peers: peers,
+            rng: SeededRandomNumberGenerator(seed: nodeSeeds[index]))
+          return (id, instance)
+        }
+        return (id, Instance(id: id, peers: peers))
       })
   }
 

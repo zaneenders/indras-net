@@ -335,16 +335,17 @@ public actor TCPTransport {
     }
   }
 
-  // Weather to adopt the given connection over an existing one
+  // Whether to adopt the given connection over an existing one.
   private func adopt(_ connection: Connection, peerID: PeerId, origin: ConnectionOrigin) -> Bool {
+    // Both ends keep the connection initiated by the lower peer ID, so they
+    // deterministically converge on the same surviving socket.
+    let initiatorIsLocal = origin == .created
+    let localIsLower = self.configuration.localPeerID < peerID
+    guard initiatorIsLocal == localIsLower else {
+      return false
+    }
+
     if let existing = self.connections[peerID] {
-      // Both ends keep the connection initiated by the lower peer ID, so they
-      // deterministically converge on the same surviving socket.
-      let initiatorIsLocal = origin == .created
-      let localIsLower = self.configuration.localPeerID < peerID
-      guard initiatorIsLocal == localIsLower else {
-        return false
-      }
       existing.channel.close(promise: nil)
       self.logger.debug("Resolved duplicate to \(peerID): kept #\(connection.id), dropped #\(existing.id)")
     }

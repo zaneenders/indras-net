@@ -256,7 +256,7 @@ public actor Shell {
       await self.receiveMessage(message: message, from: from)
     }
 
-    scheduleNext(delay: instance.getNextDelay(at: .now))
+    scheduleNext(delay: instance.getNextDelay())
 
     guard let port = await transport.listenPort() else {
       await stop()

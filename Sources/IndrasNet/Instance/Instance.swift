@@ -17,6 +17,7 @@ struct Instance {
   private var lastSentEndIndex: [PeerId: LogIndex]
   private var pendingClientRequests: [LogIndex: (requestId: UInt128, client: PeerId)]
   let timing: NodeTiming
+  private var rng: any RandomNumberGenerator & Sendable
 
   var lastLogIndex: LogIndex { log.lastLogIndex }
   var lastLogTerm: Term { log.lastLogTerm }
@@ -31,7 +32,8 @@ struct Instance {
     commitIndex: LogIndex = 0,
     lastApplied: LogIndex = 0,
     log: [LogEntry] = .sentinel,
-    timing: NodeTiming = .default
+    timing: NodeTiming = .default,
+    rng: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator()
   ) {
     self.id = id
     self.peers = peers
@@ -47,6 +49,7 @@ struct Instance {
     self.lastSentEndIndex = [:]
     self.pendingClientRequests = [:]
     self.timing = timing
+    self.rng = rng
   }
 
   mutating func onTimerTick(at now: ContinuousClock.Instant = .now) -> [TimerDirective] {
@@ -61,16 +64,16 @@ struct Instance {
     case .follower, .candidate:
       directives = convertToCandidate()
     }
-    directives.append(.scheduleNext(delay: getNextDelay(at: now)))
+    directives.append(.scheduleNext(delay: getNextDelay()))
     return directives
   }
 
-  func getNextDelay(at now: ContinuousClock.Instant) -> Duration {
+  mutating func getNextDelay() -> Duration {
     switch role {
     case .leader:
       return timing.heartbeatInterval
     case .follower, .candidate:
-      return Duration(.milliseconds(Int64.random(in: timing.electionTimeoutRange)))
+      return .milliseconds(Int64.random(in: timing.electionTimeoutRange, using: &rng))
     }
   }
 
@@ -156,7 +159,7 @@ struct Instance {
     }
     actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
     if shouldResetElectionTimer {
-      actions.append(.scheduleNext(delay: getNextDelay(at: now)))
+      actions.append(.scheduleNext(delay: getNextDelay()))
     }
     return actions
   }
@@ -174,7 +177,7 @@ struct Instance {
       votedFor = nil
       votes = [:]
       leaderId = nil
-      actions.append(.scheduleNext(delay: getNextDelay(at: now)))
+      actions.append(.scheduleNext(delay: getNextDelay()))
       return actions
     }
 
@@ -228,7 +231,7 @@ struct Instance {
     }
 
     actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: true))
-    actions.append(.scheduleNext(delay: getNextDelay(at: now)))
+    actions.append(.scheduleNext(delay: getNextDelay()))
     return actions
   }
 
@@ -245,7 +248,7 @@ struct Instance {
       votedFor = nil
       votes = [:]
       leaderId = nil
-      actions.append(.scheduleNext(delay: getNextDelay(at: now)))
+      actions.append(.scheduleNext(delay: getNextDelay()))
       return actions
     }
 

@@ -1,9 +1,12 @@
 import Foundation
+import TestUtils
 import Testing
 
 @testable import IndrasNet
 
 @Suite struct InstanceTests {
+  private let electionTimeout = InstanceTestSupport.electionTimeout()
+
   @Test func startsAsFollowerInTermZero() {
     let instance = Instance(id: "a")
 
@@ -15,7 +18,7 @@ import Testing
   }
 
   @Test func followerTimerFiredStartsCandidacyAndRequestsVotesFromPeers() {
-    var instance = Instance(id: "a", peers: ["b", "c"])
+    var instance = Instance.forTests(id: "a", peers: ["b", "c"])
 
     let directives = instance.onTimerTick(at: ContinuousClock.now)
 
@@ -34,19 +37,12 @@ import Testing
         .requestVote(
           to: "c",
           args: RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
-    let scheduleNext = directives.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(directives.scheduledDelay == electionTimeout)
   }
 
   @Test func candidateTimerFiredRestartsElection() {
-    var instance = Instance(id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
+    var instance = Instance.forTests(
+      id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
     let directives = instance.onTimerTick(at: ContinuousClock.now)
 
@@ -65,15 +61,7 @@ import Testing
         .requestVote(
           to: "c",
           args: RequestVote.Args(term: 2, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0))))
-    let scheduleNext = directives.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(directives.scheduledDelay == electionTimeout)
   }
 
   @Test func leaderRejectsRequestVote() {
@@ -93,10 +81,7 @@ import Testing
 
     #expect(instance.role == .leader)
     #expect(instance.currentTerm == 2)
-    #expect(
-      directives.compactMap {
-        if case .scheduleNext(let delay) = $0 { delay } else { nil }
-      }.last == NodeTiming.default.heartbeatInterval)
+    #expect(directives.scheduledDelay == NodeTiming.default.heartbeatInterval)
     #expect(directives.filter { if case .scheduleNext = $0 { false } else { true } }.count == 2)
     #expect(
       directives.contains(.sendAppendEntry(to: "b", args: AppendEntries.Args(term: 2, leaderId: "a"))))
@@ -105,27 +90,23 @@ import Testing
   }
 
   @Test func initialTimerDelayReturnsElectionTimeoutForFollower() {
-    let instance = Instance(id: "a", peers: ["b"])
-    let delay = instance.getNextDelay(at: .now)
-    let timing = NodeTiming.default
+    var instance = Instance.forTests(id: "a", peers: ["b"])
 
-    #expect(
-      delay >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-        && delay < .milliseconds(timing.electionTimeoutRange.upperBound))
+    let delay = instance.getNextDelay()
+
+    #expect(delay == electionTimeout)
   }
 
   @Test func timeUntilNextTimerReturnsHeartbeatIntervalForLeader() {
-    var instance = Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
+    var instance = Instance.forTests(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
 
-    let delay = instance.onTimerTick(at: ContinuousClock.now).compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
+    let delay = instance.onTimerTick(at: ContinuousClock.now).scheduledDelay
 
     #expect(delay == NodeTiming.default.heartbeatInterval)
   }
 
   @Test func grantsVoteToFirstCandidateInTerm() {
-    var instance = Instance(id: "follower", currentTerm: 1)
+    var instance = Instance.forTests(id: "follower", currentTerm: 1)
 
     let request = RequestVote.Args(
       term: 1, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
@@ -133,15 +114,7 @@ import Testing
 
     #expect(instance.votedFor == "candidate")
     #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)))
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func rejectsVoteForSecondCandidateInSameTerm() {
@@ -165,7 +138,7 @@ import Testing
   }
 
   @Test func stepsDownWhenSeeingHigherTermOnVoteRequest() {
-    var instance = Instance(
+    var instance = Instance.forTests(
       id: "follower", role: .candidate, currentTerm: 1, votes: ["follower": true])
 
     let request = RequestVote.Args(term: 3, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
@@ -175,15 +148,7 @@ import Testing
     #expect(instance.currentTerm == 3)
     #expect(instance.votedFor == "candidate")
     #expect(instance.votes.isEmpty)
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func candidateBecomesLeaderWithMajorityVotes() {
@@ -196,10 +161,7 @@ import Testing
     #expect(instance.votes == ["a": true, "b": true])
     #expect(actions.contains(.sendAppendEntry(to: "b", args: AppendEntries.Args(term: 1, leaderId: "a"))))
     #expect(actions.contains(.sendAppendEntry(to: "c", args: AppendEntries.Args(term: 1, leaderId: "a"))))
-    #expect(
-      actions.compactMap {
-        if case .scheduleNext(let delay) = $0 { delay } else { nil }
-      }.last == NodeTiming.default.heartbeatInterval)
+    #expect(actions.scheduledDelay == NodeTiming.default.heartbeatInterval)
   }
 
   @Test func ignoresVoteReplyWhenNotCandidate() {
@@ -224,7 +186,7 @@ import Testing
   }
 
   @Test func stepsDownWhenVoteReplyHasHigherTerm() {
-    var instance = Instance(
+    var instance = Instance.forTests(
       id: "a", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
     let actions = instance.receiveRequestVoteReply("b", .init(granted: false, term: 2), at: ContinuousClock.now)
@@ -233,34 +195,18 @@ import Testing
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func appendEntriesFromLeaderResetsElectionTimeout() {
-    var instance = Instance(id: "follower", role: .candidate, currentTerm: 2)
+    var instance = Instance.forTests(id: "follower", role: .candidate, currentTerm: 2)
 
     let actions = instance.receiveAppendEntries(
       "leader", .init(term: 2, leaderId: "leader"), at: ContinuousClock.now)
 
     #expect(instance.role == .follower)
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 2, success: true)))
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func sameTermAppendEntriesFromOtherLeaderStepsDownToFollower() {
@@ -294,7 +240,7 @@ import Testing
   }
 
   @Test func appendEntriesWithHigherTermUpdatesFollower() {
-    var instance = Instance(
+    var instance = Instance.forTests(
       id: "follower", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
     let actions = instance.receiveAppendEntries(
@@ -305,15 +251,7 @@ import Testing
     #expect(instance.votes.isEmpty)
     #expect(instance.role == .follower)
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 4, success: true)))
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func rejectsVoteWhenCandidateLogIsStale() {
@@ -464,7 +402,7 @@ import Testing
   }
 
   @Test func stepsDownWhenAppendEntriesReplyHasHigherTerm() {
-    var instance = Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
+    var instance = Instance.forTests(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
 
     let actions = instance.receiveAppendEntriesReply(
       "b", .init(term: 2, success: false), at: ContinuousClock.now)
@@ -473,14 +411,6 @@ import Testing
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
-    let scheduleNext = actions.compactMap {
-      if case .scheduleNext(let delay) = $0 { delay } else { nil }
-    }.last
-    let timing = NodeTiming.default
-    #expect(
-      scheduleNext.map {
-        $0 >= .milliseconds(timing.electionTimeoutRange.lowerBound)
-          && $0 < .milliseconds(timing.electionTimeoutRange.upperBound)
-      } == true)
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 }
