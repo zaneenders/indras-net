@@ -201,12 +201,13 @@ public struct TestCluster {
     var recipientNode = nodes[recipient]!
     let followerActions = recipientNode.receiveAppendEntries(sender, args)
     nodes[recipient] = recipientNode
-    processFollowerActions(leader: sender, peer: recipient, followerActions, reply: &reply)
+    processFollowerActions(leader: sender, peer: recipient, sent: args, followerActions, reply: &reply)
   }
 
   private mutating func processFollowerActions(
     leader: PeerId,
     peer: PeerId,
+    sent: AppendEntries.Args,
     _ actions: [AppendEntries.Args.Action],
     reply: inout ClientSubmit.Reply?
   ) {
@@ -218,7 +219,7 @@ public struct TestCluster {
 
     var leaderNode = nodes[leader]!
     let leaderActions = leaderNode.receiveAppendEntriesReply(
-      peer, .init(term: leaderNode.currentTerm, success: success))
+      peer, sent, .init(term: leaderNode.currentTerm, success: success))
     nodes[leader] = leaderNode
     processLeaderReplyActions(from: leader, leaderActions, reply: &reply)
   }

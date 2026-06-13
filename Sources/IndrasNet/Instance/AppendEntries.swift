@@ -97,5 +97,9 @@ enum AppendEntries {
       self.entries = entries
       self.leaderCommit = leaderCommit
     }
+
+    var replicatedThrough: LogIndex {
+      prevLogIndex + LogIndex(entries.count)
+    }
   }
 }

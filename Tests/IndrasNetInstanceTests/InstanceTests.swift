@@ -372,7 +372,10 @@ import Testing
     )
 
     _ = instance.onTimerTick(at: ContinuousClock.now)
-    let actions = instance.receiveAppendEntriesReply("b", .init(term: 2, success: true), at: ContinuousClock.now)
+    let sent = AppendEntries.Args(
+      term: 2, leaderId: "a", prevLogIndex: 1, prevLogTerm: 2, entries: [], leaderCommit: 0)
+    let actions = instance.receiveAppendEntriesReply(
+      "b", sent, .init(term: 2, success: true), at: ContinuousClock.now)
 
     #expect(instance.commitIndex == 1)
     #expect(actions.contains(.apply(entry: entry)))
@@ -390,7 +393,10 @@ import Testing
     )
 
     _ = instance.onTimerTick(at: ContinuousClock.now)
-    let actions = instance.receiveAppendEntriesReply("b", .init(term: 2, success: false), at: ContinuousClock.now)
+    let sent = AppendEntries.Args(
+      term: 2, leaderId: "a", prevLogIndex: 2, prevLogTerm: 2, entries: [], leaderCommit: 0)
+    let actions = instance.receiveAppendEntriesReply(
+      "b", sent, .init(term: 2, success: false), at: ContinuousClock.now)
 
     #expect(
       actions.contains { action in
@@ -404,13 +410,59 @@ import Testing
   @Test func stepsDownWhenAppendEntriesReplyHasHigherTerm() {
     var instance = Instance.forTests(id: "a", peers: ["b"], role: .leader, currentTerm: 1)
 
+    let sent = AppendEntries.Args(term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0)
     let actions = instance.receiveAppendEntriesReply(
-      "b", .init(term: 2, success: false), at: ContinuousClock.now)
+      "b", sent, .init(term: 2, success: false), at: ContinuousClock.now)
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
     #expect(actions.scheduledDelay == electionTimeout)
+  }
+
+  @Test func staleAppendEntriesReplyDoesNotCommitUnreplicatedEntries() {
+    let entry1 = LogEntry(term: 2, command: Data("1".utf8))
+    let entry2 = LogEntry(term: 2, command: Data("2".utf8))
+    var leader = Instance(
+      id: "a",
+      peers: ["b"],
+      role: .leader,
+      currentTerm: 2,
+      log: .sentinel + [entry1, entry2]
+    )
+
+    // Delayed reply that only acknowledged index 1 must not commit index 2.
+    let sent = AppendEntries.Args(
+      term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0, entries: [entry1], leaderCommit: 0)
+    let actions = leader.receiveAppendEntriesReply(
+      "b", sent, .init(term: 2, success: true), at: ContinuousClock.now)
+
+    #expect(leader.commitIndex == 1)
+    #expect(!actions.contains(.apply(entry: entry2)))
+  }
+
+  @Test func outOfOrderAppendEntriesRepliesUseMonotonicMatchIndex() {
+    let entry1 = LogEntry(term: 2, command: Data("1".utf8))
+    let entry2 = LogEntry(term: 2, command: Data("2".utf8))
+    var leader = Instance(
+      id: "a",
+      peers: ["b"],
+      role: .leader,
+      currentTerm: 2,
+      log: .sentinel + [entry1, entry2]
+    )
+
+    let sentThrough2 = AppendEntries.Args(
+      term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0, entries: [entry1, entry2], leaderCommit: 0)
+    let sentThrough1 = AppendEntries.Args(
+      term: 2, leaderId: "a", prevLogIndex: 0, prevLogTerm: 0, entries: [entry1], leaderCommit: 0)
+    _ = leader.receiveAppendEntriesReply(
+      "b", sentThrough2, .init(term: 2, success: true), at: ContinuousClock.now)
+    let actions = leader.receiveAppendEntriesReply(
+      "b", sentThrough1, .init(term: 2, success: true), at: ContinuousClock.now)
+
+    #expect(leader.commitIndex == 2)
+    #expect(!actions.contains(.apply(entry: entry2)))
   }
 }

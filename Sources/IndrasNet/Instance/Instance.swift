@@ -14,7 +14,6 @@ struct Instance {
   private(set) var leaderId: PeerId?
   private var nextIndex: [PeerId: LogIndex]
   private var matchIndex: [PeerId: LogIndex]
-  private var lastSentEndIndex: [PeerId: LogIndex]
   private var pendingClientRequests: [LogIndex: (requestId: UInt128, client: PeerId)]
   let timing: NodeTiming
   private var rng: any RandomNumberGenerator & Sendable
@@ -46,7 +45,6 @@ struct Instance {
     self.lastApplied = lastApplied
     self.nextIndex = [:]
     self.matchIndex = [:]
-    self.lastSentEndIndex = [:]
     self.pendingClientRequests = [:]
     self.timing = timing
     self.rng = rng
@@ -58,7 +56,6 @@ struct Instance {
     case .leader:
       for peer in peers {
         let args = makeAppendEntries(for: peer)
-        lastSentEndIndex[peer] = args.prevLogIndex + LogIndex(args.entries.count)
         directives.append(.sendAppendEntry(to: peer, args: args))
       }
     case .follower, .candidate:
@@ -101,7 +98,6 @@ struct Instance {
     var actions: [ClientSubmit.Args.Action] = []
     for peer in peers {
       let args = makeAppendEntries(for: peer)
-      lastSentEndIndex[peer] = args.prevLogIndex + LogIndex(args.entries.count)
       actions.append(.sendAppendEntry(to: peer, args: args))
     }
     return actions
@@ -237,6 +233,7 @@ struct Instance {
 
   mutating func receiveAppendEntriesReply(
     _ peer: PeerId,
+    _ sent: AppendEntries.Args,
     _ reply: AppendEntries.Reply,
     at now: ContinuousClock.Instant = .now
   ) -> [AppendEntries.Reply.Action] {
@@ -255,15 +252,16 @@ struct Instance {
     guard role == .leader, reply.term == currentTerm else { return actions }
 
     if reply.success {
-      let endIndex = lastSentEndIndex[peer, default: 0]
-      matchIndex[peer] = endIndex
-      nextIndex[peer] = endIndex + 1
+      let acknowledged = sent.replicatedThrough
+      if acknowledged > matchIndex[peer, default: 0] {
+        matchIndex[peer] = acknowledged
+        nextIndex[peer] = acknowledged + 1
+      }
       actions.append(contentsOf: advanceCommitIndex())
     } else {
       let currentNext = nextIndex[peer, default: lastLogIndex + 1]
       nextIndex[peer] = max(1, currentNext - 1)
       let args = makeAppendEntries(for: peer)
-      lastSentEndIndex[peer] = args.prevLogIndex + LogIndex(args.entries.count)
       actions.append(.sendAppendEntry(to: peer, args: args))
     }
 
@@ -275,11 +273,9 @@ struct Instance {
     leaderId = id
     nextIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, lastLogIndex + 1) })
     matchIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, LogIndex(0)) })
-    lastSentEndIndex = [:]
 
     for peer in peers {
       let args = makeAppendEntries(for: peer)
-      lastSentEndIndex[peer] = args.prevLogIndex + LogIndex(args.entries.count)
       actions.append(.sendAppendEntry(to: peer, args: args))
     }
     actions.append(.scheduleNext(delay: timing.heartbeatInterval))

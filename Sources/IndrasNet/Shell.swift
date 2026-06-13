@@ -49,6 +49,7 @@ extension Shell {
   }
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
+    inflightAppendEntries[peer, default: []].append(args)
     deliver(
       to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
   }
@@ -134,9 +135,14 @@ extension Shell {
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
+    guard let args = inflightAppendEntries[peer]?.removeFirst() else {
+      logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
+      return
+    }
+
     let previousRole = instance.role
 
-    for action in instance.receiveAppendEntriesReply(peer, reply) {
+    for action in instance.receiveAppendEntriesReply(peer, args, reply) {
       switch action {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
@@ -223,6 +229,7 @@ public actor Shell {
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
+  private var inflightAppendEntries: [PeerId: [AppendEntries.Args]] = [:]
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
   // lookup currently crashes IndrasNetTests with signal 6).
@@ -282,17 +289,29 @@ public actor Shell {
 
     do {
       guard await ensureConnected(to: peer) else {
+        removeInflightAppendEntries(message, to: peer)
         logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
+      removeInflightAppendEntries(message, to: peer)
       return
     } catch IndrasNetTransportError.peerNotConnected {
+      removeInflightAppendEntries(message, to: peer)
       return
     } catch {
+      removeInflightAppendEntries(message, to: peer)
       logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
+    }
+  }
+
+  private func removeInflightAppendEntries(_ message: RaftMessage, to peer: PeerId) {
+    guard case .appendEntries(let args) = message else { return }
+    inflightAppendEntries[peer]?.removeAll { $0 == args }
+    if inflightAppendEntries[peer]?.isEmpty == true {
+      inflightAppendEntries.removeValue(forKey: peer)
     }
   }
 
@@ -326,6 +345,7 @@ public actor Shell {
 
     let deliveries = Array(inflightDeliveries.values)
     inflightDeliveries.removeAll()
+    inflightAppendEntries.removeAll()
     for task in deliveries {
       task.cancel()
     }
