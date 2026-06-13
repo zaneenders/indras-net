@@ -155,7 +155,9 @@ import Testing
     var instance = Instance(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
 
-    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1), at: ContinuousClock.now)
+    let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVoteReply(
+      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
 
     #expect(instance.role == .leader)
     #expect(instance.votes == ["a": true, "b": true])
@@ -167,7 +169,9 @@ import Testing
   @Test func ignoresVoteReplyWhenNotCandidate() {
     var instance = Instance(id: "a", peers: ["b", "c"], currentTerm: 1)
 
-    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1), at: ContinuousClock.now)
+    let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVoteReply(
+      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
 
     #expect(actions.isEmpty)
     #expect(instance.role == .follower)
@@ -178,7 +182,9 @@ import Testing
     var instance = Instance(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 2, votes: ["a": true])
 
-    let actions = instance.receiveRequestVoteReply("b", .init(granted: true, term: 1), at: ContinuousClock.now)
+    let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVoteReply(
+      "b", sent, .init(granted: true, term: 1), at: ContinuousClock.now)
 
     #expect(actions.isEmpty)
     #expect(instance.role == .candidate)
@@ -189,7 +195,9 @@ import Testing
     var instance = Instance.forTests(
       id: "a", role: .candidate, currentTerm: 1, votedFor: "a", votes: ["a": true])
 
-    let actions = instance.receiveRequestVoteReply("b", .init(granted: false, term: 2), at: ContinuousClock.now)
+    let sent = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVoteReply(
+      "b", sent, .init(granted: false, term: 2), at: ContinuousClock.now)
 
     #expect(instance.role == .follower)
     #expect(instance.currentTerm == 2)

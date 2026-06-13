@@ -104,24 +104,24 @@ struct Instance {
   }
 
   mutating func receiveClientSubmit(
-    _ client: PeerId,
+    _ peer: PeerId,
     _ args: ClientSubmit.Args,
     at now: ContinuousClock.Instant = .now
   ) -> [ClientSubmit.Args.Action] {
-    submit(args.command, requestId: args.requestId, from: client, at: now)
+    submit(args.command, requestId: args.requestId, from: peer, at: now)
   }
 
   mutating func receiveRequestVote(
     _ peer: PeerId,
-    _ request: RequestVote.Args,
+    _ args: RequestVote.Args,
     at now: ContinuousClock.Instant = .now
   ) -> [RequestVote.Args.Action] {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
     var shouldResetElectionTimer = false
 
-    if request.term > currentTerm {
-      currentTerm = request.term
+    if args.term > currentTerm {
+      currentTerm = args.term
       votedFor = nil
       votes = [:]
       role = .follower
@@ -129,26 +129,26 @@ struct Instance {
       shouldResetElectionTimer = true
     }
 
-    if request.term < currentTerm {
+    if args.term < currentTerm {
       actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
       return actions
     }
 
-    if role == .leader || (role == .candidate && request.candidateId != id) {
+    if role == .leader || (role == .candidate && args.candidateId != id) {
       actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
       return actions
     }
 
-    if votedFor == nil || votedFor == request.candidateId {
+    if votedFor == nil || votedFor == args.candidateId {
       let upToDate = isLogUpToDate(
-        candidateLastIndex: request.lastLogIndex,
-        candidateLastTerm: request.lastLogTerm,
+        candidateLastIndex: args.lastLogIndex,
+        candidateLastTerm: args.lastLogTerm,
         receiverLastIndex: lastLogIndex,
         receiverLastTerm: lastLogTerm
       )
       if upToDate {
         grantVote = true
-        votedFor = request.candidateId
+        votedFor = args.candidateId
         shouldResetElectionTimer = true
         actions.append(.persist)
       }
@@ -162,6 +162,7 @@ struct Instance {
 
   mutating func receiveRequestVoteReply(
     _ peer: PeerId,
+    _ sent: RequestVote.Args,
     _ reply: RequestVote.Reply,
     at now: ContinuousClock.Instant = .now
   ) -> [RequestVote.Reply.Action] {
@@ -188,14 +189,14 @@ struct Instance {
   }
 
   mutating func receiveAppendEntries(
-    _ leader: PeerId,
+    _ peer: PeerId,
     _ args: AppendEntries.Args,
     at now: ContinuousClock.Instant = .now
   ) -> [AppendEntries.Args.Action] {
     var actions: [AppendEntries.Args.Action] = []
 
     if args.term < currentTerm {
-      actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: false))
+      actions.append(.sendAppendEntriesReply(to: peer, term: currentTerm, success: false))
       return actions
     }
 
@@ -210,7 +211,7 @@ struct Instance {
     leaderId = args.leaderId
 
     guard log.matches(prevLogIndex: args.prevLogIndex, prevLogTerm: args.prevLogTerm) else {
-      actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: false))
+      actions.append(.sendAppendEntriesReply(to: peer, term: currentTerm, success: false))
       return actions
     }
 
@@ -226,7 +227,7 @@ struct Instance {
       }
     }
 
-    actions.append(.sendAppendEntriesReply(to: leader, term: currentTerm, success: true))
+    actions.append(.sendAppendEntriesReply(to: peer, term: currentTerm, success: true))
     actions.append(.scheduleNext(delay: getNextDelay()))
     return actions
   }

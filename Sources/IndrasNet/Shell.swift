@@ -37,6 +37,7 @@ extension Shell {
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) {
+    inflightRequestVotes[peer, default: []].append(args)
     deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
   }
 
@@ -70,7 +71,7 @@ extension Shell {
       receiveClientSubmitReply(reply)
     case .requestVote(let args):
       logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
-      receiveRequestVote(from: peer, request: args)
+      receiveRequestVote(from: peer, args: args)
     case .requestVoteReply(let reply):
       logRaftEvent(.requestVoteResponse(direction: "in", peer: peer, term: reply.term, granted: reply.granted))
       receiveRequestVoteReply(from: peer, reply: reply)
@@ -83,10 +84,10 @@ extension Shell {
     }
   }
 
-  private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) {
+  private func receiveRequestVote(from peer: PeerId, args: RequestVote.Args) {
     let previousRole = instance.role
 
-    for action in instance.receiveRequestVote(peer, request) {
+    for action in instance.receiveRequestVote(peer, args) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
@@ -101,9 +102,14 @@ extension Shell {
   }
 
   private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
+    guard let sent = inflightRequestVotes[peer]?.removeFirst() else {
+      logger.notice("[\(peerId)] requestVote reply from \(peer) with no inflight request")
+      return
+    }
+
     let previousRole = instance.role
 
-    for action in instance.receiveRequestVoteReply(peer, reply) {
+    for action in instance.receiveRequestVoteReply(peer, sent, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
         deliverAppendEntries(to: peer, args: args)
@@ -115,10 +121,10 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+  private func receiveAppendEntries(from peer: PeerId, args: AppendEntries.Args) {
     let previousRole = instance.role
 
-    for action in instance.receiveAppendEntries(leader, args) {
+    for action in instance.receiveAppendEntries(peer, args) {
       switch action {
       case .sendAppendEntriesReply(let to, let term, let success):
         deliverAppendEntriesReply(to: to, term: term, success: success)
@@ -135,14 +141,14 @@ extension Shell {
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
-    guard let args = inflightAppendEntries[peer]?.removeFirst() else {
+    guard let sent = inflightAppendEntries[peer]?.removeFirst() else {
       logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
       return
     }
 
     let previousRole = instance.role
 
-    for action in instance.receiveAppendEntriesReply(peer, args, reply) {
+    for action in instance.receiveAppendEntriesReply(peer, sent, reply) {
       switch action {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
@@ -230,6 +236,7 @@ public actor Shell {
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
   private var inflightAppendEntries: [PeerId: [AppendEntries.Args]] = [:]
+  private var inflightRequestVotes: [PeerId: [RequestVote.Args]] = [:]
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
   // lookup currently crashes IndrasNetTests with signal 6).
@@ -289,29 +296,38 @@ public actor Shell {
 
     do {
       guard await ensureConnected(to: peer) else {
-        removeInflightAppendEntries(message, to: peer)
+        removeInflightOutbound(message, to: peer)
         logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
-      removeInflightAppendEntries(message, to: peer)
+      removeInflightOutbound(message, to: peer)
       return
     } catch IndrasNetTransportError.peerNotConnected {
-      removeInflightAppendEntries(message, to: peer)
+      removeInflightOutbound(message, to: peer)
       return
     } catch {
-      removeInflightAppendEntries(message, to: peer)
+      removeInflightOutbound(message, to: peer)
       logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
     }
   }
 
-  private func removeInflightAppendEntries(_ message: RaftMessage, to peer: PeerId) {
-    guard case .appendEntries(let args) = message else { return }
-    inflightAppendEntries[peer]?.removeAll { $0 == args }
-    if inflightAppendEntries[peer]?.isEmpty == true {
-      inflightAppendEntries.removeValue(forKey: peer)
+  private func removeInflightOutbound(_ message: RaftMessage, to peer: PeerId) {
+    switch message {
+    case .appendEntries(let args):
+      inflightAppendEntries[peer]?.removeAll { $0 == args }
+      if inflightAppendEntries[peer]?.isEmpty == true {
+        inflightAppendEntries.removeValue(forKey: peer)
+      }
+    case .requestVote(let args):
+      inflightRequestVotes[peer]?.removeAll { $0 == args }
+      if inflightRequestVotes[peer]?.isEmpty == true {
+        inflightRequestVotes.removeValue(forKey: peer)
+      }
+    default:
+      break
     }
   }
 
@@ -346,6 +362,7 @@ public actor Shell {
     let deliveries = Array(inflightDeliveries.values)
     inflightDeliveries.removeAll()
     inflightAppendEntries.removeAll()
+    inflightRequestVotes.removeAll()
     for task in deliveries {
       task.cancel()
     }

@@ -134,18 +134,19 @@ public struct TestCluster {
     var recipientNode = nodes[recipient]!
     let actions = recipientNode.receiveRequestVote(sender, args)
     nodes[recipient] = recipientNode
-    processRequestVoteActions(candidate: sender, from: recipient, actions)
+    processRequestVoteActions(candidate: sender, sent: args, from: recipient, actions)
   }
 
   private mutating func processRequestVoteActions(
     candidate: PeerId,
+    sent: RequestVote.Args,
     from voter: PeerId,
     _ actions: [RequestVote.Args.Action]
   ) {
     for action in actions {
       switch action {
       case .sendRequestVoteReply(let peer, let term, let voteGranted):
-        deliverRequestVoteReply(from: voter, to: peer, term: term, voteGranted: voteGranted)
+        deliverRequestVoteReply(from: voter, to: peer, sent: sent, term: term, voteGranted: voteGranted)
       case .scheduleNext, .persist:
         break
       }
@@ -155,6 +156,7 @@ public struct TestCluster {
   private mutating func deliverRequestVoteReply(
     from sender: PeerId,
     to recipient: PeerId,
+    sent: RequestVote.Args,
     term: Term,
     voteGranted: Bool
   ) {
@@ -162,7 +164,7 @@ public struct TestCluster {
 
     var recipientNode = nodes[recipient]!
     let actions = recipientNode.receiveRequestVoteReply(
-      sender, .init(granted: voteGranted, term: term))
+      sender, sent, .init(granted: voteGranted, term: term))
     nodes[recipient] = recipientNode
     processRequestVoteReplyActions(from: recipient, actions)
   }
