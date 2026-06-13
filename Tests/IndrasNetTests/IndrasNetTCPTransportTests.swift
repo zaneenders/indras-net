@@ -154,6 +154,67 @@ import Testing
       try await high.shutdown()
     }
   }
+
+  @Test func rejectsDialedPeerAnnouncingWrongIdentity() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_130)
+      let rogueAddress = NodeAddress(host: host, port: 29_131)
+
+      let rogue = try await HandshakeRoguePeer.startAcceptor(
+        host: host,
+        port: rogueAddress.port,
+        helloID: "wrong-peer-id",
+        eventLoopGroup: group
+      )
+
+      let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
+      await nodeA.connect(to: rogueAddress)
+
+      let connected = await nodeA.waitForConnection(to: rogueAddress.addressKey, timeout: .milliseconds(500))
+      #expect(!connected)
+      #expect(await nodeA.connectedPeers().isEmpty)
+
+      await rogue.shutdown()
+      try await nodeA.shutdown()
+    }
+  }
+
+  @Test func rejectsAcceptedPeerGreetingAsLocalIdentity() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_132)
+
+      let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
+
+      try await HandshakeRoguePeer.dialAndGreet(
+        target: peerA,
+        greetAs: peerA.addressKey,
+        eventLoopGroup: group
+      )
+
+      try await Task.sleep(for: .milliseconds(200))
+      #expect(await nodeA.connectedPeers().isEmpty)
+
+      try await nodeA.shutdown()
+    }
+  }
+
+  @Test func rejectsSelfDial() async throws {
+    try await TestHelpers.withEventLoopGroup { group in
+      let host = "127.0.0.1"
+      let peerA = NodeAddress(host: host, port: 29_133)
+
+      let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
+      await nodeA.connect(to: peerA)
+
+      let connected = await nodeA.waitForConnection(to: peerA.addressKey, timeout: .milliseconds(500))
+      #expect(!connected)
+      #expect(await nodeA.connectedPeers().isEmpty)
+
+      try await nodeA.shutdown()
+    }
+  }
 }
 
 extension IndrasNetTCPTransportTests {

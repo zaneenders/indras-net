@@ -251,7 +251,7 @@ public actor TCPTransport {
           channelInitializer: asyncChannelInitializer()
         )
 
-      await self.handleConnection(asyncChannel: asyncChannel, origin: .created)
+      await self.handleConnection(asyncChannel: asyncChannel, origin: .created, expectedPeerID: peer.addressKey)
     } catch {
       self.logger.debug("Outbound dial failed: \(peer)")
     }
@@ -259,7 +259,8 @@ public actor TCPTransport {
 
   private func handleConnection(
     asyncChannel: MessageChannel,
-    origin: ConnectionOrigin
+    origin: ConnectionOrigin,
+    expectedPeerID: PeerId? = nil
   ) async {
     let channel = asyncChannel.channel
     guard let onMessage = self.onMessage else {
@@ -314,9 +315,19 @@ public actor TCPTransport {
 
           switch (frame, origin) {
           case (.hello(let id), .created):
-            peerID = id  // I dialed and expect their hello.
+            // I dialed and expect their hello. Reject a self-connection and any
+            // peer announcing an identity other than the one we dialed.
+            guard id != self.configuration.localPeerID else { return }
+            if let expectedPeerID, id != expectedPeerID {
+              self.logger.warning("Dialed \(expectedPeerID) but peer announced \(id); rejecting")
+              return
+            }
+            peerID = id
           case (.greet(let id), .accepted):
-            peerID = id  // They dialed and greeted; answer with my hello.
+            // They dialed and greeted; answer with my hello. Reject a peer
+            // claiming to be us, which can only happen via a self-dial.
+            guard id != self.configuration.localPeerID else { return }
+            peerID = id
             try await outbound.write(HandshakeFrame.hello(self.configuration.localPeerID).message)
           default:
             return  // Wrong handshake frame for this side. Bad state.
