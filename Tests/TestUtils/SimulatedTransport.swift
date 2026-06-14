@@ -41,7 +41,13 @@ package actor SimulatedTransport: NodeTransport {
   }
 
   package func waitForConnection(to peer: PeerId, timeout: Duration) async -> Bool {
-    await mesh.waitForConnection(from: localPeerID, to: peer, timeout: timeout)
+    if await mesh.canDeliver(from: localPeerID, to: peer) {
+      return true
+    }
+    if await mesh.isPartitioned(from: localPeerID, to: peer) {
+      return false
+    }
+    return await mesh.waitForConnection(from: localPeerID, to: peer, timeout: timeout)
   }
 
   package func connect(to peer: NodeAddress) async {

@@ -48,6 +48,12 @@ extension SimulatedTransport {
           && partitions.canDeliver(from: sender, to: recipient))
     }
 
+    /// Both peers are registered but a partition blocks delivery between them.
+    func isPartitioned(from sender: PeerId, to recipient: PeerId) -> Bool {
+      listenPorts[sender] != nil && listenPorts[recipient] != nil
+        && !partitions.canDeliver(from: sender, to: recipient)
+    }
+
     func deliver(from sender: PeerId, to recipient: PeerId, message: RaftMessage) async throws {
       guard canDeliver(from: sender, to: recipient) else {
         throw IndrasNetTransportError.peerNotConnected(recipient)

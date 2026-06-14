@@ -87,6 +87,17 @@ package struct SimulatedCluster: Sendable {
     clocks[index].advance(by: duration)
   }
 
+  /// Advances every manual clock by `duration`.
+  package func advanceAll(by duration: Duration) {
+    for index in clocks.indices {
+      advance(index, by: duration)
+    }
+  }
+
+  package func peer(at index: Int) -> PeerId {
+    addresses[index].addressKey
+  }
+
   package func waitForLeader(timeout: Duration = .seconds(5)) async throws -> SimulatedShell {
     let shells = self.shells
     await TestHelpers.waitUntil(timeout: timeout) {
@@ -111,6 +122,50 @@ package struct SimulatedCluster: Sendable {
       count += 1
     }
     return count
+  }
+
+  package func waitForFollower(knownLeader leaderID: PeerId, timeout: Duration = .seconds(5)) async throws
+    -> SimulatedShell
+  {
+    let shells = self.shells
+    await TestHelpers.waitUntil(timeout: timeout) {
+      for shell in shells where await shell.instance.role == .follower {
+        if await shell.instance.leaderId == leaderID {
+          return true
+        }
+      }
+      return false
+    }
+
+    for shell in shells where await shell.instance.role == .follower {
+      if await shell.instance.leaderId == leaderID {
+        return shell
+      }
+    }
+
+    Issue.record("Expected a follower that knows the leader")
+    struct MissingFollower: Error {}
+    throw MissingFollower()
+  }
+
+  package func waitForReplicated(command: Data, atIndex index: LogIndex, timeout: Duration = .seconds(5))
+    async throws
+  {
+    let shells = self.shells
+    await TestHelpers.waitUntil(timeout: timeout) {
+      for shell in shells {
+        let nodeLog = await shell.instance.log
+        guard nodeLog.count > Int(index), nodeLog[Int(index)].command == command else {
+          return false
+        }
+      }
+      return true
+    }
+
+    for shell in shells {
+      let nodeLog = await shell.instance.log
+      #expect(nodeLog[Int(index)].command == command)
+    }
   }
 
   package func disconnect(_ peer: PeerId) async {
