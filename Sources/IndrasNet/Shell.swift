@@ -11,7 +11,7 @@ extension Shell {
     timerTask = Task {
       var nextDelay: Duration = delay
       repeat {
-        try? await Task.sleep(for: nextDelay)
+        await self.timerSleep(nextDelay)
         if Task.isCancelled { break }
         nextDelay = self.handleTimerTick()
       } while !Task.isCancelled
@@ -243,24 +243,30 @@ package actor Shell<Transport: NodeTransport> {
   private var clientContinuations: [UInt128: CheckedContinuation<ClientSubmit.Reply, Never>] = [:]
   private var client = RaftClient()
   private let timing: NodeTiming
+  private let rng: any RandomNumberGenerator & Sendable
+  private let timerSleep: @Sendable (Duration) async -> Void
 
   package init(
     _ node: NodeAddress,
     timing: NodeTiming = .default,
     transport: Transport,
+    rng: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator(),
+    timerSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
     logger: Logger? = nil
   ) {
     self.peerId = node.addressKey
     self.timing = timing
     self.transport = transport
-    self.instance = Instance(id: node.addressKey, timing: timing)
+    self.rng = rng
+    self.timerSleep = timerSleep
+    self.instance = Instance(id: node.addressKey, timing: timing, rng: rng)
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
   package func start(with peers: [NodeAddress]) async throws -> Int {
     isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing)
+    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing, rng: rng)
 
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)

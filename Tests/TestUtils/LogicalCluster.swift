@@ -3,9 +3,9 @@ import Testing
 
 @testable import IndrasNet
 
-public struct TestCluster {
+public struct LogicalCluster {
   public private(set) var nodes: [PeerId: Instance]
-  private var disconnectedLinks: Set<Link> = []
+  private var partitions = PartitionMap()
 
   public init(nodes: [PeerId: Instance]) {
     self.nodes = nodes
@@ -55,29 +55,27 @@ public struct TestCluster {
   }
 
   public func isConnected(from sender: PeerId, to recipient: PeerId) -> Bool {
-    sender == recipient || !disconnectedLinks.contains(Link(sender, recipient))
+    partitions.canDeliver(from: sender, to: recipient)
   }
 
   public mutating func disconnect(from sender: PeerId, to recipient: PeerId) {
-    disconnectedLinks.insert(Link(sender, recipient))
+    partitions.disconnect(from: sender, to: recipient)
   }
 
   public mutating func disconnect(_ peer: PeerId) {
-    for other in nodes.keys where other != peer {
-      disconnect(from: peer, to: other)
-    }
+    partitions.disconnect(peer, from: nodes.keys)
   }
 
   public mutating func reconnect(from sender: PeerId, to recipient: PeerId) {
-    disconnectedLinks.remove(Link(sender, recipient))
+    partitions.reconnect(from: sender, to: recipient)
   }
 
   public mutating func reconnect(_ peer: PeerId) {
-    disconnectedLinks = disconnectedLinks.filter { !$0.involves(peer) }
+    partitions.reconnect(peer)
   }
 
   public mutating func reconnectAll() {
-    disconnectedLinks.removeAll()
+    partitions.reconnectAll()
   }
 
   public mutating func submit(

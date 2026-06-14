@@ -70,45 +70,26 @@ import Testing
   }
 
   @Test func threeSimulatedShellsElectLeader() async throws {
-    let mesh = SimulatedTransport.Mesh()
-    let nodes = (0..<3).map { NodeAddress(host: "sim", port: 100 + $0) }
+    let cluster = try await SimulatedCluster.start(nodeCount: 3, seed: 1, basePort: 100)
+    defer { try? await cluster.shutdown() }
 
-    let shells: [SimulatedShell] = nodes.map { node in
-      Shell(
-        node,
-        transport: SimulatedTransport(peer: node, mesh: mesh),
-        logger: TestHelpers.quietLogger
-      )
-    }
-
-    _ = try await shells[2].start(with: [nodes[1], nodes[0]])
-    _ = try await shells[1].start(with: [nodes[2], nodes[0]])
-    _ = try await shells[0].start(with: [nodes[1], nodes[2]])
-
-    await TestHelpers.waitUntil(timeout: .seconds(5)) {
-      for shell in shells where await shell.instance.role == .leader {
-        return true
-      }
-      return false
-    }
-
-    let leaders = await shells.asyncFilter { await $0.instance.role == .leader }
-    #expect(leaders.count == 1)
-
-    for shell in shells {
-      try await shell.shutdown()
-    }
+    _ = try await cluster.waitForLeader()
+    #expect(await cluster.leaderCount() == 1)
   }
-}
 
-extension Array {
-  fileprivate func asyncFilter(_ predicate: (Element) async -> Bool) async -> [Element] {
-    var result: [Element] = []
-    for element in self {
-      if await predicate(element) {
-        result.append(element)
-      }
-    }
-    return result
+  @Test func electionIsDeterministicUnderManualClock() async throws {
+    let cluster = try await SimulatedCluster.start(
+      nodeCount: 3, seed: 1, manualClocks: true, basePort: 200)
+    defer { try? await cluster.shutdown() }
+
+    // No timer has fired yet, so every node is still a follower.
+    #expect(await cluster.leaderCount() == 0)
+
+    // Advance only node 0 past any election timeout; with peers' timers still
+    // parked, node 0 alone runs and wins the election — a deterministic leader.
+    cluster.advance(0, by: .seconds(1))
+
+    let leader = try await cluster.waitForLeader()
+    #expect(await leader.instance.id == cluster.addresses[0].addressKey)
   }
 }

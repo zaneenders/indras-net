@@ -11,7 +11,7 @@ extension SimulatedTransport {
 
     private var handlers: [PeerId: IndrasNetInboundHandler] = [:]
     private var listenPorts: [PeerId: Int] = [:]
-    private var disconnectedLinks: Set<Link> = []
+    private var partitions = PartitionMap()
     private var connectionWaiters: [PeerId: [PeerId: [ConnectionWaiter]]] = [:]
     package init() {}
 
@@ -45,7 +45,7 @@ extension SimulatedTransport {
     func canDeliver(from sender: PeerId, to recipient: PeerId) -> Bool {
       sender == recipient
         || (listenPorts[sender] != nil && listenPorts[recipient] != nil
-          && !disconnectedLinks.contains(Link(sender, recipient)))
+          && partitions.canDeliver(from: sender, to: recipient))
     }
 
     func deliver(from sender: PeerId, to recipient: PeerId, message: RaftMessage) async throws {
@@ -84,30 +84,32 @@ extension SimulatedTransport {
     }
 
     package func disconnect(from sender: PeerId, to recipient: PeerId) {
-      disconnectedLinks.insert(Link(sender, recipient))
+      partitions.disconnect(from: sender, to: recipient)
       resumeConnectionWaiters(involving: sender)
       resumeConnectionWaiters(involving: recipient)
     }
 
     package func reconnect(from sender: PeerId, to recipient: PeerId) {
-      disconnectedLinks.remove(Link(sender, recipient))
+      partitions.reconnect(from: sender, to: recipient)
       resumeConnectionWaiters(involving: sender)
       resumeConnectionWaiters(involving: recipient)
     }
 
     package func disconnect(_ peer: PeerId) {
+      partitions.disconnect(peer, from: listenPorts.keys)
       for other in listenPorts.keys where other != peer {
-        disconnect(from: peer, to: other)
+        resumeConnectionWaiters(involving: other)
       }
+      resumeConnectionWaiters(involving: peer)
     }
 
     package func reconnect(_ peer: PeerId) {
-      disconnectedLinks = disconnectedLinks.filter { !$0.involves(peer) }
+      partitions.reconnect(peer)
       resumeConnectionWaiters(involving: peer)
     }
 
     package func reconnectAll() {
-      disconnectedLinks.removeAll()
+      partitions.reconnectAll()
       for peer in listenPorts.keys {
         resumeConnectionWaiters(involving: peer)
       }

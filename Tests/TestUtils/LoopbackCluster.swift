@@ -4,7 +4,7 @@ import Testing
 
 @testable import IndrasNet
 
-public struct InProcessMesh {
+public struct LoopbackCluster: Sendable {
   let shells: [TCPShell]
   public let recorder: ShellActionRecorder
 
@@ -12,7 +12,7 @@ public struct InProcessMesh {
     basePort: Int,
     eventLoopGroup: MultiThreadedEventLoopGroup,
     recordActions: Bool = false
-  ) async throws -> InProcessMesh {
+  ) async throws -> LoopbackCluster {
     let host = "127.0.0.1"
     let nodes = (0..<3).map { offset in
       NodeAddress(host: host, port: basePort + offset)
@@ -37,7 +37,7 @@ public struct InProcessMesh {
     _ = try await shells[1].start(with: [nodes[2], nodes[0]])
     _ = try await shells[0].start(with: [nodes[1], nodes[2]])
 
-    return InProcessMesh(shells: shells, recorder: recorder)
+    return LoopbackCluster(shells: shells, recorder: recorder)
   }
 
   public func waitForLeader(timeout: Duration = .seconds(5)) async throws -> TCPShell {

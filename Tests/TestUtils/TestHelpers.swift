@@ -27,20 +27,53 @@ extension TestHelpers {
     return try await body(group)
   }
 
-  public static func waitUntil(
+  /// Polls `condition` until it returns true or `timeout` elapses.
+  /// Returns whether the condition was satisfied. This is the single polling
+  /// primitive every other wait helper in the test suite is built on.
+  @discardableResult
+  public static func poll(
     timeout: Duration,
     pollInterval: Duration = .milliseconds(25),
-    condition: () async -> Bool
-  ) async {
+    until condition: @Sendable () async -> Bool
+  ) async -> Bool {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     while clock.now < deadline {
       if await condition() {
-        return
+        return true
       }
       try? await Task.sleep(for: pollInterval)
     }
-    Issue.record("Condition not met before timeout")
+    return await condition()
+  }
+
+  /// Polls `produce` until it returns a non-nil value or `timeout` elapses.
+  /// Returns the produced value, or `nil` if the timeout elapsed first.
+  public static func pollForValue<Value: Sendable>(
+    timeout: Duration,
+    pollInterval: Duration = .milliseconds(25),
+    produce: @Sendable () async -> Value?
+  ) async -> Value? {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+      if let value = await produce() {
+        return value
+      }
+      try? await Task.sleep(for: pollInterval)
+    }
+    return await produce()
+  }
+
+  /// Polls until `condition` is true, recording an `Issue` if the timeout elapses first.
+  public static func waitUntil(
+    timeout: Duration,
+    pollInterval: Duration = .milliseconds(25),
+    condition: @Sendable () async -> Bool
+  ) async {
+    if await !poll(timeout: timeout, pollInterval: pollInterval, until: condition) {
+      Issue.record("Condition not met before timeout")
+    }
   }
 }
 
@@ -53,18 +86,20 @@ public actor MessageCollector {
     self.entries.append((message, peerID))
   }
 
+  private func firstMessage(matching predicate: (RaftMessage, PeerId) -> Bool) -> RaftMessage? {
+    entries.first { predicate($0.0, $0.1) }?.0
+  }
+
   public func waitForMessage(
     type: RaftMessage,
     from peerID: PeerId,
     timeout: Duration
   ) async throws -> RaftMessage {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      if let match = self.entries.first(where: { $0.0 == type && $0.1 == peerID }) {
-        return match.0
-      }
-      try? await Task.sleep(for: .milliseconds(25))
+    await TestHelpers.poll(timeout: timeout) {
+      await self.firstMessage { $0 == type && $1 == peerID } != nil
+    }
+    if let match = firstMessage(matching: { $0 == type && $1 == peerID }) {
+      return match
     }
     Issue.record("Did not receive \(type) from \(peerID)")
     throw MessageCollectorError.timeout
@@ -75,13 +110,11 @@ public actor MessageCollector {
   }
 
   public func waitForAnyMessage(from peerID: PeerId, timeout: Duration) async throws -> RaftMessage {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      if let match = self.entries.first(where: { $0.1 == peerID }) {
-        return match.0
-      }
-      try? await Task.sleep(for: .milliseconds(25))
+    await TestHelpers.poll(timeout: timeout) {
+      await self.firstMessage { _, from in from == peerID } != nil
+    }
+    if let match = firstMessage(matching: { _, from in from == peerID }) {
+      return match
     }
     Issue.record("Did not receive any message from \(peerID)")
     throw MessageCollectorError.timeout

@@ -7,7 +7,7 @@ import Testing
 @Suite struct InstanceClusterTests {
 
   @Test func disconnectTwoNodesNoLeaderReconnectOneNode() {
-    var cluster = TestCluster(peers: ["a", "b", "c"], seed: 1)
+    var cluster = LogicalCluster(peers: ["a", "b", "c"], seed: 1)
     cluster.disconnect("a")
     cluster.disconnect("b")
     cluster.fireTimer("a")
@@ -27,7 +27,7 @@ import Testing
   }
 
   @Test func disconnectNodeSubmitEntryThenReconnectNode() {
-    var cluster = TestCluster(peers: ["a", "b", "c"], seed: 1)
+    var cluster = LogicalCluster(peers: ["a", "b", "c"], seed: 1)
     cluster.disconnect("a")
     cluster.fireTimer("a")
     cluster.fireTimer("b")
@@ -51,7 +51,7 @@ import Testing
   }
 
   @Test func disconnectTwoNodesSubmitEntryThenReconnectNode() {
-    var cluster = TestCluster(peers: ["a", "b", "c", "d", "e"], seed: 1)
+    var cluster = LogicalCluster(peers: ["a", "b", "c", "d", "e"], seed: 1)
     cluster.disconnect("a")
     cluster.disconnect("b")
     cluster.fireTimer("c")
