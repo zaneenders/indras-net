@@ -110,173 +110,31 @@ public enum E2ETestSupport {
     }
   }
 
+  struct Timeout: Error {}
+
   public static func waitForRunning(log: NodeLog, timeout: Duration) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      if await log.hasRunning() {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
+    let running = await TestHelpers.poll(timeout: timeout) { await log.hasRunning() }
+    if !running {
+      Issue.record("node did not report running in time; log: \(await log.allLines())")
+      throw Timeout()
     }
-    Issue.record("node did not report running in time; log: \(await log.allLines())")
-    struct Timeout: Error {}
-    throw Timeout()
   }
 
-  public static func waitForAllMinRequestVoteSent(
-    logs: [NodeLog],
-    nodes: [String],
-    baselines: [Int],
-    minimum: Int,
-    timeout: Duration
-  ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      var allMet = true
-      for index in logs.indices {
-        let count = await logs[index].requestVoteSentCount(
-          node: nodes[index],
-          since: baselines[index]
-        )
-        if count < minimum {
-          allMet = false
-          break
-        }
+  /// Waits until some node reports that it became leader. This is the single,
+  /// stable smoke signal that the cluster booted and completed an election over
+  /// real TCP — replacing the previous brittle per-message log-count scraping.
+  public static func waitForLeaderElected(logs: [NodeLog], timeout: Duration) async throws {
+    let elected = await TestHelpers.poll(timeout: timeout) {
+      for log in logs where await log.hasLeaderElected() {
+        return true
       }
-      if allMet {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
+      return false
     }
-    var summaries: [String] = []
-    for index in logs.indices {
-      let count = await logs[index].requestVoteSentCount(
-        node: nodes[index],
-        since: baselines[index]
-      )
-      summaries.append("\(nodes[index]): \(count)")
+    if !elected {
+      Issue.record("no node reported becoming leader within \(timeout)")
+      throw Timeout()
     }
-    Issue.record(
-      "not all nodes sent \(minimum) request votes in time; counts since baseline: \(summaries.joined(separator: ", "))"
-    )
-    struct Timeout: Error {}
-    throw Timeout()
   }
-
-  public static func waitForAllMinRequestVoteReceived(
-    logs: [NodeLog],
-    nodes: [String],
-    baselines: [Int],
-    minimum: Int,
-    timeout: Duration
-  ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      var allMet = true
-      for index in logs.indices {
-        let count = await logs[index].requestVoteReceivedCount(
-          node: nodes[index],
-          since: baselines[index]
-        )
-        if count < minimum {
-          allMet = false
-          break
-        }
-      }
-      if allMet {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    var summaries: [String] = []
-    for index in logs.indices {
-      let count = await logs[index].requestVoteReceivedCount(
-        node: nodes[index],
-        since: baselines[index]
-      )
-      summaries.append("\(nodes[index]): \(count)")
-    }
-    Issue.record(
-      "not all nodes received \(minimum) request votes in time; counts since baseline: \(summaries.joined(separator: ", "))"
-    )
-    struct Timeout: Error {}
-    throw Timeout()
-  }
-
-  public static func waitForMinAppendEntriesSent(
-    logs: [NodeLog],
-    nodes: [String],
-    baselines: [Int],
-    minimum: Int,
-    timeout: Duration
-  ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      var total = 0
-      for index in logs.indices {
-        total += await logs[index].appendEntriesSentCount(
-          node: nodes[index],
-          since: baselines[index]
-        )
-      }
-      if total >= minimum {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    Issue.record("cluster did not send \(minimum) appendEntries heartbeats in time")
-    struct Timeout: Error {}
-    throw Timeout()
-  }
-
-  public static func waitForMinClusterRequestVoteReceived(
-    logs: [NodeLog],
-    nodes: [String],
-    minimum: Int,
-    timeout: Duration
-  ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      var total = 0
-      for (log, node) in zip(logs, nodes) {
-        total += await log.requestVoteReceivedCount(node: node)
-      }
-      if total >= minimum {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    Issue.record("cluster did not receive \(minimum) request votes in time")
-    struct Timeout: Error {}
-    throw Timeout()
-  }
-
-  public static func waitForMinRequestVoteReceived(
-    log: NodeLog,
-    node: String,
-    minimum: Int,
-    timeout: Duration
-  ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now + timeout
-    while clock.now < deadline {
-      if await log.requestVoteReceivedCount(node: node) >= minimum {
-        return
-      }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    Issue.record(
-      "node \(node) did not receive \(minimum) request votes in time; log: \(await log.allLines())"
-    )
-    struct Timeout: Error {}
-    throw Timeout()
-  }
-
 }
 
 public actor NodeLog {
@@ -296,64 +154,7 @@ public actor NodeLog {
     lines.contains { $0.contains("running (Ctrl+C to stop)") }
   }
 
-  public func lineCount() -> Int {
-    lines.count
-  }
-
-  public func meshEventCounts(node: String, since startIndex: Int = 0) -> MeshEventCounts {
-    MeshEventCounts(
-      requestVoteSent: requestVoteSentCount(node: node, since: startIndex),
-      requestVoteReceived: requestVoteReceivedCount(node: node, since: startIndex),
-      requestVoteResponseSent: requestVoteResponseSentCount(node: node, since: startIndex),
-      requestVoteResponseReceived: requestVoteResponseReceivedCount(
-        node: node, since: startIndex),
-      appendEntriesSent: appendEntriesSentCount(node: node, since: startIndex)
-    )
-  }
-
-  private func slice(since startIndex: Int) -> ArraySlice<String> {
-    lines.dropFirst(startIndex)
-  }
-
-  public func requestVoteSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] requestVote ->") }
-  }
-
-  public func requestVoteReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] requestVote <-") }
-  }
-
-  public func requestVoteResponseSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse ->") }
-  }
-
-  public func requestVoteResponseReceivedCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] requestVoteResponse <-") }
-  }
-
-  public func appendEntriesSentCount(node: String, since startIndex: Int = 0) -> Int {
-    slice(since: startIndex).count { $0.contains("[\(node)] appendEntries ->") }
-  }
-}
-
-public struct MeshEventCounts: Equatable, Sendable {
-  public var requestVoteSent: Int
-  public var requestVoteReceived: Int
-  public var requestVoteResponseSent: Int
-  public var requestVoteResponseReceived: Int
-  public var appendEntriesSent: Int
-
-  public init(
-    requestVoteSent: Int,
-    requestVoteReceived: Int,
-    requestVoteResponseSent: Int,
-    requestVoteResponseReceived: Int,
-    appendEntriesSent: Int
-  ) {
-    self.requestVoteSent = requestVoteSent
-    self.requestVoteReceived = requestVoteReceived
-    self.requestVoteResponseSent = requestVoteResponseSent
-    self.requestVoteResponseReceived = requestVoteResponseReceived
-    self.appendEntriesSent = appendEntriesSent
+  public func hasLeaderElected() -> Bool {
+    lines.contains { $0.contains("became leader in term") }
   }
 }
