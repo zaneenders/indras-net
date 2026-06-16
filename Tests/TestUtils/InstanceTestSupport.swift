@@ -1,4 +1,5 @@
 import Foundation
+import OrderedCollections
 
 @testable import IndrasNet
 
@@ -18,11 +19,11 @@ extension Instance {
   public static func forTests(
     id: PeerId,
     seed: UInt64 = InstanceTestSupport.defaultTestSeed,
-    peers: Set<PeerId> = [],
+    peers: OrderedSet<PeerId> = [],
     role: Role = .follower,
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
-    votes: [PeerId: Bool] = [:],
+    votes: OrderedDictionary<PeerId, Bool> = [:],
     commitIndex: LogIndex = 0,
     lastApplied: LogIndex = 0,
     log: [LogEntry] = .sentinel,

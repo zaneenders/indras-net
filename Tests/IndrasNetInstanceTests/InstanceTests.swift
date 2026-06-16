@@ -1,4 +1,5 @@
 import Foundation
+import OrderedCollections
 import TestUtils
 import Testing
 
@@ -245,11 +246,11 @@ import Testing
   }
 
   @Test func majorityRequiresMoreThanHalfOfCluster() {
-    #expect([PeerId: Bool]().isLeader(2) == false)
-    #expect(["a": true].isLeader(2) == false)
-    #expect(["a": true, "b": true].isLeader(2) == true)
-    #expect(["a": true, "b": true].isLeader(3) == false)
-    #expect(["a": true, "b": true, "c": true].isLeader(3) == true)
+    #expect(OrderedDictionary<PeerId, Bool>().isLeader(2) == false)
+    #expect((["a": true] as OrderedDictionary<PeerId, Bool>).isLeader(2) == false)
+    #expect((["a": true, "b": true] as OrderedDictionary<PeerId, Bool>).isLeader(2) == true)
+    #expect((["a": true, "b": true] as OrderedDictionary<PeerId, Bool>).isLeader(3) == false)
+    #expect((["a": true, "b": true, "c": true] as OrderedDictionary<PeerId, Bool>).isLeader(3) == true)
   }
 
   @Test func rejectsStaleAppendEntries() {

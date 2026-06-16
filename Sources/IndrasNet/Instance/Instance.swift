@@ -1,4 +1,5 @@
 import Foundation
+import OrderedCollections
 
 // An instance of the Raft algorithm
 struct Instance {
@@ -7,14 +8,14 @@ struct Instance {
   private(set) var role: Role
   private(set) var currentTerm: Term
   private(set) var votedFor: PeerId?
-  private(set) var peers: Set<PeerId>
-  private(set) var votes: [PeerId: Bool]
+  private(set) var peers: OrderedSet<PeerId>
+  private(set) var votes: OrderedDictionary<PeerId, Bool>
   private(set) var log: [LogEntry]
   private(set) var commitIndex: LogIndex
   private(set) var lastApplied: LogIndex
   private(set) var leaderId: PeerId?
-  private var nextIndex: [PeerId: LogIndex]
-  private var matchIndex: [PeerId: LogIndex]
+  private var nextIndex: OrderedDictionary<PeerId, LogIndex>
+  private var matchIndex: OrderedDictionary<PeerId, LogIndex>
   let timing: NodeTiming
   private var rng: any RandomNumberGenerator & Sendable
 
@@ -23,11 +24,11 @@ struct Instance {
 
   init(
     id: PeerId,
-    peers: Set<PeerId> = [],
+    peers: OrderedSet<PeerId> = [],
     role: Role = .follower,
     currentTerm: Term = 0,
     votedFor: PeerId? = nil,
-    votes: [PeerId: Bool] = [:],
+    votes: OrderedDictionary<PeerId, Bool> = [:],
     commitIndex: LogIndex = 0,
     lastApplied: LogIndex = 0,
     log: [LogEntry] = .sentinel,
@@ -266,8 +267,8 @@ struct Instance {
   private mutating func becomeLeader(_ actions: inout [RequestVote.Reply.Action]) {
     role = .leader
     leaderId = id
-    nextIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, lastLogIndex + 1) })
-    matchIndex = Dictionary(uniqueKeysWithValues: peers.map { ($0, LogIndex(0)) })
+    nextIndex = OrderedDictionary(uniqueKeysWithValues: peers.map { ($0, lastLogIndex + 1) })
+    matchIndex = OrderedDictionary(uniqueKeysWithValues: peers.map { ($0, LogIndex(0)) })
 
     for peer in peers {
       let args = makeAppendEntries(for: peer)

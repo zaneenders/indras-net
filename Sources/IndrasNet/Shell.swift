@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIOCore
+import OrderedCollections
 
 // MARK: Raft
 // This might be able to be a protocol for someone to implement that Shell can run/drive
@@ -176,7 +177,7 @@ extension Shell {
   }
 
   private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) {
-    if let completedIndex = clientCompleted[clientPeer]?[args.requestId] {
+    if let completedIndex = clientRequests.completedIndex(client: clientPeer, requestId: args.requestId) {
       completeClientSubmit(
         reply: ClientSubmit.Reply(
           requestId: args.requestId, status: .ok, logIndex: completedIndex),
@@ -184,11 +185,12 @@ extension Shell {
       return
     }
 
-    if let inFlightIndex = clientInFlight[clientPeer]?[args.requestId] {
-      if pendingByIndex[inFlightIndex]?.requestId == args.requestId,
-        pendingByIndex[inFlightIndex]?.client != clientPeer
+    if let inFlightIndex = clientRequests.inFlightIndex(client: clientPeer, requestId: args.requestId) {
+      if let pending = clientRequests.pending(at: inFlightIndex),
+        pending.requestId == args.requestId,
+        pending.client != clientPeer
       {
-        awaitingByRequestId[args.requestId, default: []].insert(clientPeer)
+        clientRequests.addWaiter(clientPeer, forRequestId: args.requestId)
       }
       return
     }
@@ -202,8 +204,7 @@ extension Shell {
       case .sendClientSubmitReply(let to, let reply):
         completeClientSubmit(reply: reply, to: to)
       case .clientWriteAppended(let logIndex, let requestId, let client):
-        pendingByIndex[logIndex] = (requestId: requestId, client: client)
-        clientInFlight[client, default: [:]][requestId] = logIndex
+        clientRequests.append(requestId: requestId, client: client, atIndex: logIndex)
       case .sendAppendEntry(let peer, let appendArgs):
         deliverAppendEntries(to: peer, args: appendArgs)
       case .persist:
@@ -232,40 +233,16 @@ extension Shell {
 
   private func applyLogEntry(_ entry: LogEntry, atIndex index: LogIndex) {
     logger.info("[\(peerId)] applied log entry index=\(index) term=\(entry.term) bytes=\(entry.command.count)")
-    completeClientRequest(atIndex: index)
-    guard let pending = pendingByIndex.removeValue(forKey: index) else { return }
-    let reply = ClientSubmit.Reply(requestId: pending.requestId, status: .ok, logIndex: index)
-    completeClientSubmit(reply: reply, to: pending.client)
-    for client in awaitingByRequestId.removeValue(forKey: pending.requestId) ?? [] {
+    guard let result = clientRequests.complete(atIndex: index) else { return }
+    let reply = ClientSubmit.Reply(requestId: result.pending.requestId, status: .ok, logIndex: index)
+    completeClientSubmit(reply: reply, to: result.pending.client)
+    for client in result.waiters {
       deliverClientSubmitReply(to: client, reply: reply)
     }
   }
 
-  private func completeClientRequest(atIndex index: LogIndex) {
-    for client in clientInFlight.keys {
-      guard var requests = clientInFlight[client] else { continue }
-      guard let requestId = requests.first(where: { $0.value == index })?.key else { continue }
-      requests.removeValue(forKey: requestId)
-      if requests.isEmpty {
-        clientInFlight.removeValue(forKey: client)
-      } else {
-        clientInFlight[client] = requests
-      }
-      clientCompleted[client, default: [:]][requestId] = index
-      return
-    }
-  }
-
-  private func clearClientSessions() {
-    clientInFlight.removeAll()
-    clientCompleted.removeAll()
-  }
-
   private func failPendingClientWrites() {
-    let pending = pendingByIndex
-    pendingByIndex.removeAll()
-    awaitingByRequestId.removeAll()
-    clearClientSessions()
+    let pending = clientRequests.drainForAbort()
     for (index, request) in pending {
       completeClientSubmit(
         reply: ClientSubmit.Reply(
@@ -283,7 +260,7 @@ extension Shell {
     if previousRole == .leader, instance.role != .leader {
       failPendingClientWrites()
     } else if previousRole != .leader, instance.role == .leader {
-      clearClientSessions()
+      clientRequests.resetSessions()
     }
     guard instance.role != previousRole else { return }
     let term = instance.currentTerm
@@ -336,10 +313,7 @@ package actor Shell<Transport: NodeTransport> {
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
   private var inflightMessages: [PeerId: [InflightRPC]] = [:]
-  private var pendingByIndex: [LogIndex: (requestId: UInt128, client: PeerId)] = [:]
-  private var awaitingByRequestId: [UInt128: Set<PeerId>] = [:]
-  private var clientInFlight: [PeerId: [UInt128: LogIndex]] = [:]
-  private var clientCompleted: [PeerId: [UInt128: LogIndex]] = [:]
+  private var clientRequests = ClientRequestLog()
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
   // lookup currently crashes IndrasNetTests with signal 6).
@@ -369,7 +343,7 @@ package actor Shell<Transport: NodeTransport> {
   package func start(with peers: [NodeAddress]) async throws -> Int {
     isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing, rng: rng)
+    self.instance = Instance(id: peerId, peers: OrderedSet(peers.map(\.addressKey)), timing: timing, rng: rng)
 
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)
