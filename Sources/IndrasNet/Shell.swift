@@ -38,7 +38,7 @@ extension Shell {
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) {
     let id = UUID()
-    inflightRequestVotes[peer, default: []].append((id, args))
+    trackInflight(peer: peer, id: id, outbound: .requestVote(args))
     deliver(
       to: peer,
       message: .requestVote(args),
@@ -57,7 +57,7 @@ extension Shell {
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
     let id = UUID()
-    inflightAppendEntries[peer, default: []].append((id, args))
+    trackInflight(peer: peer, id: id, outbound: .appendEntries(args))
     deliver(
       to: peer,
       message: .appendEntries(args),
@@ -113,7 +113,7 @@ extension Shell {
   }
 
   private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
-    guard let sent = inflightRequestVotes[peer]?.removeFirst().args else {
+    guard let sent = dequeueSentRequestVote(from: peer) else {
       logger.notice("[\(peerId)] requestVote reply from \(peer) with no inflight request")
       return
     }
@@ -152,7 +152,7 @@ extension Shell {
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
-    guard let sent = inflightAppendEntries[peer]?.removeFirst().args else {
+    guard let sent = dequeueSentAppendEntries(from: peer) else {
       logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
       return
     }
@@ -303,6 +303,29 @@ extension Shell {
 }
 
 package actor Shell<Transport: NodeTransport> {
+  private enum InflightOutbound {
+    case appendEntries(AppendEntries.Args)
+    case requestVote(RequestVote.Args)
+
+    var kind: InflightMessageKind {
+      switch self {
+      case .appendEntries: .appendEntries
+      case .requestVote: .requestVote
+      }
+    }
+  }
+
+  private enum InflightMessageKind {
+    case appendEntries
+    case requestVote
+  }
+
+  private struct InflightRPC {
+    let id: UUID
+    let outbound: InflightOutbound
+    var sent: Bool = false
+  }
+
   // Node
   var instance: Instance
   let peerId: PeerId
@@ -312,8 +335,7 @@ package actor Shell<Transport: NodeTransport> {
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
-  private var inflightAppendEntries: [PeerId: [(id: UUID, args: AppendEntries.Args)]] = [:]
-  private var inflightRequestVotes: [PeerId: [(id: UUID, args: RequestVote.Args)]] = [:]
+  private var inflightMessages: [PeerId: [InflightRPC]] = [:]
   private var pendingByIndex: [LogIndex: (requestId: UInt128, client: PeerId)] = [:]
   private var awaitingByRequestId: [UInt128: Set<PeerId>] = [:]
   private var clientInFlight: [PeerId: [UInt128: LogIndex]] = [:]
@@ -394,40 +416,70 @@ package actor Shell<Transport: NodeTransport> {
 
     do {
       guard await ensureConnected(to: peer) else {
-        removeInflightOutbound(id: outboundID, message: message, to: peer)
+        removeInflightOutbound(id: outboundID, to: peer)
         logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
+      markOutboundSent(id: outboundID, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
-      removeInflightOutbound(id: outboundID, message: message, to: peer)
+      removeInflightOutbound(id: outboundID, to: peer)
       return
     } catch IndrasNetTransportError.peerNotConnected {
-      removeInflightOutbound(id: outboundID, message: message, to: peer)
+      removeInflightOutbound(id: outboundID, to: peer)
       return
     } catch {
-      removeInflightOutbound(id: outboundID, message: message, to: peer)
+      removeInflightOutbound(id: outboundID, to: peer)
       logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) failed: \(error)")
     }
   }
 
-  private func removeInflightOutbound(id: UUID?, message: RaftMessage, to peer: PeerId) {
-    guard let id else { return }
+  private func trackInflight(peer: PeerId, id: UUID, outbound: InflightOutbound) {
+    inflightMessages[peer, default: []].append(InflightRPC(id: id, outbound: outbound))
+  }
 
-    switch message {
-    case .appendEntries:
-      inflightAppendEntries[peer]?.removeAll { $0.id == id }
-      if inflightAppendEntries[peer]?.isEmpty == true {
-        inflightAppendEntries.removeValue(forKey: peer)
-      }
-    case .requestVote:
-      inflightRequestVotes[peer]?.removeAll { $0.id == id }
-      if inflightRequestVotes[peer]?.isEmpty == true {
-        inflightRequestVotes.removeValue(forKey: peer)
-      }
-    default:
-      break
+  private func markOutboundSent(id: UUID?, to peer: PeerId) {
+    guard let id,
+      var inflight = inflightMessages[peer],
+      let index = inflight.firstIndex(where: { $0.id == id })
+    else { return }
+    inflight[index].sent = true
+    inflightMessages[peer] = inflight
+  }
+
+  private func dequeueSentAppendEntries(from peer: PeerId) -> AppendEntries.Args? {
+    guard case .appendEntries(let args) = dequeueSent(from: peer, kind: .appendEntries) else {
+      return nil
+    }
+    return args
+  }
+
+  private func dequeueSentRequestVote(from peer: PeerId) -> RequestVote.Args? {
+    guard case .requestVote(let args) = dequeueSent(from: peer, kind: .requestVote) else {
+      return nil
+    }
+    return args
+  }
+
+  private func dequeueSent(from peer: PeerId, kind: InflightMessageKind) -> InflightOutbound? {
+    guard var inflight = inflightMessages[peer],
+      let index = inflight.firstIndex(where: { $0.sent && $0.outbound.kind == kind })
+    else { return nil }
+    let outbound = inflight.remove(at: index).outbound
+    if inflight.isEmpty {
+      inflightMessages.removeValue(forKey: peer)
+    } else {
+      inflightMessages[peer] = inflight
+    }
+    return outbound
+  }
+
+  private func removeInflightOutbound(id: UUID?, to peer: PeerId) {
+    guard let id else { return }
+    inflightMessages[peer]?.removeAll { $0.id == id }
+    if inflightMessages[peer]?.isEmpty == true {
+      inflightMessages.removeValue(forKey: peer)
     }
   }
 
@@ -462,8 +514,7 @@ package actor Shell<Transport: NodeTransport> {
 
     let deliveries = Array(inflightDeliveries.values)
     inflightDeliveries.removeAll()
-    inflightAppendEntries.removeAll()
-    inflightRequestVotes.removeAll()
+    inflightMessages.removeAll()
     for task in deliveries {
       task.cancel()
     }

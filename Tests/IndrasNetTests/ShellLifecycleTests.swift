@@ -217,4 +217,98 @@ import Testing
     #expect(await leader.instance.lastLogIndex == 1)
     #expect(await leader.instance.log.filter { $0.command == command }.count == 1)
   }
+
+  /// Shell must pair appendEntries replies with the RPC that actually sent them,
+  /// not assume inflight queue order matches wire-send order. When a gated earlier
+  /// heartbeat is still queued but replication goes out and is acked first, the
+  /// leader should commit without waiting for the held send to complete.
+  @Test func outOfOrderWireSendCommitsReplicationReply() async throws {
+    let mesh = SimulatedTransport.Mesh()
+    let leaderAddress = NodeAddress(host: "sim", port: 430)
+    let followerAddress = NodeAddress(host: "sim", port: 431)
+    let followerPeer = followerAddress.addressKey
+    let timing = NodeTiming(
+      heartbeatIntervalMs: 20,
+      electionTimeoutMinMs: 200,
+      electionTimeoutMaxMs: 300
+    )
+
+    let leaderClock = TestClock()
+    let followerClock = TestClock()
+    let leaderTransport = SimulatedTransport(peer: leaderAddress, mesh: mesh)
+    let leader = Shell(
+      leaderAddress,
+      timing: timing,
+      transport: leaderTransport,
+      rng: SeededRandomNumberGenerator(seed: 1),
+      timerSleep: { try? await leaderClock.sleep(until: leaderClock.now.advanced(by: $0)) },
+      logger: TestHelpers.quietLogger
+    )
+    let follower = Shell(
+      followerAddress,
+      timing: timing,
+      transport: SimulatedTransport(peer: followerAddress, mesh: mesh),
+      rng: SeededRandomNumberGenerator(seed: 2),
+      timerSleep: { try? await followerClock.sleep(until: followerClock.now.advanced(by: $0)) },
+      logger: TestHelpers.quietLogger
+    )
+    defer {
+      Task {
+        await leaderTransport.releaseHeldSend(to: followerPeer)
+        try? await leader.shutdown()
+        try? await follower.shutdown()
+      }
+    }
+
+    _ = try await follower.start(with: [leaderAddress])
+    _ = try await leader.start(with: [followerAddress])
+
+    let elected = await TestHelpers.poll(timeout: .seconds(2)) {
+      leaderClock.advance(by: .milliseconds(100))
+      try? await Task.sleep(for: .milliseconds(10))
+      return await leader.instance.role == .leader
+    }
+    #expect(elected)
+
+    await leaderTransport.holdNextAppendEntriesSend(to: followerPeer)
+
+    // Queue a heartbeat RPC first; its wire send blocks on the gate.
+    leaderClock.advance(by: timing.heartbeatInterval)
+    let heartbeatHeld = await TestHelpers.poll(timeout: .seconds(1)) {
+      await leaderTransport.hasHeldSend(to: followerPeer)
+    }
+    #expect(heartbeatHeld)
+
+    let command = Data("set out-of-order=1".utf8)
+    let submitTask = Task {
+      await leader.submit(command: command)
+    }
+
+    let replicationOnWire = await TestHelpers.poll(timeout: .seconds(2)) {
+      let order = await leaderTransport.appendEntriesWireOrder
+      guard let last = order.last, last.count == 1 else { return false }
+      return last[0].command == command
+    }
+    #expect(replicationOnWire)
+    #expect(await leaderTransport.hasHeldSend(to: followerPeer))
+
+    let followerReplicated = await TestHelpers.poll(timeout: .seconds(2)) {
+      let log = await follower.instance.log
+      return log.count >= 2 && log[1].command == command
+    }
+    #expect(followerReplicated)
+
+    let leaderCommitted = await TestHelpers.poll(timeout: .seconds(1)) {
+      await leader.instance.commitIndex >= 1
+    }
+    guard leaderCommitted else {
+      submitTask.cancel()
+      #expect(Bool(false), "Leader should commit from replication reply before held heartbeat sends")
+      return
+    }
+
+    let reply = await submitTask.value
+    #expect(reply.status == .ok)
+    #expect(reply.logIndex == 1)
+  }
 }
