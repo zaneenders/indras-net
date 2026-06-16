@@ -40,6 +40,9 @@ struct IndrasNetClientCommand {
           writeStderr("not leader (leader unknown)\n")
         }
         exit(2)
+      case .aborted:
+        writeStderr("aborted\n")
+        exit(3)
       }
     } catch let error as CLIError {
       writeStderr("error: \(error.message)\n\n\(usage)\n")

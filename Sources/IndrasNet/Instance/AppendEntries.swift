@@ -8,8 +8,7 @@ package enum AppendEntries {
     enum Action: Equatable {
       case scheduleNext(delay: Duration)
       case sendAppendEntry(to: PeerId, args: Args)
-      case apply(entry: LogEntry)
-      case notifyClient(requestId: UInt128, logIndex: LogIndex, to: PeerId)
+      case apply(entry: LogEntry, atIndex: LogIndex)
       case persist
     }
 
@@ -48,7 +47,7 @@ package enum AppendEntries {
     enum Action: Equatable {
       case sendAppendEntriesReply(to: PeerId, term: Term, success: Bool)
       case scheduleNext(delay: Duration)
-      case apply(entry: LogEntry)
+      case apply(entry: LogEntry, atIndex: LogIndex)
       case persist
     }
 

@@ -303,7 +303,7 @@ import Testing
     #expect(instance.log.count == 2)
     #expect(instance.log[1] == entries[0])
     #expect(instance.commitIndex == 1)
-    #expect(actions.contains(.apply(entry: entries[0])))
+    #expect(actions.contains(.apply(entry: entries[0], atIndex: 1)))
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 1, success: true)))
   }
 
@@ -366,6 +366,23 @@ import Testing
       ])
   }
 
+  @Test func clientSubmitAppendsOnLeader() {
+    var leader = Instance(id: "a", peers: ["b"], role: .leader, currentTerm: 2)
+    let command = Data("set x=1".utf8)
+
+    let actions = leader.receiveClientSubmit(
+      RaftClient.defaultClientID,
+      ClientSubmit.Args(requestId: 1, command: command))
+
+    #expect(leader.lastLogIndex == 1)
+    #expect(leader.log[1].command == command)
+    #expect(
+      actions.contains(
+        .clientWriteAppended(
+          logIndex: 1, requestId: 1, client: RaftClient.defaultClientID)))
+    #expect(actions.contains(where: { if case .sendAppendEntry = $0 { true } else { false } }))
+  }
+
   @Test func leaderAdvancesCommitIndexWithMajorityMatch() {
     let entry = LogEntry(term: 2, command: Data("x".utf8))
     var instance = Instance(
@@ -383,7 +400,7 @@ import Testing
       "b", sent, .init(term: 2, success: true))
 
     #expect(instance.commitIndex == 1)
-    #expect(actions.contains(.apply(entry: entry)))
+    #expect(actions.contains(.apply(entry: entry, atIndex: 1)))
   }
 
   @Test func leaderStepsBackNextIndexOnReplicationFailure() {
@@ -444,7 +461,7 @@ import Testing
       "b", sent, .init(term: 2, success: true))
 
     #expect(leader.commitIndex == 1)
-    #expect(!actions.contains(.apply(entry: entry2)))
+    #expect(!actions.contains(.apply(entry: entry2, atIndex: 2)))
   }
 
   @Test func outOfOrderAppendEntriesRepliesUseMonotonicMatchIndex() {
@@ -468,6 +485,6 @@ import Testing
       "b", sentThrough1, .init(term: 2, success: true))
 
     #expect(leader.commitIndex == 2)
-    #expect(!actions.contains(.apply(entry: entry2)))
+    #expect(!actions.contains(.apply(entry: entry2, atIndex: 2)))
   }
 }

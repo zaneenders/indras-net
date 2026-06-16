@@ -1,5 +1,6 @@
 import Foundation
 
+// An instance of the Raft algorithm
 struct Instance {
 
   let id: PeerId
@@ -14,7 +15,6 @@ struct Instance {
   private(set) var leaderId: PeerId?
   private var nextIndex: [PeerId: LogIndex]
   private var matchIndex: [PeerId: LogIndex]
-  private var pendingClientRequests: [LogIndex: (requestId: UInt128, client: PeerId)]
   let timing: NodeTiming
   private var rng: any RandomNumberGenerator & Sendable
 
@@ -45,7 +45,6 @@ struct Instance {
     self.lastApplied = lastApplied
     self.nextIndex = [:]
     self.matchIndex = [:]
-    self.pendingClientRequests = [:]
     self.timing = timing
     self.rng = rng
   }
@@ -92,9 +91,10 @@ struct Instance {
     }
 
     log.append(LogEntry(term: currentTerm, command: command))
-    pendingClientRequests[lastLogIndex] = (requestId: requestId, client: client)
 
-    var actions: [ClientSubmit.Args.Action] = []
+    var actions: [ClientSubmit.Args.Action] = [
+      .clientWriteAppended(logIndex: lastLogIndex, requestId: requestId, client: client)
+    ]
     for peer in peers {
       let args = makeAppendEntries(for: peer)
       actions.append(.sendAppendEntry(to: peer, args: args))
@@ -217,8 +217,8 @@ struct Instance {
 
     if args.leaderCommit > commitIndex {
       commitIndex = min(args.leaderCommit, lastLogIndex)
-      for entry in drainAppliedEntries() {
-        actions.append(.apply(entry: entry))
+      for (index, entry) in drainAppliedEntries() {
+        actions.append(.apply(entry: entry, atIndex: index))
       }
     }
 
@@ -336,11 +336,11 @@ struct Instance {
     return actions
   }
 
-  private mutating func drainAppliedEntries() -> [LogEntry] {
-    var entries: [LogEntry] = []
+  private mutating func drainAppliedEntries() -> [(LogIndex, LogEntry)] {
+    var entries: [(LogIndex, LogEntry)] = []
     while lastApplied < commitIndex {
       lastApplied += 1
-      entries.append(log[Int(lastApplied)])
+      entries.append((lastApplied, log[Int(lastApplied)]))
     }
     return entries
   }
@@ -349,11 +349,7 @@ struct Instance {
     while lastApplied < commitIndex {
       lastApplied += 1
       let index = lastApplied
-      actions.append(.apply(entry: log[Int(index)]))
-      if let pending = pendingClientRequests.removeValue(forKey: index) {
-        actions.append(
-          .notifyClient(requestId: pending.requestId, logIndex: index, to: pending.client))
-      }
+      actions.append(.apply(entry: log[Int(index)], atIndex: index))
     }
   }
 }

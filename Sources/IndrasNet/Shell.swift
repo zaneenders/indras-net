@@ -130,8 +130,8 @@ extension Shell {
         deliverAppendEntriesReply(to: to, term: term, success: success)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
-      case .apply(let entry):
-        applyLogEntry(entry)
+      case .apply(let entry, let index):
+        applyLogEntry(entry, atIndex: index)
       case .persist:
         ()  // TODO: persist state
       }
@@ -154,12 +154,8 @@ extension Shell {
         scheduleNext(delay: delay)
       case .sendAppendEntry(let peer, let args):
         deliverAppendEntries(to: peer, args: args)
-      case .apply(let entry):
-        applyLogEntry(entry)
-      case .notifyClient(let requestId, let logIndex, let client):
-        completeClientSubmit(
-          reply: ClientSubmit.Reply(requestId: requestId, status: .ok, logIndex: logIndex),
-          to: client)
+      case .apply(let entry, let index):
+        applyLogEntry(entry, atIndex: index)
       case .persist:
         ()  // TODO: persist state
       }
@@ -177,6 +173,8 @@ extension Shell {
       switch action {
       case .sendClientSubmitReply(let to, let reply):
         completeClientSubmit(reply: reply, to: to)
+      case .clientWriteAppended(let logIndex, let requestId, let client):
+        pendingByIndex[logIndex] = (requestId: requestId, client: client)
       case .sendAppendEntry(let peer, let appendArgs):
         deliverAppendEntries(to: peer, args: appendArgs)
       case .persist:
@@ -203,11 +201,35 @@ extension Shell {
     deliver(to: client, message: .clientSubmitReply(reply), context: .clientSubmitResponse(peer: client))
   }
 
-  private func applyLogEntry(_ entry: LogEntry) {
-    logger.info("[\(peerId)] applied log entry term=\(entry.term) bytes=\(entry.command.count)")
+  private func applyLogEntry(_ entry: LogEntry, atIndex index: LogIndex) {
+    logger.info("[\(peerId)] applied log entry index=\(index) term=\(entry.term) bytes=\(entry.command.count)")
+    if let pending = pendingByIndex.removeValue(forKey: index) {
+      completeClientSubmit(
+        reply: ClientSubmit.Reply(requestId: pending.requestId, status: .ok, logIndex: index),
+        to: pending.client)
+    }
+  }
+
+  private func failPendingClientWrites() {
+    let pending = pendingByIndex
+    pendingByIndex.removeAll()
+    for (index, request) in pending {
+      completeClientSubmit(
+        reply: ClientSubmit.Reply(
+          requestId: request.requestId, status: .aborted, logIndex: index),
+        to: request.client)
+    }
+    for (requestId, continuation) in clientContinuations {
+      continuation.resume(
+        returning: ClientSubmit.Reply(requestId: requestId, status: .aborted))
+    }
+    clientContinuations.removeAll()
   }
 
   private func logRoleChangeIfNeeded(from previousRole: Role) {
+    if previousRole == .leader, instance.role != .leader {
+      failPendingClientWrites()
+    }
     guard instance.role != previousRole else { return }
     let term = instance.currentTerm
     switch instance.role {
@@ -237,6 +259,7 @@ package actor Shell<Transport: NodeTransport> {
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
   private var inflightAppendEntries: [PeerId: [AppendEntries.Args]] = [:]
   private var inflightRequestVotes: [PeerId: [RequestVote.Args]] = [:]
+  private var pendingByIndex: [LogIndex: (requestId: UInt128, client: PeerId)] = [:]
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
   // lookup currently crashes IndrasNetTests with signal 6).
@@ -356,6 +379,7 @@ package actor Shell<Transport: NodeTransport> {
 
   public func stop() async {
     isStopped = true
+    failPendingClientWrites()
 
     timerTask?.cancel()
     _ = await timerTask?.value

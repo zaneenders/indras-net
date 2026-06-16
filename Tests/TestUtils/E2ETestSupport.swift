@@ -154,6 +154,8 @@ public enum E2ETestSupport {
           command: command, to: leaderAddress, timeout: timeout)
       case .notLeader:
         continue
+      case .aborted:
+        continue
       }
     }
 

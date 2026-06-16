@@ -5,6 +5,7 @@ package enum ClientSubmit {
   package enum Status: UInt8, Equatable, Sendable {
     case ok = 1
     case notLeader = 2
+    case aborted = 3
   }
 
   package struct Reply: Equatable, Sendable {
@@ -59,6 +60,7 @@ package enum ClientSubmit {
 
     enum Action: Equatable {
       case sendClientSubmitReply(to: PeerId, reply: Reply)
+      case clientWriteAppended(logIndex: LogIndex, requestId: UInt128, client: PeerId)
       case sendAppendEntry(to: PeerId, args: AppendEntries.Args)
       case persist
     }
