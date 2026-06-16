@@ -1,1 +1,1 @@
-package typealias Term = UInt128
+package typealias Term = UInt64

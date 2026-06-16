@@ -12,7 +12,7 @@ public struct ClientSubmitResult: Sendable, Equatable {
 
   public let requestID: UInt128
   public let status: Status
-  public let logIndex: UInt128
+  public let logIndex: UInt64
 
   init(_ reply: ClientSubmit.Reply) {
     self.requestID = reply.requestId

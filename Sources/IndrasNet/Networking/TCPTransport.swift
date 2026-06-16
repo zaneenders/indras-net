@@ -324,7 +324,7 @@ public actor TCPTransport: NodeTransport {
         for try await wire in inbound {
           if let peerID {
             guard let app = RaftMessage(wire) else {
-              self.logger.warning("Have: \(peerID) unable to decode AppMessage from \(wire)")
+              self.logger.warning("Have: \(peerID) unable to decode RaftMessage from \(wire)")
               continue
             }
             await onMessage(app, peerID)

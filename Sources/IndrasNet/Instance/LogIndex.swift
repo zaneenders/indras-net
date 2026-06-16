@@ -1,1 +1,1 @@
-package typealias LogIndex = UInt128
+package typealias LogIndex = UInt64

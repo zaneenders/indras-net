@@ -3,7 +3,7 @@ import Logging
 import NIOCore
 
 // MARK: Raft
-// This might be able to be a protocl for someone to implment that Shell can run/drive
+// This might be able to be a protocol for someone to implement that Shell can run/drive
 extension Shell {
 
   private func scheduleNext(delay: Duration) {
@@ -42,7 +42,7 @@ extension Shell {
     deliver(
       to: peer,
       message: .requestVote(args),
-      context: .requestVote(direction: "out", peer: peer, term: args.term),
+      context: .requestVote(direction: .outbound, peer: peer, term: args.term),
       outboundID: id
     )
   }
@@ -51,7 +51,7 @@ extension Shell {
     deliver(
       to: peer,
       message: .requestVoteReply(.init(granted: voteGranted, term: term)),
-      context: .requestVoteResponse(direction: "out", peer: peer, term: term, granted: voteGranted)
+      context: .requestVoteResponse(direction: .outbound, peer: peer, term: term, granted: voteGranted)
     )
   }
 
@@ -61,7 +61,7 @@ extension Shell {
     deliver(
       to: peer,
       message: .appendEntries(args),
-      context: .appendEntries(direction: "out", peer: peer, term: args.term),
+      context: .appendEntries(direction: .outbound, peer: peer, term: args.term),
       outboundID: id
     )
   }
@@ -70,7 +70,7 @@ extension Shell {
     deliver(
       to: peer,
       message: .appendEntriesReply(.init(term: term, success: success)),
-      context: .appendEntriesResponse(direction: "out", peer: peer, term: term, success: success)
+      context: .appendEntriesResponse(direction: .outbound, peer: peer, term: term, success: success)
     )
   }
 
@@ -81,16 +81,16 @@ extension Shell {
     case .clientSubmitReply(let reply):
       receiveClientSubmitReply(reply)
     case .requestVote(let args):
-      logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
+      logRaftEvent(.requestVote(direction: .inbound, peer: peer, term: args.term))
       receiveRequestVote(from: peer, args: args)
     case .requestVoteReply(let reply):
-      logRaftEvent(.requestVoteResponse(direction: "in", peer: peer, term: reply.term, granted: reply.granted))
+      logRaftEvent(.requestVoteResponse(direction: .inbound, peer: peer, term: reply.term, granted: reply.granted))
       receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
-      logRaftEvent(.appendEntries(direction: "in", peer: peer, term: args.term))
+      logRaftEvent(.appendEntries(direction: .inbound, peer: peer, term: args.term))
       receiveAppendEntries(from: peer, args: args)
     case .appendEntriesReply(let reply):
-      logRaftEvent(.appendEntriesResponse(direction: "in", peer: peer, term: reply.term, success: reply.success))
+      logRaftEvent(.appendEntriesResponse(direction: .inbound, peer: peer, term: reply.term, success: reply.success))
       receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
@@ -395,7 +395,7 @@ package actor Shell<Transport: NodeTransport> {
     do {
       guard await ensureConnected(to: peer) else {
         removeInflightOutbound(id: outboundID, message: message, to: peer)
-        logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
+        logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
@@ -408,7 +408,7 @@ package actor Shell<Transport: NodeTransport> {
       return
     } catch {
       removeInflightOutbound(id: outboundID, message: message, to: peer)
-      logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
+      logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) failed: \(error)")
     }
   }
 

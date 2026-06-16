@@ -1,15 +1,33 @@
 import Logging
 
+enum RaftLogEventKind: String {
+  case requestVote
+  case requestVoteResponse
+  case appendEntries
+  case appendEntriesResponse
+  case clientSubmitResponse
+}
+
+enum RaftLogDirection: String {
+  case inbound = "in"
+  case outbound = "out"
+}
+
 struct RaftLogContext {
-  let kind: String
-  let direction: String
+  let kind: RaftLogEventKind
+  let direction: RaftLogDirection
   let peer: PeerId
   let term: Term
   var granted: Bool?
   var success: Bool?
 
   fileprivate init(
-    kind: String, direction: String, peer: PeerId, term: Term, granted: Bool? = nil, success: Bool? = nil
+    kind: RaftLogEventKind,
+    direction: RaftLogDirection,
+    peer: PeerId,
+    term: Term,
+    granted: Bool? = nil,
+    success: Bool? = nil
   ) {
     self.kind = kind
     self.direction = direction
@@ -21,18 +39,18 @@ struct RaftLogContext {
 
   var level: Logger.Level {
     switch kind {
-    case "appendEntries", "appendEntriesResponse":
+    case .appendEntries, .appendEntriesResponse:
       if success == false { return .info }
       return .trace
-    default:
+    case .requestVote, .requestVoteResponse, .clientSubmitResponse:
       return .info
     }
   }
 
   var metadata: Logger.Metadata {
     var metadata: Logger.Metadata = [
-      ShellLogKey.kind: .string(kind),
-      ShellLogKey.direction: .string(direction),
+      ShellLogKey.kind: .string(kind.rawValue),
+      ShellLogKey.direction: .string(direction.rawValue),
       ShellLogKey.peer: .string(peer),
     ]
     metadata["shell.term"] = .stringConvertible(term)
@@ -46,8 +64,8 @@ struct RaftLogContext {
   }
 
   func message(selfNode: PeerId) -> String {
-    let arrow = direction == "out" ? "->" : "<-"
-    var text = "[\(selfNode)] \(kind) \(arrow) \(peer) term=\(term)"
+    let arrow = direction == .outbound ? "->" : "<-"
+    var text = "[\(selfNode)] \(kind.rawValue) \(arrow) \(peer) term=\(term)"
     if let granted {
       text += granted ? " granted" : " denied"
     }
@@ -57,33 +75,35 @@ struct RaftLogContext {
     return text
   }
 
-  static func requestVote(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "requestVote", direction: direction, peer: peer, term: term)
+  static func requestVote(direction: RaftLogDirection, peer: PeerId, term: Term) -> RaftLogContext {
+    RaftLogContext(kind: .requestVote, direction: direction, peer: peer, term: term)
   }
 
   static func requestVoteResponse(
-    direction: String,
+    direction: RaftLogDirection,
     peer: PeerId,
     term: Term,
     granted: Bool
   ) -> RaftLogContext {
-    RaftLogContext(kind: "requestVoteResponse", direction: direction, peer: peer, term: term, granted: granted)
+    RaftLogContext(
+      kind: .requestVoteResponse, direction: direction, peer: peer, term: term, granted: granted)
   }
 
-  static func appendEntries(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntries", direction: direction, peer: peer, term: term)
+  static func appendEntries(direction: RaftLogDirection, peer: PeerId, term: Term) -> RaftLogContext {
+    RaftLogContext(kind: .appendEntries, direction: direction, peer: peer, term: term)
   }
 
   static func appendEntriesResponse(
-    direction: String,
+    direction: RaftLogDirection,
     peer: PeerId,
     term: Term,
     success: Bool
   ) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntriesResponse", direction: direction, peer: peer, term: term, success: success)
+    RaftLogContext(
+      kind: .appendEntriesResponse, direction: direction, peer: peer, term: term, success: success)
   }
 
   static func clientSubmitResponse(peer: PeerId) -> RaftLogContext {
-    RaftLogContext(kind: "clientSubmitResponse", direction: "out", peer: peer, term: 0)
+    RaftLogContext(kind: .clientSubmitResponse, direction: .outbound, peer: peer, term: 0)
   }
 }
