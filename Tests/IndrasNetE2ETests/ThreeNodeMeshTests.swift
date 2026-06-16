@@ -44,6 +44,10 @@ import Testing
       }
       #expect(leaderElectedCount == 1)
 
+      let result = try await E2ETestSupport.submitCommand(Data("set z=3".utf8), to: peers)
+      #expect(result.status == .ok)
+      #expect(result.logIndex == 1)
+
       group.cancelAll()
       while (try? await group.next()) != nil {}
     }

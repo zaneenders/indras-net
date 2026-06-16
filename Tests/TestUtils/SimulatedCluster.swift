@@ -5,9 +5,7 @@ import Testing
 
 /// Async cluster harness: real `Shell` actors wired over a shared in-memory
 /// `SimulatedTransport.Mesh`. Election-timeout *values* are deterministic via a
-/// seeded RNG per node, and partitions are driven through the mesh — giving the
-/// scenario surface of the synchronous `LogicalCluster` but against the real,
-/// concurrent `Shell` runtime.
+/// seeded RNG per node, and partitions are driven through the mesh.
 package struct SimulatedCluster: Sendable {
   package let shells: [SimulatedShell]
   package let addresses: [NodeAddress]
@@ -98,20 +96,32 @@ package struct SimulatedCluster: Sendable {
     addresses[index].addressKey
   }
 
-  package func waitForLeader(timeout: Duration = .seconds(5)) async throws -> SimulatedShell {
+  package func waitForLeader(
+    otherThan excluded: PeerId? = nil,
+    timeout: Duration = .seconds(5)
+  ) async throws -> SimulatedShell {
     let shells = self.shells
     await TestHelpers.waitUntil(timeout: timeout) {
       for shell in shells where await shell.instance.role == .leader {
+        if let excluded, await shell.instance.id == excluded {
+          continue
+        }
         return true
       }
       return false
     }
 
     for shell in shells where await shell.instance.role == .leader {
+      if let excluded, await shell.instance.id == excluded {
+        continue
+      }
       return shell
     }
 
-    Issue.record("Expected a leader")
+    Issue.record(
+      excluded == nil
+        ? "Expected a leader"
+        : "Expected a leader other than the excluded peer")
     struct MissingLeader: Error {}
     throw MissingLeader()
   }
@@ -148,12 +158,16 @@ package struct SimulatedCluster: Sendable {
     throw MissingFollower()
   }
 
-  package func waitForReplicated(command: Data, atIndex index: LogIndex, timeout: Duration = .seconds(5))
-    async throws
-  {
+  package func waitForReplicated(
+    command: Data,
+    atIndex index: LogIndex,
+    excluding: Set<PeerId> = [],
+    timeout: Duration = .seconds(5)
+  ) async throws {
     let shells = self.shells
     await TestHelpers.waitUntil(timeout: timeout) {
       for shell in shells {
+        if excluding.contains(await shell.instance.id) { continue }
         let nodeLog = await shell.instance.log
         guard nodeLog.count > Int(index), nodeLog[Int(index)].command == command else {
           return false
@@ -163,9 +177,19 @@ package struct SimulatedCluster: Sendable {
     }
 
     for shell in shells {
+      if excluding.contains(await shell.instance.id) { continue }
       let nodeLog = await shell.instance.log
       #expect(nodeLog[Int(index)].command == command)
     }
+  }
+
+  package func shellLogs() async -> [Log] {
+    var logs: [Log] = []
+    logs.reserveCapacity(shells.count)
+    for shell in shells {
+      logs.append(await shell.instance.log)
+    }
+    return logs
   }
 
   package func disconnect(_ peer: PeerId) async {

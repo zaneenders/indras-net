@@ -44,42 +44,42 @@ extension Instance {
   }
 }
 
-extension Array where Element == TimerDirective {
-  public var scheduledDelay: Duration? {
-    compactMap { directive in
-      if case .scheduleNext(let delay) = directive { delay } else { nil }
-    }.last
+public protocol RaftSchedulesNext {
+  var scheduleNextDelay: Duration? { get }
+}
+
+extension TimerDirective: RaftSchedulesNext {
+  public var scheduleNextDelay: Duration? {
+    if case .scheduleNext(let delay) = self { delay } else { nil }
   }
 }
 
-extension Array where Element == RequestVote.Args.Action {
-  public var scheduledDelay: Duration? {
-    compactMap { action in
-      if case .scheduleNext(let delay) = action { delay } else { nil }
-    }.last
+extension RequestVote.Args.Action: RaftSchedulesNext {
+  public var scheduleNextDelay: Duration? {
+    if case .scheduleNext(let delay) = self { delay } else { nil }
   }
 }
 
-extension Array where Element == AppendEntries.Args.Action {
-  public var scheduledDelay: Duration? {
-    compactMap { action in
-      if case .scheduleNext(let delay) = action { delay } else { nil }
-    }.last
+extension AppendEntries.Args.Action: RaftSchedulesNext {
+  public var scheduleNextDelay: Duration? {
+    if case .scheduleNext(let delay) = self { delay } else { nil }
   }
 }
 
-extension Array where Element == RequestVote.Reply.Action {
-  public var scheduledDelay: Duration? {
-    compactMap { action in
-      if case .scheduleNext(let delay) = action { delay } else { nil }
-    }.last
+extension RequestVote.Reply.Action: RaftSchedulesNext {
+  public var scheduleNextDelay: Duration? {
+    if case .scheduleNext(let delay) = self { delay } else { nil }
   }
 }
 
-extension Array where Element == AppendEntries.Reply.Action {
+extension AppendEntries.Reply.Action: RaftSchedulesNext {
+  public var scheduleNextDelay: Duration? {
+    if case .scheduleNext(let delay) = self { delay } else { nil }
+  }
+}
+
+extension Array where Element: RaftSchedulesNext {
   public var scheduledDelay: Duration? {
-    compactMap { action in
-      if case .scheduleNext(let delay) = action { delay } else { nil }
-    }.last
+    compactMap(\.scheduleNextDelay).last
   }
 }

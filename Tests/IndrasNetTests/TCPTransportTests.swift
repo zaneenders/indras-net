@@ -1,3 +1,4 @@
+import NIOCore
 import NIOPosix
 import TestUtils
 import Testing
@@ -161,7 +162,7 @@ import Testing
       let peerA = NodeAddress(host: host, port: 29_130)
       let rogueAddress = NodeAddress(host: host, port: 29_131)
 
-      let rogue = try await HandshakeRoguePeer.startAcceptor(
+      let rogue = try await TCPHandshakeTestPeer.startWrongIdentityAcceptor(
         host: host,
         port: rogueAddress.port,
         helloID: "wrong-peer-id",
@@ -187,7 +188,7 @@ import Testing
 
       let nodeA = try await makeTransport(local: peerA, group: group) { _, _ in }
 
-      try await HandshakeRoguePeer.dialAndGreet(
+      try await TCPHandshakeTestPeer.dialAndGreet(
         target: peerA,
         greetAs: peerA.addressKey,
         eventLoopGroup: group
@@ -206,7 +207,7 @@ import Testing
       let peerA = NodeAddress(host: host, port: 29_134)
       let silentAddress = NodeAddress(host: host, port: 29_135)
 
-      let silent = try await HandshakeRoguePeer.startSilentAcceptor(
+      let silent = try await TCPHandshakeTestPeer.startSilentAcceptor(
         host: host,
         port: silentAddress.port,
         eventLoopGroup: group
@@ -264,6 +265,174 @@ import Testing
       #expect(await nodeA.connectedPeers().isEmpty)
 
       try await nodeA.shutdown()
+    }
+  }
+}
+
+private enum TCPHandshakeTestPeer {
+  struct Acceptor: Sendable {
+    let server: NIOAsyncChannel<NIOAsyncChannel<Message, Message>, Never>
+    let supervisor: Task<Void, Never>
+
+    func shutdown() async {
+      supervisor.cancel()
+      server.channel.close(promise: nil)
+      _ = await supervisor.value
+    }
+  }
+
+  actor SilentAcceptor {
+    private var server: NIOAsyncChannel<NIOAsyncChannel<Message, Message>, Never>?
+    private var supervisor: Task<Void, Never>?
+    private var closedConnections = 0
+
+    var closedConnectionCount: Int { closedConnections }
+
+    func start(host: String, port: Int, eventLoopGroup: MultiThreadedEventLoopGroup) async throws {
+      let server = try await ServerBootstrap(group: eventLoopGroup)
+        .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+        .bind(host: host, port: port, childChannelInitializer: messageChannelInitializer())
+      self.server = server
+      self.supervisor = Task { [weak self] in
+        await withDiscardingTaskGroup { group in
+          do {
+            try await server.executeThenClose { inbound in
+              for try await child in inbound {
+                group.addTask {
+                  do {
+                    try await child.executeThenClose { inbound, _ in
+                      for try await _ in inbound {}
+                    }
+                  } catch {}
+                  await self?.noteConnectionClosed()
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    private func noteConnectionClosed() {
+      closedConnections += 1
+    }
+
+    func shutdown() async {
+      supervisor?.cancel()
+      server?.channel.close(promise: nil)
+      _ = await supervisor?.value
+      supervisor = nil
+      server = nil
+    }
+  }
+
+  static func startWrongIdentityAcceptor(
+    host: String,
+    port: Int,
+    helloID: PeerId,
+    eventLoopGroup: MultiThreadedEventLoopGroup
+  ) async throws -> Acceptor {
+    let server = try await ServerBootstrap(group: eventLoopGroup)
+      .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+      .bind(host: host, port: port, childChannelInitializer: messageChannelInitializer())
+
+    let supervisor = Task {
+      await withDiscardingTaskGroup { group in
+        do {
+          try await server.executeThenClose { inbound in
+            for try await child in inbound {
+              group.addTask {
+                await respondToHandshake(asAcceptedPeer: child, helloID: helloID)
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    return Acceptor(server: server, supervisor: supervisor)
+  }
+
+  static func startSilentAcceptor(
+    host: String,
+    port: Int,
+    eventLoopGroup: MultiThreadedEventLoopGroup
+  ) async throws -> SilentAcceptor {
+    let acceptor = SilentAcceptor()
+    try await acceptor.start(host: host, port: port, eventLoopGroup: eventLoopGroup)
+    return acceptor
+  }
+
+  static func dialAndGreet(
+    target: NodeAddress,
+    greetAs: PeerId,
+    eventLoopGroup: MultiThreadedEventLoopGroup
+  ) async throws {
+    let asyncChannel = try await ClientBootstrap(group: eventLoopGroup)
+      .channelOption(.socketOption(.so_reuseaddr), value: 1)
+      .connect(
+        host: target.host,
+        port: target.port,
+        channelInitializer: messageChannelInitializer()
+      )
+
+    try await asyncChannel.executeThenClose { inbound, outbound in
+      try await outbound.write(
+        HandshakeFrame.signal(magic: HandshakeFrame.magic, version: HandshakeFrame.version).message
+      )
+      try await outbound.write(HandshakeFrame.greet(greetAs).message)
+      try await Task.sleep(for: .milliseconds(200))
+      for try await _ in inbound {}
+    }
+  }
+
+  private static func respondToHandshake(
+    asAcceptedPeer asyncChannel: NIOAsyncChannel<Message, Message>,
+    helloID: PeerId
+  ) async {
+    do {
+      try await asyncChannel.executeThenClose { inbound, outbound in
+        try await outbound.write(
+          HandshakeFrame.signal(magic: HandshakeFrame.magic, version: HandshakeFrame.version).message
+        )
+
+        var handshakeVerified = false
+        for try await wire in inbound {
+          guard let frame = HandshakeFrame(wire) else { return }
+
+          if !handshakeVerified {
+            guard case .signal(let magic, let version) = frame,
+              magic == HandshakeFrame.magic,
+              version == HandshakeFrame.version
+            else { return }
+            handshakeVerified = true
+            continue
+          }
+
+          guard case .greet = frame else { return }
+          try await outbound.write(HandshakeFrame.hello(helloID).message)
+          try await Task.sleep(for: .milliseconds(100))
+          return
+        }
+      }
+    } catch {}
+  }
+
+  @Sendable
+  static func messageChannelInitializer() -> @Sendable (Channel) -> EventLoopFuture<
+    NIOAsyncChannel<Message, Message>
+  > {
+    { channel in
+      channel.eventLoop.makeCompletedFuture {
+        try channel.pipeline.syncOperations.addHandler(
+          ByteToMessageHandler(MessageDecoder(maxPayloadLength: Message.defaultMaxPayloadLength))
+        )
+        try channel.pipeline.syncOperations.addHandler(MessageToByteHandler(MessageEncoder()))
+        return try NIOAsyncChannel(
+          wrappingChannelSynchronously: channel,
+          configuration: .init(inboundType: Message.self, outboundType: Message.self)
+        )
+      }
     }
   }
 }

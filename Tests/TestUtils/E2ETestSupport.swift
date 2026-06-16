@@ -135,6 +135,40 @@ public enum E2ETestSupport {
       throw Timeout()
     }
   }
+
+  /// Submits `command` to the cluster over TCP, following `notLeader` redirects to the
+  /// reported leader address when needed.
+  public static func submitCommand(
+    _ command: Data,
+    to peers: [NodeAddress],
+    timeout: Duration = .seconds(10)
+  ) async throws -> ClientSubmitResult {
+    for peer in peers {
+      let result = try await IndrasNetClient.submit(command: command, to: peer, timeout: timeout)
+      switch result.status {
+      case .ok:
+        return result
+      case .notLeader(let leader?):
+        let leaderAddress = try peerAddress(leader)
+        return try await IndrasNetClient.submit(
+          command: command, to: leaderAddress, timeout: timeout)
+      case .notLeader:
+        continue
+      }
+    }
+
+    Issue.record("could not submit command to any peer in \(peers)")
+    throw Timeout()
+  }
+
+  private static func peerAddress(_ peerID: PeerId) throws -> NodeAddress {
+    let parts = peerID.split(separator: ":", maxSplits: 1).map(String.init)
+    guard parts.count == 2, let port = Int(parts[1]) else {
+      Issue.record("invalid leader address '\(peerID)'")
+      throw Timeout()
+    }
+    return NodeAddress(host: parts[0], port: port)
+  }
 }
 
 public actor NodeLog {

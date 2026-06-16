@@ -69,14 +69,6 @@ import Testing
     try await transportB.shutdown()
   }
 
-  @Test func threeSimulatedShellsElectLeader() async throws {
-    let cluster = try await SimulatedCluster.start(nodeCount: 3, seed: 1, basePort: 100)
-    defer { try? await cluster.shutdown() }
-
-    _ = try await cluster.waitForLeader()
-    #expect(await cluster.leaderCount() == 1)
-  }
-
   @Test func electionIsDeterministicUnderManualClock() async throws {
     let cluster = try await SimulatedCluster.start(
       nodeCount: 3, seed: 1, manualClocks: true, basePort: 200)

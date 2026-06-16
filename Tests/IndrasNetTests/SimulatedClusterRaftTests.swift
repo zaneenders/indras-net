@@ -200,19 +200,19 @@ import Testing
       return log.count > Int(2) && log[Int(2)].command == stale
     }
 
-    let newLeader = try await waitForLeader(
-      in: cluster, otherThan: staleLeaderID, timeout: .seconds(10))
+    let newLeader = try await cluster.waitForLeader(
+      otherThan: staleLeaderID, timeout: .seconds(10))
     let winnerReply = await newLeader.submit(command: winner)
     #expect(winnerReply.status == .ok)
     #expect(winnerReply.logIndex == 2)
 
-    try await waitForReplicated(
-      command: winner, atIndex: 2, in: cluster, excluding: [staleLeaderID], timeout: .seconds(10))
+    try await cluster.waitForReplicated(
+      command: winner, atIndex: 2, excluding: [staleLeaderID], timeout: .seconds(10))
 
     await cluster.reconnect(staleLeaderID)
     try await cluster.waitForReplicated(command: winner, atIndex: 2, timeout: .seconds(10))
 
-    let logs = await cluster.shells.asyncMap { await $0.instance.log }
+    let logs = await cluster.shellLogs()
     for log in logs {
       #expect(log[Int(2)].command == winner)
       #expect(!log.map(\.command).contains(stale))
@@ -241,74 +241,77 @@ import Testing
       try await cluster.waitForReplicated(command: entry, atIndex: index)
     }
 
-    let logs = await cluster.shells.asyncMap { await $0.instance.log }
+    let logs = await cluster.shellLogs()
     for index in 1...entries.count {
       let commands = Set(logs.map { $0[index].command })
       #expect(commands.count == 1)
       #expect(commands.first == entries[index - 1])
     }
   }
-}
 
-private func waitForLeader(
-  in cluster: SimulatedCluster,
-  otherThan excluded: PeerId,
-  timeout: Duration
-) async throws -> SimulatedShell {
-  let shells = cluster.shells
-  await TestHelpers.waitUntil(timeout: timeout) {
-    for shell in shells where await shell.instance.role == .leader {
-      if await shell.instance.id != excluded {
-        return true
-      }
+  @Test func disconnectTwoNodesNoLeaderReconnectOneNode() async throws {
+    let cluster = try await SimulatedCluster.start(
+      nodeCount: 3, seed: 1, manualClocks: true, basePort: 400)
+    defer { try? await cluster.shutdown() }
+
+    await cluster.disconnect(cluster.peer(at: 0))
+    await cluster.disconnect(cluster.peer(at: 1))
+
+    cluster.advanceAll(by: .seconds(1))
+    try? await Task.sleep(for: .milliseconds(50))
+    #expect(await cluster.leaderCount() == 0)
+
+    await cluster.reconnect(cluster.peer(at: 0))
+    cluster.advance(0, by: .seconds(1))
+    try? await Task.sleep(for: .milliseconds(50))
+
+    let leader = try await cluster.waitForLeader()
+    let leaderID = await leader.instance.id
+
+    await cluster.reconnect(cluster.peer(at: 1))
+    cluster.advance(1, by: .milliseconds(100))
+    try? await Task.sleep(for: .milliseconds(50))
+
+    #expect(await cluster.leaderCount() == 1)
+    for shell in cluster.shells where await shell.instance.role == .leader {
+      #expect(await shell.instance.id == leaderID)
     }
-    return false
   }
 
-  for shell in shells where await shell.instance.role == .leader {
-    if await shell.instance.id != excluded {
-      return shell
-    }
+  @Test func disconnectNodeSubmitEntryThenReconnectNode() async throws {
+    let cluster = try await SimulatedCluster.start(nodeCount: 3, seed: 1, basePort: 401)
+    defer { try? await cluster.shutdown() }
+
+    await cluster.disconnect(cluster.peer(at: 0))
+    let leader = try await cluster.waitForLeader(timeout: .seconds(10))
+    let reply = await leader.submit(command: command)
+    #expect(reply.status == .ok)
+
+    #expect(await cluster.shells[0].instance.log.count == 1)
+    #expect(await cluster.shells[1].instance.log.count == 2)
+    #expect(await cluster.shells[2].instance.log.count == 2)
+
+    await cluster.reconnect(cluster.peer(at: 0))
+    try await cluster.waitForReplicated(command: command, atIndex: 1, timeout: .seconds(10))
   }
 
-  Issue.record("Expected a leader other than the excluded peer")
-  struct MissingLeader: Error {}
-  throw MissingLeader()
-}
+  @Test func disconnectTwoNodesSubmitEntryThenReconnectNode() async throws {
+    let cluster = try await SimulatedCluster.start(nodeCount: 5, seed: 1, basePort: 402)
+    defer { try? await cluster.shutdown() }
 
-private func waitForReplicated(
-  command: Data,
-  atIndex index: LogIndex,
-  in cluster: SimulatedCluster,
-  excluding: Set<PeerId> = [],
-  timeout: Duration
-) async throws {
-  let shells = cluster.shells
-  await TestHelpers.waitUntil(timeout: timeout) {
-    for shell in shells {
-      if excluding.contains(await shell.instance.id) { continue }
-      let nodeLog = await shell.instance.log
-      guard nodeLog.count > Int(index), nodeLog[Int(index)].command == command else {
-        return false
-      }
-    }
-    return true
-  }
+    await cluster.disconnect(cluster.peer(at: 0))
+    await cluster.disconnect(cluster.peer(at: 1))
+    let leader = try await cluster.waitForLeader(timeout: .seconds(10))
+    _ = await leader.submit(command: command)
 
-  for shell in shells {
-    if excluding.contains(await shell.instance.id) { continue }
-    let nodeLog = await shell.instance.log
-    #expect(nodeLog[Int(index)].command == command)
-  }
-}
+    #expect(await cluster.shells[0].instance.log.count == 1)
+    #expect(await cluster.shells[1].instance.log.count == 1)
+    #expect(await cluster.shells[2].instance.log.count == 2)
+    #expect(await cluster.shells[3].instance.log.count == 2)
+    #expect(await cluster.shells[4].instance.log.count == 2)
 
-extension Array {
-  fileprivate func asyncMap<T: Sendable>(_ transform: (Element) async -> T) async -> [T] {
-    var results: [T] = []
-    results.reserveCapacity(count)
-    for element in self {
-      results.append(await transform(element))
-    }
-    return results
+    await cluster.reconnect(cluster.peer(at: 0))
+    await cluster.reconnect(cluster.peer(at: 1))
+    try await cluster.waitForReplicated(command: command, atIndex: 1, timeout: .seconds(10))
   }
 }

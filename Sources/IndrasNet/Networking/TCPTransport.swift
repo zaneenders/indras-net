@@ -388,6 +388,17 @@ public actor TCPTransport: NodeTransport {
 
   // Whether to adopt the given connection over an existing one.
   private func adopt(_ connection: Connection, peerID: PeerId, origin: ConnectionOrigin) -> Bool {
+    if peerID.nodeAddress == nil {
+      // Ephemeral client connections (e.g. "raft") are not subject to mesh
+      // duplicate-resolution rules; keep the socket for request/response.
+      if let existing = self.connections[peerID] {
+        existing.channel.close(promise: nil)
+      }
+      self.connections[peerID] = connection
+      self.pendingHandshakes.removeValue(forKey: connection.id)
+      return true
+    }
+
     // Both ends keep the connection initiated by the lower peer ID, so they
     // deterministically converge on the same surviving socket.
     let initiatorIsLocal = origin == .created
