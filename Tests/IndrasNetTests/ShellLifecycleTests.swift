@@ -124,9 +124,9 @@ import Testing
     try await cluster.waitForReplicated(command: command, atIndex: 1)
   }
 
-  /// Failed appendEntries deliveries strip matching inflight RPCs. Replication
-  /// through the remaining majority must still succeed and the isolated peer
-  /// should catch up after reconnect.
+  /// Failed appendEntries deliveries remove only the matching inflight RPC by
+  /// delivery ID. Replication through the remaining majority must still succeed
+  /// and the isolated peer should catch up after reconnect.
   @Test func appendEntriesDeliveryFailureDoesNotPreventLaterReplication() async throws {
     let timing = NodeTiming(
       heartbeatIntervalMs: 10,

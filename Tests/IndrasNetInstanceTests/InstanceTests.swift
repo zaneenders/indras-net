@@ -307,9 +307,10 @@ import Testing
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 1, success: true)))
   }
 
-  @Test func appendEntriesRejectsMismatchedPreviousEntry() {
+  @Test func appendEntriesWithLogMismatchResetsElectionTimeout() {
     let stale = LogEntry(term: 1, command: Data("old".utf8))
-    var instance = Instance(id: "follower", currentTerm: 2, log: .sentinel + [stale])
+    var instance = Instance.forTests(
+      id: "follower", role: .candidate, currentTerm: 2, log: .sentinel + [stale])
 
     let actions = instance.receiveAppendEntries(
       "leader",
@@ -323,8 +324,34 @@ import Testing
       )
     )
 
+    #expect(instance.role == .follower)
+    #expect(instance.leaderId == "leader")
     #expect(instance.log.count == 2)
-    #expect(actions == [.sendAppendEntriesReply(to: "leader", term: 2, success: false)])
+    #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 2, success: false)))
+    #expect(actions.scheduledDelay == electionTimeout)
+  }
+
+  @Test func appendEntriesRejectsMismatchedPreviousEntry() {
+    let stale = LogEntry(term: 1, command: Data("old".utf8))
+    var instance = Instance.forTests(id: "follower", currentTerm: 2, log: .sentinel + [stale])
+
+    let actions = instance.receiveAppendEntries(
+      "leader",
+      .init(
+        term: 2,
+        leaderId: "leader",
+        prevLogIndex: 1,
+        prevLogTerm: 9,
+        entries: [LogEntry(term: 2, command: Data("new".utf8))],
+        leaderCommit: 1
+      )
+    )
+
+    #expect(instance.role == .follower)
+    #expect(instance.leaderId == "leader")
+    #expect(instance.log.count == 2)
+    #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 2, success: false)))
+    #expect(actions.scheduledDelay == electionTimeout)
   }
 
   @Test func appendEntriesTruncatesConflictingSuffix() {

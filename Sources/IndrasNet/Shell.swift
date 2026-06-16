@@ -37,8 +37,14 @@ extension Shell {
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) {
-    inflightRequestVotes[peer, default: []].append(args)
-    deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
+    let id = UUID()
+    inflightRequestVotes[peer, default: []].append((id, args))
+    deliver(
+      to: peer,
+      message: .requestVote(args),
+      context: .requestVote(direction: "out", peer: peer, term: args.term),
+      outboundID: id
+    )
   }
 
   private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) {
@@ -50,9 +56,14 @@ extension Shell {
   }
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
-    inflightAppendEntries[peer, default: []].append(args)
+    let id = UUID()
+    inflightAppendEntries[peer, default: []].append((id, args))
     deliver(
-      to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
+      to: peer,
+      message: .appendEntries(args),
+      context: .appendEntries(direction: "out", peer: peer, term: args.term),
+      outboundID: id
+    )
   }
 
   private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) {
@@ -102,7 +113,7 @@ extension Shell {
   }
 
   private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
-    guard let sent = inflightRequestVotes[peer]?.removeFirst() else {
+    guard let sent = inflightRequestVotes[peer]?.removeFirst().args else {
       logger.notice("[\(peerId)] requestVote reply from \(peer) with no inflight request")
       return
     }
@@ -141,7 +152,7 @@ extension Shell {
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
-    guard let sent = inflightAppendEntries[peer]?.removeFirst() else {
+    guard let sent = inflightAppendEntries[peer]?.removeFirst().args else {
       logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
       return
     }
@@ -257,8 +268,8 @@ package actor Shell<Transport: NodeTransport> {
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
-  private var inflightAppendEntries: [PeerId: [AppendEntries.Args]] = [:]
-  private var inflightRequestVotes: [PeerId: [RequestVote.Args]] = [:]
+  private var inflightAppendEntries: [PeerId: [(id: UUID, args: AppendEntries.Args)]] = [:]
+  private var inflightRequestVotes: [PeerId: [(id: UUID, args: RequestVote.Args)]] = [:]
   private var pendingByIndex: [LogIndex: (requestId: UInt128, client: PeerId)] = [:]
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
@@ -305,49 +316,66 @@ package actor Shell<Transport: NodeTransport> {
     return port
   }
 
-  private func deliver(to peer: PeerId, message: RaftMessage, context: RaftLogContext) {
+  private func deliver(
+    to peer: PeerId,
+    message: RaftMessage,
+    context: RaftLogContext,
+    outboundID: UUID? = nil
+  ) {
     guard !isStopped else { return }
 
-    let id = UUID()
+    let deliveryID = outboundID ?? UUID()
 
-    inflightDeliveries[id] = Task {
-      await self.performDelivery(to: peer, message: message, context: context)
-      await self.deliveryFinished(id: id)
+    inflightDeliveries[deliveryID] = Task {
+      await self.performDelivery(
+        to: peer,
+        message: message,
+        context: context,
+        outboundID: outboundID
+      )
+      await self.deliveryFinished(id: deliveryID)
     }
   }
 
-  private func performDelivery(to peer: PeerId, message: RaftMessage, context: RaftLogContext) async {
+  private func performDelivery(
+    to peer: PeerId,
+    message: RaftMessage,
+    context: RaftLogContext,
+    outboundID: UUID?
+  ) async {
     guard !Task.isCancelled else { return }
 
     do {
       guard await ensureConnected(to: peer) else {
-        removeInflightOutbound(message, to: peer)
+        removeInflightOutbound(id: outboundID, message: message, to: peer)
         logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
-      removeInflightOutbound(message, to: peer)
+      removeInflightOutbound(id: outboundID, message: message, to: peer)
       return
     } catch IndrasNetTransportError.peerNotConnected {
-      removeInflightOutbound(message, to: peer)
+      removeInflightOutbound(id: outboundID, message: message, to: peer)
       return
     } catch {
-      removeInflightOutbound(message, to: peer)
+      removeInflightOutbound(id: outboundID, message: message, to: peer)
       logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
     }
   }
 
-  private func removeInflightOutbound(_ message: RaftMessage, to peer: PeerId) {
+  private func removeInflightOutbound(id: UUID?, message: RaftMessage, to peer: PeerId) {
+    guard let id else { return }
+
     switch message {
-    case .appendEntries(let args):
-      inflightAppendEntries[peer]?.removeAll { $0 == args }
+    case .appendEntries:
+      inflightAppendEntries[peer]?.removeAll { $0.id == id }
       if inflightAppendEntries[peer]?.isEmpty == true {
         inflightAppendEntries.removeValue(forKey: peer)
       }
-    case .requestVote(let args):
-      inflightRequestVotes[peer]?.removeAll { $0 == args }
+    case .requestVote:
+      inflightRequestVotes[peer]?.removeAll { $0.id == id }
       if inflightRequestVotes[peer]?.isEmpty == true {
         inflightRequestVotes.removeValue(forKey: peer)
       }

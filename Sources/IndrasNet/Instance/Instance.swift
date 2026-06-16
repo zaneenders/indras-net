@@ -207,6 +207,7 @@ struct Instance {
 
     guard log.matches(prevLogIndex: args.prevLogIndex, prevLogTerm: args.prevLogTerm) else {
       actions.append(.sendAppendEntriesReply(to: peer, term: currentTerm, success: false))
+      actions.append(.scheduleNext(delay: getNextDelay()))
       return actions
     }
 
