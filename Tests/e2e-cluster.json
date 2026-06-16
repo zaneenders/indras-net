@@ -1,0 +1,10 @@
+{
+  "peers": [
+    { "host": "127.0.0.1", "port": 29301 },
+    { "host": "127.0.0.1", "port": 29302 },
+    { "host": "127.0.0.1", "port": 29303 }
+  ],
+  "heartbeatIntervalMs": 50,
+  "electionTimeoutMinMs": 150,
+  "electionTimeoutMaxMs": 300
+}

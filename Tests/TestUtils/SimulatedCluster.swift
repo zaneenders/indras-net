@@ -1,0 +1,216 @@
+import Foundation
+import Testing
+
+@testable import IndrasNet
+
+/// Async cluster harness: real `Shell` actors wired over a shared in-memory
+/// `SimulatedTransport.Mesh`. Election-timeout *values* are deterministic via a
+/// seeded RNG per node, and partitions are driven through the mesh.
+package struct SimulatedCluster: Sendable {
+  package let shells: [SimulatedShell]
+  package let addresses: [NodeAddress]
+  package let mesh: SimulatedTransport.Mesh
+  /// Per-node manual clocks, populated only when started with `manualClocks: true`.
+  package let clocks: [TestClock]
+
+  private init(
+    shells: [SimulatedShell],
+    addresses: [NodeAddress],
+    mesh: SimulatedTransport.Mesh,
+    clocks: [TestClock]
+  ) {
+    self.shells = shells
+    self.addresses = addresses
+    self.mesh = mesh
+    self.clocks = clocks
+  }
+
+  /// Boots `nodeCount` nodes on a shared mesh and starts every node. When `seed`
+  /// is set each node derives a deterministic RNG from it. When `manualClocks` is
+  /// true each node gets its own ``TestClock`` so timer firing can be driven
+  /// deterministically with ``advance(_:by:)``.
+  package static func start(
+    nodeCount: Int,
+    seed: UInt64? = nil,
+    timing: NodeTiming = .default,
+    manualClocks: Bool = false,
+    host: String = "sim",
+    basePort: Int = 1
+  ) async throws -> SimulatedCluster {
+    let mesh = SimulatedTransport.Mesh()
+    let addresses = (0..<nodeCount).map { NodeAddress(host: host, port: basePort + $0) }
+
+    let nodeSeeds: [UInt64]
+    if let seed {
+      var clusterRNG = SeededRandomNumberGenerator(seed: seed)
+      nodeSeeds = addresses.map { _ in clusterRNG.next() }
+    } else {
+      nodeSeeds = []
+    }
+
+    let clocks = manualClocks ? (0..<nodeCount).map { _ in TestClock() } : []
+
+    let shells: [SimulatedShell] = addresses.enumerated().map { index, node in
+      let rng: any RandomNumberGenerator & Sendable =
+        index < nodeSeeds.count
+        ? SeededRandomNumberGenerator(seed: nodeSeeds[index])
+        : SystemRandomNumberGenerator()
+      let timerSleep: @Sendable (Duration) async -> Void
+      if manualClocks {
+        let clock = clocks[index]
+        timerSleep = { try? await clock.sleep(until: clock.now.advanced(by: $0)) }
+      } else {
+        timerSleep = { try? await Task.sleep(for: $0) }
+      }
+      return Shell(
+        node,
+        timing: timing,
+        transport: SimulatedTransport(peer: node, mesh: mesh),
+        rng: rng,
+        timerSleep: timerSleep,
+        logger: TestHelpers.quietLogger
+      )
+    }
+
+    for index in shells.indices {
+      let peers = addresses.enumerated().filter { $0.offset != index }.map(\.element)
+      _ = try await shells[index].start(with: peers)
+    }
+
+    return SimulatedCluster(shells: shells, addresses: addresses, mesh: mesh, clocks: clocks)
+  }
+
+  /// Advances node `index`'s manual clock, firing any timer whose delay has elapsed.
+  package func advance(_ index: Int, by duration: Duration) {
+    clocks[index].advance(by: duration)
+  }
+
+  /// Advances every manual clock by `duration`.
+  package func advanceAll(by duration: Duration) {
+    for index in clocks.indices {
+      advance(index, by: duration)
+    }
+  }
+
+  package func peer(at index: Int) -> PeerId {
+    addresses[index].addressKey
+  }
+
+  package func waitForLeader(
+    otherThan excluded: PeerId? = nil,
+    timeout: Duration = .seconds(5)
+  ) async throws -> SimulatedShell {
+    let shells = self.shells
+    await TestHelpers.waitUntil(timeout: timeout) {
+      for shell in shells where await shell.instance.role == .leader {
+        if let excluded, await shell.instance.id == excluded {
+          continue
+        }
+        return true
+      }
+      return false
+    }
+
+    for shell in shells where await shell.instance.role == .leader {
+      if let excluded, await shell.instance.id == excluded {
+        continue
+      }
+      return shell
+    }
+
+    Issue.record(
+      excluded == nil
+        ? "Expected a leader"
+        : "Expected a leader other than the excluded peer")
+    struct MissingLeader: Error {}
+    throw MissingLeader()
+  }
+
+  package func leaderCount() async -> Int {
+    var count = 0
+    for shell in shells where await shell.instance.role == .leader {
+      count += 1
+    }
+    return count
+  }
+
+  package func waitForFollower(knownLeader leaderID: PeerId, timeout: Duration = .seconds(5)) async throws
+    -> SimulatedShell
+  {
+    let shells = self.shells
+    await TestHelpers.waitUntil(timeout: timeout) {
+      for shell in shells where await shell.instance.role == .follower {
+        if await shell.instance.leaderId == leaderID {
+          return true
+        }
+      }
+      return false
+    }
+
+    for shell in shells where await shell.instance.role == .follower {
+      if await shell.instance.leaderId == leaderID {
+        return shell
+      }
+    }
+
+    Issue.record("Expected a follower that knows the leader")
+    struct MissingFollower: Error {}
+    throw MissingFollower()
+  }
+
+  package func waitForReplicated(
+    command: Data,
+    atIndex index: LogIndex,
+    excluding: Set<PeerId> = [],
+    timeout: Duration = .seconds(5)
+  ) async throws {
+    let shells = self.shells
+    await TestHelpers.waitUntil(timeout: timeout) {
+      for shell in shells {
+        if excluding.contains(await shell.instance.id) { continue }
+        let nodeLog = await shell.instance.log
+        guard nodeLog.count > Int(index), nodeLog[Int(index)].command == command else {
+          return false
+        }
+      }
+      return true
+    }
+
+    for shell in shells {
+      if excluding.contains(await shell.instance.id) { continue }
+      let nodeLog = await shell.instance.log
+      #expect(nodeLog[Int(index)].command == command)
+    }
+  }
+
+  package func shellLogs() async -> [Log] {
+    var logs: [Log] = []
+    logs.reserveCapacity(shells.count)
+    for shell in shells {
+      logs.append(await shell.instance.log)
+    }
+    return logs
+  }
+
+  package func disconnect(_ peer: PeerId) async {
+    await mesh.disconnect(peer)
+  }
+
+  package func reconnect(_ peer: PeerId) async {
+    await mesh.reconnect(peer)
+  }
+
+  package func disconnect(from sender: PeerId, to recipient: PeerId) async {
+    await mesh.disconnect(from: sender, to: recipient)
+  }
+
+  package func reconnect(from sender: PeerId, to recipient: PeerId) async {
+    await mesh.reconnect(from: sender, to: recipient)
+  }
+
+  package func shutdown() async throws {
+    for shell in shells {
+      try await shell.shutdown()
+    }
+  }
+}

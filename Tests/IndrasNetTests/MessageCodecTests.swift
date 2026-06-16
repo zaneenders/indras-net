@@ -1,3 +1,4 @@
+import Foundation
 import NIOCore
 import NIOEmbedded
 import Testing
@@ -27,7 +28,7 @@ import Testing
   }
 
   @Test func requestVoteArgsRoundTripThroughCodec() throws {
-    let args = RequestVote.Args(term: 2, candidateId: "node-a", lostLogIndex: 3, lastLogTerm: 4)
+    let args = RequestVote.Args(term: 2, candidateId: "node-a", lastLogIndex: 3, lastLogTerm: 4)
     let original = args.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())
     let roundTripped = try #require(RequestVote.Args(from: decoded))
@@ -43,6 +44,41 @@ import Testing
   }
 
   @Test func appendEntriesArgsRoundTripThroughCodec() throws {
+    let entries = [
+      LogEntry(term: 1, command: Data("set x=1".utf8)),
+      LogEntry(term: 3, command: Data("set y=2".utf8)),
+    ]
+    let args = AppendEntries.Args(
+      term: 3,
+      leaderId: "leader-1",
+      prevLogIndex: 2,
+      prevLogTerm: 1,
+      entries: entries,
+      leaderCommit: 3
+    )
+    let original = args.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(AppendEntries.Args(from: decoded))
+    #expect(roundTripped == args)
+  }
+
+  @Test func clientSubmitArgsRoundTripThroughCodec() throws {
+    let args = ClientSubmit.Args(requestId: 9, command: Data("set z=3".utf8))
+    let original = args.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(ClientSubmit.Args(from: decoded))
+    #expect(roundTripped == args)
+  }
+
+  @Test func clientSubmitReplyRoundTripThroughCodec() throws {
+    let reply = ClientSubmit.Reply(requestId: 4, status: .notLeader, leaderId: "leader-1", logIndex: 0)
+    let original = reply.toMessage()
+    let decoded = try decodeInbound(original.encodeToByteBuffer())
+    let roundTripped = try #require(ClientSubmit.Reply(from: decoded))
+    #expect(roundTripped == reply)
+  }
+
+  @Test func appendEntriesHeartbeatRoundTripThroughCodec() throws {
     let args = AppendEntries.Args(term: 3, leaderId: "leader-1")
     let original = args.toMessage()
     let decoded = try decodeInbound(original.encodeToByteBuffer())
@@ -62,10 +98,10 @@ import Testing
     let reply = AppendEntries.Reply(term: 1, success: false)
     var wire = reply.toMessage().encodeToByteBuffer()
 
-    #expect(wire.readableBytes == Message.headerLength + 17)
+    #expect(wire.readableBytes == Message.headerLength + 9)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.appendEntriesResponse.rawValue)
-    #expect(wire.readInteger(as: UInt32.self) == 17)
-    #expect(wire.readInteger(as: UInt128.self) == 1)
+    #expect(wire.readInteger(as: UInt32.self) == 9)
+    #expect(wire.readInteger(as: UInt64.self) == 1)
     #expect(wire.readInteger(as: UInt8.self) == 0)
   }
 
@@ -73,10 +109,10 @@ import Testing
     let reply = RequestVote.Reply(granted: true, term: 1)
     var wire = reply.toMessage().encodeToByteBuffer()
 
-    #expect(wire.readableBytes == Message.headerLength + 17)
+    #expect(wire.readableBytes == Message.headerLength + 9)
     #expect(wire.readInteger(as: UInt16.self) == MessageType.requestVoteResponse.rawValue)
-    #expect(wire.readInteger(as: UInt32.self) == 17)
-    #expect(wire.readInteger(as: UInt128.self) == 1)
+    #expect(wire.readInteger(as: UInt32.self) == 9)
+    #expect(wire.readInteger(as: UInt64.self) == 1)
     #expect(wire.readInteger(as: UInt8.self) == 1)
   }
 

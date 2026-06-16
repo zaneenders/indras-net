@@ -1,9 +1,10 @@
 import Foundation
 import Logging
 import NIOCore
+import OrderedCollections
 
 // MARK: Raft
-// This might be able to be a protocl for someone to implment that Shell can run/drive
+// This might be able to be a protocol for someone to implement that Shell can run/drive
 extension Shell {
 
   private func scheduleNext(delay: Duration) {
@@ -11,7 +12,7 @@ extension Shell {
     timerTask = Task {
       var nextDelay: Duration = delay
       repeat {
-        try? await Task.sleep(for: nextDelay)
+        await self.timerSleep(nextDelay)
         if Task.isCancelled { break }
         nextDelay = self.handleTimerTick()
       } while !Task.isCancelled
@@ -37,58 +38,75 @@ extension Shell {
   }
 
   private func deliverRequestVote(to peer: PeerId, args: RequestVote.Args) {
-    deliver(to: peer, message: .requestVote(args), context: .requestVote(direction: "out", peer: peer, term: args.term))
+    let id = UUID()
+    trackInflight(peer: peer, id: id, outbound: .requestVote(args))
+    deliver(
+      to: peer,
+      message: .requestVote(args),
+      context: .requestVote(direction: .outbound, peer: peer, term: args.term),
+      outboundID: id
+    )
   }
 
   private func deliverRequestVoteReply(to peer: PeerId, term: Term, voteGranted: Bool) {
     deliver(
       to: peer,
       message: .requestVoteReply(.init(granted: voteGranted, term: term)),
-      context: .requestVoteResponse(direction: "out", peer: peer, term: term, granted: voteGranted)
+      context: .requestVoteResponse(direction: .outbound, peer: peer, term: term, granted: voteGranted)
     )
   }
 
   private func deliverAppendEntries(to peer: PeerId, args: AppendEntries.Args) {
+    let id = UUID()
+    trackInflight(peer: peer, id: id, outbound: .appendEntries(args))
     deliver(
-      to: peer, message: .appendEntries(args), context: .appendEntries(direction: "out", peer: peer, term: args.term))
+      to: peer,
+      message: .appendEntries(args),
+      context: .appendEntries(direction: .outbound, peer: peer, term: args.term),
+      outboundID: id
+    )
   }
 
   private func deliverAppendEntriesReply(to peer: PeerId, term: Term, success: Bool) {
     deliver(
       to: peer,
       message: .appendEntriesReply(.init(term: term, success: success)),
-      context: .appendEntriesResponse(direction: "out", peer: peer, term: term, success: success)
+      context: .appendEntriesResponse(direction: .outbound, peer: peer, term: term, success: success)
     )
   }
 
-  func receiveMessage(message: AppMessage, from peer: PeerId) {
+  func receiveMessage(message: RaftMessage, from peer: PeerId) {
     switch message {
+    case .clientSubmit(let args):
+      receiveClientSubmit(from: peer, args: args)
+    case .clientSubmitReply(let reply):
+      receiveClientSubmitReply(reply)
     case .requestVote(let args):
-      logRaftEvent(.requestVote(direction: "in", peer: peer, term: args.term))
-      receiveRequestVote(from: peer, request: args)
+      logRaftEvent(.requestVote(direction: .inbound, peer: peer, term: args.term))
+      receiveRequestVote(from: peer, args: args)
     case .requestVoteReply(let reply):
-      logRaftEvent(.requestVoteResponse(direction: "in", peer: peer, term: reply.term, granted: reply.granted))
+      logRaftEvent(.requestVoteResponse(direction: .inbound, peer: peer, term: reply.term, granted: reply.granted))
       receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
-      logRaftEvent(.appendEntries(direction: "in", peer: peer, term: args.term))
+      logRaftEvent(.appendEntries(direction: .inbound, peer: peer, term: args.term))
       receiveAppendEntries(from: peer, args: args)
     case .appendEntriesReply(let reply):
-      logRaftEvent(.appendEntriesResponse(direction: "in", peer: peer, term: reply.term, success: reply.success))
+      logRaftEvent(.appendEntriesResponse(direction: .inbound, peer: peer, term: reply.term, success: reply.success))
       receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
 
-  private func receiveRequestVote(from peer: PeerId, request: RequestVote.Args) {
+  private func receiveRequestVote(from peer: PeerId, args: RequestVote.Args) {
     let previousRole = instance.role
 
-    for action in instance.receiveRequestVote(peer, request) {
+    for action in instance.receiveRequestVote(peer, args) {
       switch action {
       case .sendRequestVoteReply(let to, let term, let voteGranted):
         deliverRequestVoteReply(to: to, term: term, voteGranted: voteGranted)
-      case .persist:
-        ()  // TODO: persist state
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
@@ -96,9 +114,14 @@ extension Shell {
   }
 
   private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
+    guard let sent = dequeueSentRequestVote(from: peer) else {
+      logger.notice("[\(peerId)] requestVote reply from \(peer) with no inflight request")
+      return
+    }
+
     let previousRole = instance.role
 
-    for action in instance.receiveRequestVoteReply(peer, reply) {
+    for action in instance.receiveRequestVoteReply(peer, sent, reply) {
       switch action {
       case .sendAppendEntry(let peer, let args):
         deliverAppendEntries(to: peer, args: args)
@@ -110,15 +133,19 @@ extension Shell {
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntries(from leader: PeerId, args: AppendEntries.Args) {
+  private func receiveAppendEntries(from peer: PeerId, args: AppendEntries.Args) {
     let previousRole = instance.role
 
-    for action in instance.receiveAppendEntries(leader, args) {
+    for action in instance.receiveAppendEntries(peer, args) {
       switch action {
       case .sendAppendEntriesReply(let to, let term, let success):
         deliverAppendEntriesReply(to: to, term: term, success: success)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .apply(let entry, let index):
+        applyLogEntry(entry, atIndex: index)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
@@ -126,19 +153,115 @@ extension Shell {
   }
 
   private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
+    guard let sent = dequeueSentAppendEntries(from: peer) else {
+      logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
+      return
+    }
+
     let previousRole = instance.role
 
-    for action in instance.receiveAppendEntriesReply(peer, reply) {
+    for action in instance.receiveAppendEntriesReply(peer, sent, reply) {
       switch action {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .sendAppendEntry(let peer, let args):
+        deliverAppendEntries(to: peer, args: args)
+      case .apply(let entry, let index):
+        applyLogEntry(entry, atIndex: index)
+      case .persist:
+        ()  // TODO: persist state
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
   }
 
+  private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) {
+    if let completedIndex = clientRequests.completedIndex(client: clientPeer, requestId: args.requestId) {
+      completeClientSubmit(
+        reply: ClientSubmit.Reply(
+          requestId: args.requestId, status: .ok, logIndex: completedIndex),
+        to: clientPeer)
+      return
+    }
+
+    if let inFlightIndex = clientRequests.inFlightIndex(client: clientPeer, requestId: args.requestId) {
+      if let pending = clientRequests.pending(at: inFlightIndex),
+        pending.requestId == args.requestId,
+        pending.client != clientPeer
+      {
+        clientRequests.addWaiter(clientPeer, forRequestId: args.requestId)
+      }
+      return
+    }
+
+    handleClientSubmitActions(instance.receiveClientSubmit(clientPeer, args))
+  }
+
+  private func handleClientSubmitActions(_ actions: [ClientSubmit.Args.Action]) {
+    for action in actions {
+      switch action {
+      case .sendClientSubmitReply(let to, let reply):
+        completeClientSubmit(reply: reply, to: to)
+      case .clientWriteAppended(let logIndex, let requestId, let client):
+        clientRequests.append(requestId: requestId, client: client, atIndex: logIndex)
+      case .sendAppendEntry(let peer, let appendArgs):
+        deliverAppendEntries(to: peer, args: appendArgs)
+      case .persist:
+        ()  // TODO: persist state
+      }
+    }
+  }
+
+  private func completeClientSubmit(reply: ClientSubmit.Reply, to clientPeer: PeerId) {
+    if let continuation = clientContinuations.removeValue(forKey: reply.requestId) {
+      continuation.resume(returning: reply)
+      return
+    }
+    deliverClientSubmitReply(to: clientPeer, reply: reply)
+  }
+
+  private func receiveClientSubmitReply(_ reply: ClientSubmit.Reply) {
+    if let continuation = clientContinuations.removeValue(forKey: reply.requestId) {
+      continuation.resume(returning: reply)
+    }
+  }
+
+  private func deliverClientSubmitReply(to client: PeerId, reply: ClientSubmit.Reply) {
+    deliver(to: client, message: .clientSubmitReply(reply), context: .clientSubmitResponse(peer: client))
+  }
+
+  private func applyLogEntry(_ entry: LogEntry, atIndex index: LogIndex) {
+    logger.info("[\(peerId)] applied log entry index=\(index) term=\(entry.term) bytes=\(entry.command.count)")
+    guard let result = clientRequests.complete(atIndex: index) else { return }
+    let reply = ClientSubmit.Reply(requestId: result.pending.requestId, status: .ok, logIndex: index)
+    completeClientSubmit(reply: reply, to: result.pending.client)
+    for client in result.waiters {
+      deliverClientSubmitReply(to: client, reply: reply)
+    }
+  }
+
+  private func failPendingClientWrites() {
+    let pending = clientRequests.drainForAbort()
+    for (index, request) in pending {
+      completeClientSubmit(
+        reply: ClientSubmit.Reply(
+          requestId: request.requestId, status: .aborted, logIndex: index),
+        to: request.client)
+    }
+    for (requestId, continuation) in clientContinuations {
+      continuation.resume(
+        returning: ClientSubmit.Reply(requestId: requestId, status: .aborted))
+    }
+    clientContinuations.removeAll()
+  }
+
   private func logRoleChangeIfNeeded(from previousRole: Role) {
+    if previousRole == .leader, instance.role != .leader {
+      failPendingClientWrites()
+    } else if previousRole != .leader, instance.role == .leader {
+      clientRequests.resetSessions()
+    }
     guard instance.role != previousRole else { return }
     let term = instance.currentTerm
     switch instance.role {
@@ -156,45 +279,77 @@ extension Shell {
   }
 }
 
-public actor Shell {
+package actor Shell<Transport: NodeTransport> {
+  private enum InflightOutbound {
+    case appendEntries(AppendEntries.Args)
+    case requestVote(RequestVote.Args)
+
+    var kind: InflightMessageKind {
+      switch self {
+      case .appendEntries: .appendEntries
+      case .requestVote: .requestVote
+      }
+    }
+  }
+
+  private enum InflightMessageKind {
+    case appendEntries
+    case requestVote
+  }
+
+  private struct InflightRPC {
+    let id: UUID
+    let outbound: InflightOutbound
+    var sent: Bool = false
+  }
+
   // Node
   var instance: Instance
   let peerId: PeerId
-  let transport: TCPTransport
+  let transport: Transport
   private let logger: Logger
   private var endpoints: [PeerId: NodeAddress] = [:]
   private var timerTask: Task<Void, Never>?
   private var isStopped = false
   private var inflightDeliveries: [UUID: Task<Void, Never>] = [:]
+  private var inflightMessages: [PeerId: [InflightRPC]] = [:]
+  private var clientRequests = ClientRequestLog()
+  // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
+  // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
+  // lookup currently crashes IndrasNetTests with signal 6).
+  private var clientContinuations: [UInt128: CheckedContinuation<ClientSubmit.Reply, Never>] = [:]
+  private var client = RaftClient()
   private let timing: NodeTiming
+  private let rng: any RandomNumberGenerator & Sendable
+  private let timerSleep: @Sendable (Duration) async -> Void
 
-  public init(
+  package init(
     _ node: NodeAddress,
     timing: NodeTiming = .default,
-    transport: TCPTransport,
+    transport: Transport,
+    rng: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator(),
+    timerSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
     logger: Logger? = nil
   ) {
     self.peerId = node.addressKey
     self.timing = timing
     self.transport = transport
-    self.instance = Instance(id: node.addressKey, timing: timing)
+    self.rng = rng
+    self.timerSleep = timerSleep
+    self.instance = Instance(id: node.addressKey, timing: timing, rng: rng)
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
 
-  public init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
-    self.init(node, timing: timing, transport: TCPTransport(configuration: node.tcpConfiguration()), logger: logger)
-  }
-
-  public func start(with peers: [NodeAddress]) async throws -> Int {
+  package func start(with peers: [NodeAddress]) async throws -> Int {
     isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance = Instance(id: peerId, peers: Set(self.endpoints.keys), timing: timing)
+    self.instance = Instance(id: peerId, peers: OrderedSet(peers.map(\.addressKey)), timing: timing, rng: rng)
 
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)
     }
 
-    scheduleNext(delay: instance.getNextDelay(at: .now))
+    scheduleNext(delay: instance.getNextDelay())
 
     guard let port = await transport.listenPort() else {
       await stop()
@@ -204,33 +359,101 @@ public actor Shell {
     return port
   }
 
-  private func deliver(to peer: PeerId, message: AppMessage, context: RaftLogContext) {
+  private func deliver(
+    to peer: PeerId,
+    message: RaftMessage,
+    context: RaftLogContext,
+    outboundID: UUID? = nil
+  ) {
     guard !isStopped else { return }
 
-    let id = UUID()
+    let deliveryID = outboundID ?? UUID()
 
-    inflightDeliveries[id] = Task {
-      await self.performDelivery(to: peer, message: message, context: context)
-      await self.deliveryFinished(id: id)
+    inflightDeliveries[deliveryID] = Task {
+      await self.performDelivery(
+        to: peer,
+        message: message,
+        context: context,
+        outboundID: outboundID
+      )
+      await self.deliveryFinished(id: deliveryID)
     }
   }
 
-  private func performDelivery(to peer: PeerId, message: AppMessage, context: RaftLogContext) async {
+  private func performDelivery(
+    to peer: PeerId,
+    message: RaftMessage,
+    context: RaftLogContext,
+    outboundID: UUID?
+  ) async {
     guard !Task.isCancelled else { return }
 
     do {
       guard await ensureConnected(to: peer) else {
-        logger.notice("[\(peerId)] \(context.kind) -> \(peer) dropped: could not connect")
+        removeInflightOutbound(id: outboundID, to: peer)
+        logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) dropped: could not connect")
         return
       }
       try await transport.send(message, to: peer)
+      markOutboundSent(id: outboundID, to: peer)
       logRaftEvent(context)
     } catch is CancellationError {
+      removeInflightOutbound(id: outboundID, to: peer)
       return
     } catch IndrasNetTransportError.peerNotConnected {
+      removeInflightOutbound(id: outboundID, to: peer)
       return
     } catch {
-      logger.notice("[\(peerId)] \(context.kind) -> \(peer) failed: \(error)")
+      removeInflightOutbound(id: outboundID, to: peer)
+      logger.notice("[\(peerId)] \(context.kind.rawValue) -> \(peer) failed: \(error)")
+    }
+  }
+
+  private func trackInflight(peer: PeerId, id: UUID, outbound: InflightOutbound) {
+    inflightMessages[peer, default: []].append(InflightRPC(id: id, outbound: outbound))
+  }
+
+  private func markOutboundSent(id: UUID?, to peer: PeerId) {
+    guard let id,
+      var inflight = inflightMessages[peer],
+      let index = inflight.firstIndex(where: { $0.id == id })
+    else { return }
+    inflight[index].sent = true
+    inflightMessages[peer] = inflight
+  }
+
+  private func dequeueSentAppendEntries(from peer: PeerId) -> AppendEntries.Args? {
+    guard case .appendEntries(let args) = dequeueSent(from: peer, kind: .appendEntries) else {
+      return nil
+    }
+    return args
+  }
+
+  private func dequeueSentRequestVote(from peer: PeerId) -> RequestVote.Args? {
+    guard case .requestVote(let args) = dequeueSent(from: peer, kind: .requestVote) else {
+      return nil
+    }
+    return args
+  }
+
+  private func dequeueSent(from peer: PeerId, kind: InflightMessageKind) -> InflightOutbound? {
+    guard var inflight = inflightMessages[peer],
+      let index = inflight.firstIndex(where: { $0.sent && $0.outbound.kind == kind })
+    else { return nil }
+    let outbound = inflight.remove(at: index).outbound
+    if inflight.isEmpty {
+      inflightMessages.removeValue(forKey: peer)
+    } else {
+      inflightMessages[peer] = inflight
+    }
+    return outbound
+  }
+
+  private func removeInflightOutbound(id: UUID?, to peer: PeerId) {
+    guard let id else { return }
+    inflightMessages[peer]?.removeAll { $0.id == id }
+    if inflightMessages[peer]?.isEmpty == true {
+      inflightMessages.removeValue(forKey: peer)
     }
   }
 
@@ -238,7 +461,15 @@ public actor Shell {
     inflightDeliveries.removeValue(forKey: id)
   }
 
-  public func shutdown() async throws {
+  func submit(command: Data) async -> ClientSubmit.Reply {
+    let request = client.makeRequest(command: command)
+    return await withCheckedContinuation { continuation in
+      clientContinuations[request.requestId] = continuation
+      receiveClientSubmit(from: client.id, args: request)
+    }
+  }
+
+  package func shutdown() async throws {
     await stop()
     try await transport.shutdown()
   }
@@ -249,6 +480,7 @@ public actor Shell {
 
   public func stop() async {
     isStopped = true
+    failPendingClientWrites()
 
     timerTask?.cancel()
     _ = await timerTask?.value
@@ -256,6 +488,7 @@ public actor Shell {
 
     let deliveries = Array(inflightDeliveries.values)
     inflightDeliveries.removeAll()
+    inflightMessages.removeAll()
     for task in deliveries {
       task.cancel()
     }
@@ -272,106 +505,19 @@ public actor Shell {
       return false
     }
     await transport.connect(to: endpoint)
-
-    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-    while ContinuousClock.now < deadline {
-      if await transport.isConnected(to: peer) {
-        return true
-      }
-      if Task.isCancelled {
-        return false
-      }
-      try? await Task.sleep(for: .milliseconds(25))
-    }
-    return false
+    return await transport.waitForConnection(to: peer, timeout: .seconds(5))
   }
 }
 
-enum ShellLogKey {
-  static let kind = "shell.kind"
-  static let direction = "shell.direction"
-  static let peer = "shell.peer"
-}
+typealias TCPShell = Shell<TCPTransport>
 
-private struct RaftLogContext {
-  let kind: String
-  let direction: String
-  let peer: PeerId
-  let term: Term
-  var granted: Bool?
-  var success: Bool?
-
-  var level: Logger.Level {
-    switch kind {
-    case "appendEntries", "appendEntriesResponse":
-      if success == false { return .info }
-      return .trace
-    default:
-      return .info
-    }
-  }
-
-  var metadata: Logger.Metadata {
-    var metadata: Logger.Metadata = [
-      ShellLogKey.kind: .string(kind),
-      ShellLogKey.direction: .string(direction),
-      ShellLogKey.peer: .string(peer),
-    ]
-    metadata["shell.term"] = .stringConvertible(term)
-    if let granted {
-      metadata["shell.granted"] = .stringConvertible(granted)
-    }
-    if let success {
-      metadata["shell.success"] = .stringConvertible(success)
-    }
-    return metadata
-  }
-
-  func message(selfNode: PeerId) -> String {
-    let arrow = direction == "out" ? "->" : "<-"
-    var text = "[\(selfNode)] \(kind) \(arrow) \(peer) term=\(term)"
-    if let granted {
-      text += granted ? " granted" : " denied"
-    }
-    if success == false {
-      text += " rejected"
-    }
-    return text
-  }
-
-  static func requestVote(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "requestVote", direction: direction, peer: peer, term: term)
-  }
-
-  static func requestVoteResponse(
-    direction: String,
-    peer: PeerId,
-    term: Term,
-    granted: Bool
-  ) -> RaftLogContext {
-    RaftLogContext(kind: "requestVoteResponse", direction: direction, peer: peer, term: term, granted: granted)
-  }
-
-  static func appendEntries(direction: String, peer: PeerId, term: Term) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntries", direction: direction, peer: peer, term: term)
-  }
-
-  static func appendEntriesResponse(
-    direction: String,
-    peer: PeerId,
-    term: Term,
-    success: Bool
-  ) -> RaftLogContext {
-    RaftLogContext(kind: "appendEntriesResponse", direction: direction, peer: peer, term: term, success: success)
-  }
-}
-
-public enum ShellError: Error, LocalizedError {
-  case noListenPort
-
-  public var errorDescription: String? {
-    switch self {
-    case .noListenPort: "no port bound"
-    }
+extension Shell where Transport == TCPTransport {
+  init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
+    self.init(
+      node,
+      timing: timing,
+      transport: TCPTransport(configuration: node.tcpConfiguration()),
+      logger: logger
+    )
   }
 }

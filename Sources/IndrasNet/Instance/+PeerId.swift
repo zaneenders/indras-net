@@ -1,4 +1,6 @@
-extension [PeerId: Bool] {
+import OrderedCollections
+
+extension OrderedDictionary where Key == PeerId, Value == Bool {
   func isLeader(_ peerCount: Int) -> Bool {
     let granted = self.values.reduce(into: 0) { count, vote in
       if vote { count += 1 }

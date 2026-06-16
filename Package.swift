@@ -12,10 +12,21 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-nio.git", branch: "2.100.0"),
     .package(url: "https://github.com/apple/swift-system.git", from: "1.6.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", branch: "0.5"),
+    .package(url: "https://github.com/apple/swift-collections.git", from: "1.5.0"),
   ],
   targets: [
     .executableTarget(
       name: "indras-net",
+      dependencies: [
+        "IndrasNet",
+        .product(name: "SystemPackage", package: "swift-system"),
+      ],
+      swiftSettings: [
+        .treatAllWarnings(as: .error)
+      ]
+    ),
+    .executableTarget(
+      name: "indras-net-client",
       dependencies: [
         "IndrasNet",
         .product(name: "SystemPackage", package: "swift-system"),
@@ -30,6 +41,7 @@ let package = Package(
         .product(name: "Logging", package: "swift-log"),
         .product(name: "NIO", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "OrderedCollections", package: "swift-collections"),
       ],
       swiftSettings: [
         .treatAllWarnings(as: .error)

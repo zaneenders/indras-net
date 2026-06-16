@@ -1,7 +1,7 @@
 import NIOCore
 
-enum RequestVote {
-  struct Reply: Equatable, Sendable {
+package enum RequestVote {
+  package struct Reply: Equatable, Sendable {
     let granted: Bool
     let term: Term
 
@@ -34,11 +34,11 @@ enum RequestVote {
     }
   }
 
-  struct Args: Equatable, Sendable {
+  package struct Args: Equatable, Sendable {
     let term: Term
     let candidateId: PeerId
-    let lostLogIndex: Int
-    let lastLogTerm: Int
+    let lastLogIndex: LogIndex
+    let lastLogTerm: Term
 
     enum Action: Equatable {
       case sendRequestVoteReply(to: PeerId, term: Term, voteGranted: Bool)
@@ -46,18 +46,18 @@ enum RequestVote {
       case persist
     }
 
-    init(term: Term, candidateId: PeerId, lostLogIndex: Int, lastLogTerm: Int) {
+    init(term: Term, candidateId: PeerId, lastLogIndex: LogIndex, lastLogTerm: Term) {
       self.term = term
       self.candidateId = candidateId
-      self.lostLogIndex = lostLogIndex
+      self.lastLogIndex = lastLogIndex
       self.lastLogTerm = lastLogTerm
     }
 
     func toMessage() -> Message {
       var payload = ByteBuffer()
       payload.writeInteger(term)
-      payload.writeInteger(Int64(lostLogIndex))
-      payload.writeInteger(Int64(lastLogTerm))
+      payload.writeInteger(lastLogIndex)
+      payload.writeInteger(lastLogTerm)
       payload.writePeerId(candidateId)
       return Message(type: .requestVote, payload: payload)
     }
@@ -67,13 +67,13 @@ enum RequestVote {
       var payload = message.payload
       guard
         let term = payload.readInteger(as: Term.self),
-        let lostLogIndex = payload.readInteger(as: Int64.self),
-        let lastLogTerm = payload.readInteger(as: Int64.self),
+        let lastLogIndex = payload.readInteger(as: LogIndex.self),
+        let lastLogTerm = payload.readInteger(as: Term.self),
         let candidateId = payload.readPeerId()
       else { return nil }
       self.term = term
-      self.lostLogIndex = Int(lostLogIndex)
-      self.lastLogTerm = Int(lastLogTerm)
+      self.lastLogIndex = lastLogIndex
+      self.lastLogTerm = lastLogTerm
       self.candidateId = candidateId
     }
   }
