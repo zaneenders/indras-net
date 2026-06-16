@@ -176,6 +176,23 @@ extension Shell {
   }
 
   private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) {
+    if let completedIndex = clientCompleted[clientPeer]?[args.requestId] {
+      completeClientSubmit(
+        reply: ClientSubmit.Reply(
+          requestId: args.requestId, status: .ok, logIndex: completedIndex),
+        to: clientPeer)
+      return
+    }
+
+    if let inFlightIndex = clientInFlight[clientPeer]?[args.requestId] {
+      if pendingByIndex[inFlightIndex]?.requestId == args.requestId,
+        pendingByIndex[inFlightIndex]?.client != clientPeer
+      {
+        awaitingByRequestId[args.requestId, default: []].insert(clientPeer)
+      }
+      return
+    }
+
     handleClientSubmitActions(instance.receiveClientSubmit(clientPeer, args))
   }
 
@@ -186,6 +203,7 @@ extension Shell {
         completeClientSubmit(reply: reply, to: to)
       case .clientWriteAppended(let logIndex, let requestId, let client):
         pendingByIndex[logIndex] = (requestId: requestId, client: client)
+        clientInFlight[client, default: [:]][requestId] = logIndex
       case .sendAppendEntry(let peer, let appendArgs):
         deliverAppendEntries(to: peer, args: appendArgs)
       case .persist:
@@ -214,16 +232,40 @@ extension Shell {
 
   private func applyLogEntry(_ entry: LogEntry, atIndex index: LogIndex) {
     logger.info("[\(peerId)] applied log entry index=\(index) term=\(entry.term) bytes=\(entry.command.count)")
-    if let pending = pendingByIndex.removeValue(forKey: index) {
-      completeClientSubmit(
-        reply: ClientSubmit.Reply(requestId: pending.requestId, status: .ok, logIndex: index),
-        to: pending.client)
+    completeClientRequest(atIndex: index)
+    guard let pending = pendingByIndex.removeValue(forKey: index) else { return }
+    let reply = ClientSubmit.Reply(requestId: pending.requestId, status: .ok, logIndex: index)
+    completeClientSubmit(reply: reply, to: pending.client)
+    for client in awaitingByRequestId.removeValue(forKey: pending.requestId) ?? [] {
+      deliverClientSubmitReply(to: client, reply: reply)
     }
+  }
+
+  private func completeClientRequest(atIndex index: LogIndex) {
+    for client in clientInFlight.keys {
+      guard var requests = clientInFlight[client] else { continue }
+      guard let requestId = requests.first(where: { $0.value == index })?.key else { continue }
+      requests.removeValue(forKey: requestId)
+      if requests.isEmpty {
+        clientInFlight.removeValue(forKey: client)
+      } else {
+        clientInFlight[client] = requests
+      }
+      clientCompleted[client, default: [:]][requestId] = index
+      return
+    }
+  }
+
+  private func clearClientSessions() {
+    clientInFlight.removeAll()
+    clientCompleted.removeAll()
   }
 
   private func failPendingClientWrites() {
     let pending = pendingByIndex
     pendingByIndex.removeAll()
+    awaitingByRequestId.removeAll()
+    clearClientSessions()
     for (index, request) in pending {
       completeClientSubmit(
         reply: ClientSubmit.Reply(
@@ -240,6 +282,8 @@ extension Shell {
   private func logRoleChangeIfNeeded(from previousRole: Role) {
     if previousRole == .leader, instance.role != .leader {
       failPendingClientWrites()
+    } else if previousRole != .leader, instance.role == .leader {
+      clearClientSessions()
     }
     guard instance.role != previousRole else { return }
     let term = instance.currentTerm
@@ -271,6 +315,9 @@ package actor Shell<Transport: NodeTransport> {
   private var inflightAppendEntries: [PeerId: [(id: UUID, args: AppendEntries.Args)]] = [:]
   private var inflightRequestVotes: [PeerId: [(id: UUID, args: RequestVote.Args)]] = [:]
   private var pendingByIndex: [LogIndex: (requestId: UInt128, client: PeerId)] = [:]
+  private var awaitingByRequestId: [UInt128: Set<PeerId>] = [:]
+  private var clientInFlight: [PeerId: [UInt128: LogIndex]] = [:]
+  private var clientCompleted: [PeerId: [UInt128: LogIndex]] = [:]
   // TODO: Switch to `Continuation` + `withContinuation` and `UniqueDictionary` once Swiftly
   // main snapshots resolve stored `Continuation` generic metadata in test bundles (weak-symbol
   // lookup currently crashes IndrasNetTests with signal 6).
@@ -392,7 +439,7 @@ package actor Shell<Transport: NodeTransport> {
     let request = client.makeRequest(command: command)
     return await withCheckedContinuation { continuation in
       clientContinuations[request.requestId] = continuation
-      handleClientSubmitActions(instance.receiveClientSubmit(client.id, request))
+      receiveClientSubmit(from: client.id, args: request)
     }
   }
 

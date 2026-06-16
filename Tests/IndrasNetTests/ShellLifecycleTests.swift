@@ -181,4 +181,40 @@ import Testing
     await cluster.reconnect(from: isolatedPeer, to: leaderID)
     try await cluster.waitForReplicated(command: command, atIndex: 1, timeout: .seconds(5))
   }
+
+  @Test func clientSubmitDedupsRepeatedRequestId() async throws {
+    let cluster = try await SimulatedCluster.start(nodeCount: 3, seed: 1, basePort: 420)
+    defer { try? await cluster.shutdown() }
+
+    let leader = try await cluster.waitForLeader()
+    let client = RaftClient.defaultClientID
+    let command = Data("set x=1".utf8)
+    let requestId: UInt128 = 42
+    let args = ClientSubmit.Args(requestId: requestId, command: command)
+
+    await leader.receiveMessage(message: .clientSubmit(args), from: client)
+    await leader.receiveMessage(message: .clientSubmit(args), from: client)
+
+    #expect(await leader.instance.lastLogIndex == 1)
+    #expect(await leader.instance.log.filter { $0.command == command }.count == 1)
+  }
+
+  @Test func clientSubmitDedupsCompletedRequestId() async throws {
+    let cluster = try await SimulatedCluster.start(nodeCount: 3, seed: 1, basePort: 421)
+    defer { try? await cluster.shutdown() }
+
+    let leader = try await cluster.waitForLeader()
+    let client = RaftClient.defaultClientID
+    let command = Data("set x=1".utf8)
+    let requestId: UInt128 = 42
+    let args = ClientSubmit.Args(requestId: requestId, command: command)
+
+    await leader.receiveMessage(message: .clientSubmit(args), from: client)
+    try await cluster.waitForReplicated(command: command, atIndex: 1)
+
+    await leader.receiveMessage(message: .clientSubmit(args), from: client)
+
+    #expect(await leader.instance.lastLogIndex == 1)
+    #expect(await leader.instance.log.filter { $0.command == command }.count == 1)
+  }
 }
