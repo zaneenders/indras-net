@@ -12,6 +12,34 @@ public enum IndrasNetClient {
     timeout: Duration = .seconds(10),
     eventLoopGroup: MultiThreadedEventLoopGroup = .singleton
   ) async throws -> ClientSubmitResult {
+    try await withThrowingTaskGroup(of: ClientSubmitResult.self) { group in
+      group.addTask {
+        try await performSubmit(
+          command: command,
+          to: address,
+          clientID: clientID,
+          eventLoopGroup: eventLoopGroup
+        )
+      }
+      group.addTask {
+        try await Task.sleep(for: timeout)
+        throw RaftClientConnectionError.timedOut
+      }
+
+      defer { group.cancelAll() }
+      guard let result = try await group.next() else {
+        throw RaftClientConnectionError.connectionClosed
+      }
+      return result
+    }
+  }
+
+  private static func performSubmit(
+    command: Data,
+    to address: NodeAddress,
+    clientID: String,
+    eventLoopGroup: MultiThreadedEventLoopGroup
+  ) async throws -> ClientSubmitResult {
     let asyncChannel = try await ClientBootstrap(group: eventLoopGroup)
       .channelOption(.socketOption(.so_reuseaddr), value: 1)
       .connect(
@@ -30,13 +58,7 @@ public enum IndrasNetClient {
       var requestID: UInt128?
       var client = RaftClient(id: clientID)
 
-      let deadline = ContinuousClock.now.advanced(by: timeout)
-
       for try await wire in inbound {
-        if ContinuousClock.now >= deadline {
-          throw RaftClientConnectionError.timedOut
-        }
-
         if requestID == nil {
           guard let frame = HandshakeFrame(wire) else {
             throw RaftClientConnectionError.handshakeFailed
