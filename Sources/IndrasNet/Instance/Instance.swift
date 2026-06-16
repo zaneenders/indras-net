@@ -334,7 +334,9 @@ struct Instance {
       }
     }
 
-    drainCommittedEntries(into: &actions)
+    for (index, entry) in drainAppliedEntries() {
+      actions.append(.apply(entry: entry, atIndex: index))
+    }
     return actions
   }
 
@@ -345,13 +347,5 @@ struct Instance {
       entries.append((lastApplied, log[Int(lastApplied)]))
     }
     return entries
-  }
-
-  private mutating func drainCommittedEntries(into actions: inout [AppendEntries.Reply.Action]) {
-    while lastApplied < commitIndex {
-      lastApplied += 1
-      let index = lastApplied
-      actions.append(.apply(entry: log[Int(index)], atIndex: index))
-    }
   }
 }
