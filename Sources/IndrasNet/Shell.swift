@@ -14,12 +14,12 @@ extension Shell {
       repeat {
         await self.timerSleep(nextDelay)
         if Task.isCancelled { break }
-        nextDelay = self.handleTimerTick()
+        nextDelay = await self.handleTimerTick()
       } while !Task.isCancelled
     }
   }
 
-  private func handleTimerTick() -> Duration {
+  private func handleTimerTick() async -> Duration {
     let previousRole = instance.role
     var nextDelay = timing.heartbeatInterval
 
@@ -27,6 +27,8 @@ extension Shell {
       switch directive {
       case .scheduleNext(let delay):
         nextDelay = delay
+      case .persist:
+        await persistRaftState()
       case .requestVote(let peer, let args):
         deliverRequestVote(to: peer, args: args)
       case .sendAppendEntry(let peer, let args):
@@ -75,28 +77,28 @@ extension Shell {
     )
   }
 
-  func receiveMessage(message: RaftMessage, from peer: PeerId) {
+  func receiveMessage(message: RaftMessage, from peer: PeerId) async {
     switch message {
     case .clientSubmit(let args):
-      receiveClientSubmit(from: peer, args: args)
+      await receiveClientSubmit(from: peer, args: args)
     case .clientSubmitReply(let reply):
       receiveClientSubmitReply(reply)
     case .requestVote(let args):
       logRaftEvent(.requestVote(direction: .inbound, peer: peer, term: args.term))
-      receiveRequestVote(from: peer, args: args)
+      await receiveRequestVote(from: peer, args: args)
     case .requestVoteReply(let reply):
       logRaftEvent(.requestVoteResponse(direction: .inbound, peer: peer, term: reply.term, granted: reply.granted))
-      receiveRequestVoteReply(from: peer, reply: reply)
+      await receiveRequestVoteReply(from: peer, reply: reply)
     case .appendEntries(let args):
       logRaftEvent(.appendEntries(direction: .inbound, peer: peer, term: args.term))
-      receiveAppendEntries(from: peer, args: args)
+      await receiveAppendEntries(from: peer, args: args)
     case .appendEntriesReply(let reply):
       logRaftEvent(.appendEntriesResponse(direction: .inbound, peer: peer, term: reply.term, success: reply.success))
-      receiveAppendEntriesReply(from: peer, reply: reply)
+      await receiveAppendEntriesReply(from: peer, reply: reply)
     }
   }
 
-  private func receiveRequestVote(from peer: PeerId, args: RequestVote.Args) {
+  private func receiveRequestVote(from peer: PeerId, args: RequestVote.Args) async {
     let previousRole = instance.role
 
     for action in instance.receiveRequestVote(peer, args) {
@@ -106,14 +108,14 @@ extension Shell {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       case .persist:
-        ()  // TODO: persist state
+        await persistRaftState()
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) {
+  private func receiveRequestVoteReply(from peer: PeerId, reply: RequestVote.Reply) async {
     guard let sent = dequeueSentRequestVote(from: peer) else {
       logger.notice("[\(peerId)] requestVote reply from \(peer) with no inflight request")
       return
@@ -127,13 +129,15 @@ extension Shell {
         deliverAppendEntries(to: peer, args: args)
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
+      case .persist:
+        await persistRaftState()
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntries(from peer: PeerId, args: AppendEntries.Args) {
+  private func receiveAppendEntries(from peer: PeerId, args: AppendEntries.Args) async {
     let previousRole = instance.role
 
     for action in instance.receiveAppendEntries(peer, args) {
@@ -145,14 +149,14 @@ extension Shell {
       case .apply(let entry, let index):
         applyLogEntry(entry, atIndex: index)
       case .persist:
-        ()  // TODO: persist state
+        await persistRaftState()
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) {
+  private func receiveAppendEntriesReply(from peer: PeerId, reply: AppendEntries.Reply) async {
     guard let sent = dequeueSentAppendEntries(from: peer) else {
       logger.notice("[\(peerId)] appendEntries reply from \(peer) with no inflight request")
       return
@@ -169,14 +173,14 @@ extension Shell {
       case .apply(let entry, let index):
         applyLogEntry(entry, atIndex: index)
       case .persist:
-        ()  // TODO: persist state
+        await persistRaftState()
       }
     }
 
     logRoleChangeIfNeeded(from: previousRole)
   }
 
-  private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) {
+  private func receiveClientSubmit(from clientPeer: PeerId, args: ClientSubmit.Args) async {
     if let completedIndex = clientRequests.completedIndex(client: clientPeer, requestId: args.requestId) {
       completeClientSubmit(
         reply: ClientSubmit.Reply(
@@ -195,10 +199,10 @@ extension Shell {
       return
     }
 
-    handleClientSubmitActions(instance.receiveClientSubmit(clientPeer, args))
+    await handleClientSubmitActions(instance.receiveClientSubmit(clientPeer, args))
   }
 
-  private func handleClientSubmitActions(_ actions: [ClientSubmit.Args.Action]) {
+  private func handleClientSubmitActions(_ actions: [ClientSubmit.Args.Action]) async {
     for action in actions {
       switch action {
       case .sendClientSubmitReply(let to, let reply):
@@ -208,8 +212,16 @@ extension Shell {
       case .sendAppendEntry(let peer, let appendArgs):
         deliverAppendEntries(to: peer, args: appendArgs)
       case .persist:
-        ()  // TODO: persist state
+        await persistRaftState()
       }
+    }
+  }
+
+  private func persistRaftState() async {
+    do {
+      try await store.save(instance.persistentState)
+    } catch {
+      logger.error("[\(peerId)] failed to persist raft state: \(error)")
     }
   }
 
@@ -319,6 +331,7 @@ package actor Shell<Transport: NodeTransport> {
   // lookup currently crashes IndrasNetTests with signal 6).
   private var clientContinuations: [UInt128: CheckedContinuation<ClientSubmit.Reply, Never>] = [:]
   private var client = RaftClient()
+  private let store: any RaftStore
   private let timing: NodeTiming
   private let rng: any RandomNumberGenerator & Sendable
   private let timerSleep: @Sendable (Duration) async -> Void
@@ -327,6 +340,7 @@ package actor Shell<Transport: NodeTransport> {
     _ node: NodeAddress,
     timing: NodeTiming = .default,
     transport: Transport,
+    store: any RaftStore = InMemoryRaftStore(),
     rng: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator(),
     timerSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
     logger: Logger? = nil
@@ -334,6 +348,7 @@ package actor Shell<Transport: NodeTransport> {
     self.peerId = node.addressKey
     self.timing = timing
     self.transport = transport
+    self.store = store
     self.rng = rng
     self.timerSleep = timerSleep
     self.instance = Instance(id: node.addressKey, timing: timing, rng: rng)
@@ -343,7 +358,13 @@ package actor Shell<Transport: NodeTransport> {
   package func start(with peers: [NodeAddress]) async throws -> Int {
     isStopped = false
     self.endpoints = Dictionary(uniqueKeysWithValues: peers.map { ($0.addressKey, $0) })
-    self.instance = Instance(id: peerId, peers: OrderedSet(peers.map(\.addressKey)), timing: timing, rng: rng)
+
+    var instance = Instance(
+      id: peerId, peers: OrderedSet(peers.map(\.addressKey)), timing: timing, rng: rng)
+    if let saved = try await store.load() {
+      instance.restore(from: saved)
+    }
+    self.instance = instance
 
     try await transport.start { message, from in
       await self.receiveMessage(message: message, from: from)
@@ -465,7 +486,9 @@ package actor Shell<Transport: NodeTransport> {
     let request = client.makeRequest(command: command)
     return await withCheckedContinuation { continuation in
       clientContinuations[request.requestId] = continuation
-      receiveClientSubmit(from: client.id, args: request)
+      Task {
+        await self.receiveClientSubmit(from: client.id, args: request)
+      }
     }
   }
 
@@ -512,11 +535,17 @@ package actor Shell<Transport: NodeTransport> {
 typealias TCPShell = Shell<TCPTransport>
 
 extension Shell where Transport == TCPTransport {
-  init(_ node: NodeAddress, timing: NodeTiming = .default, logger: Logger? = nil) {
+  init(
+    _ node: NodeAddress,
+    timing: NodeTiming = .default,
+    store: any RaftStore = InMemoryRaftStore(),
+    logger: Logger? = nil
+  ) {
     self.init(
       node,
       timing: timing,
       transport: TCPTransport(configuration: node.tcpConfiguration()),
+      store: store,
       logger: logger
     )
   }

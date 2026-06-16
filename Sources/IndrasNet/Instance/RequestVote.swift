@@ -8,6 +8,7 @@ package enum RequestVote {
     enum Action: Equatable {
       case sendAppendEntry(to: PeerId, args: AppendEntries.Args)
       case scheduleNext(delay: Duration)
+      case persist
     }
 
     init(granted: Bool, term: Term) {

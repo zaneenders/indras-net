@@ -22,6 +22,23 @@ struct Instance {
   var lastLogIndex: LogIndex { log.lastLogIndex }
   var lastLogTerm: Term { log.lastLogTerm }
 
+  var persistentState: PersistentRaftState {
+    PersistentRaftState(currentTerm: currentTerm, votedFor: votedFor, log: log)
+  }
+
+  mutating func restore(from state: PersistentRaftState) {
+    currentTerm = state.currentTerm
+    votedFor = state.votedFor
+    log = state.log.isEmpty ? .sentinel : state.log
+    role = .follower
+    votes = [:]
+    leaderId = nil
+    commitIndex = 0
+    lastApplied = 0
+    nextIndex = [:]
+    matchIndex = [:]
+  }
+
   init(
     id: PeerId,
     peers: OrderedSet<PeerId> = [],
@@ -94,7 +111,8 @@ struct Instance {
     log.append(LogEntry(term: currentTerm, command: command))
 
     var actions: [ClientSubmit.Args.Action] = [
-      .clientWriteAppended(logIndex: lastLogIndex, requestId: requestId, client: client)
+      .persist,
+      .clientWriteAppended(logIndex: lastLogIndex, requestId: requestId, client: client),
     ]
     for peer in peers {
       let args = makeAppendEntries(for: peer)
@@ -117,6 +135,7 @@ struct Instance {
     var actions: [RequestVote.Args.Action] = []
     var grantVote = false
     var shouldResetElectionTimer = false
+    var needsPersist = false
 
     if args.term > currentTerm {
       currentTerm = args.term
@@ -124,6 +143,7 @@ struct Instance {
       votes = [:]
       role = .follower
       leaderId = nil
+      needsPersist = true
     }
 
     if args.term < currentTerm {
@@ -147,8 +167,11 @@ struct Instance {
         grantVote = true
         votedFor = args.candidateId
         shouldResetElectionTimer = true
-        actions.append(.persist)
+        needsPersist = true
       }
+    }
+    if needsPersist {
+      actions.append(.persist)
     }
     actions.append(.sendRequestVoteReply(to: peer, term: currentTerm, voteGranted: grantVote))
     if shouldResetElectionTimer {
@@ -170,6 +193,7 @@ struct Instance {
       votedFor = nil
       votes = [:]
       leaderId = nil
+      actions.append(.persist)
       actions.append(.scheduleNext(delay: getNextDelay()))
       return actions
     }
@@ -189,6 +213,7 @@ struct Instance {
     _ args: AppendEntries.Args
   ) -> [AppendEntries.Args.Action] {
     var actions: [AppendEntries.Args.Action] = []
+    var needsPersist = false
 
     if args.term < currentTerm {
       actions.append(.sendAppendEntriesReply(to: peer, term: currentTerm, success: false))
@@ -199,7 +224,7 @@ struct Instance {
       currentTerm = args.term
       votedFor = nil
       votes = [:]
-      actions.append(.persist)
+      needsPersist = true
     }
 
     role = .follower
@@ -213,6 +238,10 @@ struct Instance {
 
     if !args.entries.isEmpty {
       log.appendReplicationEntries(prevLogIndex: args.prevLogIndex, entries: args.entries)
+      needsPersist = true
+    }
+
+    if needsPersist {
       actions.append(.persist)
     }
 
@@ -241,6 +270,7 @@ struct Instance {
       votedFor = nil
       votes = [:]
       leaderId = nil
+      actions.append(.persist)
       actions.append(.scheduleNext(delay: getNextDelay()))
       return actions
     }
@@ -284,16 +314,19 @@ struct Instance {
     votedFor = id
     votes = [id: true]
 
-    return peers.map { peer in
-      .requestVote(
-        to: peer,
-        args: RequestVote.Args(
-          term: currentTerm,
-          candidateId: id,
-          lastLogIndex: lastLogIndex,
-          lastLogTerm: lastLogTerm
-        ))
-    }
+    var directives: [TimerDirective] = [.persist]
+    directives.append(
+      contentsOf: peers.map { peer in
+        .requestVote(
+          to: peer,
+          args: RequestVote.Args(
+            term: currentTerm,
+            candidateId: id,
+            lastLogIndex: lastLogIndex,
+            lastLogTerm: lastLogTerm
+          ))
+      })
+    return directives
   }
 
   private func makeAppendEntries(for peer: PeerId) -> AppendEntries.Args {
