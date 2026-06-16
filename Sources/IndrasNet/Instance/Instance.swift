@@ -123,7 +123,6 @@ struct Instance {
       votes = [:]
       role = .follower
       leaderId = nil
-      shouldResetElectionTimer = true
     }
 
     if args.term < currentTerm {
@@ -300,6 +299,8 @@ struct Instance {
     let next = nextIndex[peer, default: lastLogIndex + 1]
     let prevIndex = next - 1
     let prevTerm = log[Int(prevIndex)].term
+    // TODO: Cap entries per RPC so the encoded frame stays within
+    // `Message.defaultMaxPayloadLength` (64 KB); unbounded suffixes can stall replication.
     let entries: [LogEntry]
     if next <= lastLogIndex {
       entries = Array(log[Int(next)...Int(lastLogIndex)])

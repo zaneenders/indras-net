@@ -151,6 +151,22 @@ import Testing
     #expect(actions.scheduledDelay == electionTimeout)
   }
 
+  @Test func stepsDownOnHigherTermWithoutResettingElectionTimerWhenVoteDenied() {
+    let entry = LogEntry(term: 1, command: Data("x".utf8))
+    var instance = Instance.forTests(
+      id: "follower", role: .candidate, currentTerm: 1, votes: ["follower": true],
+      log: .sentinel + [entry])
+
+    let request = RequestVote.Args(term: 3, candidateId: "candidate", lastLogIndex: 0, lastLogTerm: 0)
+    let actions = instance.receiveRequestVote("candidate", request)
+
+    #expect(instance.role == .follower)
+    #expect(instance.currentTerm == 3)
+    #expect(instance.votedFor == nil)
+    #expect(instance.votes.isEmpty)
+    #expect(actions == [.sendRequestVoteReply(to: "candidate", term: 3, voteGranted: false)])
+  }
+
   @Test func candidateBecomesLeaderWithMajorityVotes() {
     var instance = Instance(
       id: "a", peers: ["b", "c"], role: .candidate, currentTerm: 1, votes: ["a": true])
