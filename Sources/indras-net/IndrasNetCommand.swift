@@ -13,7 +13,7 @@ struct IndrasNetCommand {
         return
       }
 
-      let (local, clusterPath, logLevel) = try parseArguments()
+      let (local, clusterPath, dataDir, logLevel) = try parseArguments()
       LoggingSystem.bootstrap { label in
         var handler = StreamLogHandler.standardError(label: label)
         handler.logLevel = logLevel
@@ -22,7 +22,7 @@ struct IndrasNetCommand {
 
       let cluster = try ClusterConfig.load(from: clusterPath)
       let peers = cluster.peers(excluding: local)
-      try await runNode(local: local, peers: peers, timing: cluster.timing, logLevel: logLevel)
+      try await runNode(local: local, peers: peers, timing: cluster.timing, dataDir: dataDir, logLevel: logLevel)
     } catch let error as CLIError {
       writeStderr("error: \(error.message)\n\n\(usage)\n")
       exit(1)
@@ -52,6 +52,7 @@ struct IndrasNetCommand {
 
     Options:
       --cluster <path>       Shared cluster file (default: ./cluster.json)
+      --data-dir <path>      Directory for per-node Raft state (default: ./data)
       --log-level <level>    Log level: trace, debug, info, notice, warning, error (default: info)
     """
 
@@ -63,12 +64,13 @@ struct IndrasNetCommand {
     _ = try? FileDescriptor.standardError.writeAll(text.utf8)
   }
 
-  private static func parseArguments() throws -> (NodeAddress, String, Logger.Level) {
+  private static func parseArguments() throws -> (NodeAddress, String, String, Logger.Level) {
     var args = Array(CommandLine.arguments.dropFirst())
     var clusterPath = "cluster.json"
+    var dataDir = "data"
     var logLevel: Logger.Level = .info
 
-    while let flagIndex = args.firstIndex(where: { $0 == "--cluster" || $0 == "--log-level" }) {
+    while let flagIndex = args.firstIndex(where: { $0 == "--cluster" || $0 == "--data-dir" || $0 == "--log-level" }) {
       let flag = args.remove(at: flagIndex)
       guard flagIndex < args.count else {
         throw CLIError(message: "missing value for \(flag)")
@@ -77,6 +79,8 @@ struct IndrasNetCommand {
       switch flag {
       case "--cluster":
         clusterPath = value
+      case "--data-dir":
+        dataDir = value
       case "--log-level":
         guard let parsed = Logger.Level(rawValue: value.lowercased()) else {
           throw CLIError(message: "invalid log level '\(value)'")
@@ -96,7 +100,7 @@ struct IndrasNetCommand {
       throw CLIError(message: "port must be an integer")
     }
 
-    return (NodeAddress(host: host, port: port), clusterPath, logLevel)
+    return (NodeAddress(host: host, port: port), clusterPath, dataDir, logLevel)
   }
 
   private static func makeLogger(label: String, level: Logger.Level) -> Logger {
@@ -109,9 +113,13 @@ struct IndrasNetCommand {
     local: NodeAddress,
     peers: [NodeAddress],
     timing: NodeTiming,
+    dataDir: String,
     logLevel: Logger.Level
   ) async throws {
     let log = makeLogger(label: "indras-net", level: logLevel)
+    let storeDirectory = URL(fileURLWithPath: dataDir, isDirectory: true)
+      .appendingPathComponent(local.addressKey, isDirectory: true)
+    let store = FileRaftStore(directory: storeDirectory)
     let transport = TCPTransport(
       configuration: local.tcpConfiguration(),
       logger: makeLogger(label: "indras-net.transport", level: logLevel)
@@ -120,6 +128,7 @@ struct IndrasNetCommand {
       local,
       timing: timing,
       transport: transport,
+      store: store,
       logger: makeLogger(label: "indras-net.shell", level: logLevel)
     )
     let port = try await shell.start(with: peers)

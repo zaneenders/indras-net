@@ -12,10 +12,20 @@ import Testing
     let cluster = try ClusterConfig.load(from: clusterPath)
     let peers = cluster.peers
 
+    let dataDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("indras-net-e2e-\(UUID().uuidString)", isDirectory: true)
+      .path
+    defer { try? FileManager.default.removeItem(atPath: dataDir) }
+
     let logs = peers.map { _ in NodeLog() }
 
     func nodeArguments(peer: NodeAddress) -> [String] {
-      [peer.host, String(peer.port), "--cluster", clusterPath, "--log-level", "info"]
+      [
+        peer.host, String(peer.port),
+        "--cluster", clusterPath,
+        "--data-dir", dataDir,
+        "--log-level", "info",
+      ]
     }
 
     try await withThrowingTaskGroup(of: Void.self) { group in

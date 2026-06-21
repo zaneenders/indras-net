@@ -27,7 +27,8 @@ import Testing
     #expect(instance.currentTerm == 1)
     #expect(instance.votedFor == "a")
     #expect(instance.votes == ["a": true])
-    #expect(directives.filter { if case .scheduleNext = $0 { false } else { true } }.count == 2)
+    #expect(directives.contains(.persist))
+    #expect(directives.filter { if case .scheduleNext = $0 { false } else { true } }.count == 3)
     #expect(
       directives.contains(
         .requestVote(
@@ -51,7 +52,8 @@ import Testing
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == "a")
     #expect(instance.votes == ["a": true])
-    #expect(directives.filter { if case .scheduleNext = $0 { false } else { true } }.count == 2)
+    #expect(directives.contains(.persist))
+    #expect(directives.filter { if case .scheduleNext = $0 { false } else { true } }.count == 3)
     #expect(
       directives.contains(
         .requestVote(
@@ -114,6 +116,7 @@ import Testing
     let actions = instance.receiveRequestVote("candidate", request)
 
     #expect(instance.votedFor == "candidate")
+    #expect(actions.contains(.persist))
     #expect(actions.contains(.sendRequestVoteReply(to: "candidate", term: 1, voteGranted: true)))
     #expect(actions.scheduledDelay == electionTimeout)
   }
@@ -149,6 +152,7 @@ import Testing
     #expect(instance.currentTerm == 3)
     #expect(instance.votedFor == "candidate")
     #expect(instance.votes.isEmpty)
+    #expect(actions.contains(.persist))
     #expect(actions.scheduledDelay == electionTimeout)
   }
 
@@ -165,7 +169,7 @@ import Testing
     #expect(instance.currentTerm == 3)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
-    #expect(actions == [.sendRequestVoteReply(to: "candidate", term: 3, voteGranted: false)])
+    #expect(actions == [.persist, .sendRequestVoteReply(to: "candidate", term: 3, voteGranted: false)])
   }
 
   @Test func candidateBecomesLeaderWithMajorityVotes() {
@@ -220,6 +224,7 @@ import Testing
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
+    #expect(actions.contains(.persist))
     #expect(actions.scheduledDelay == electionTimeout)
   }
 
@@ -275,6 +280,7 @@ import Testing
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
     #expect(instance.role == .follower)
+    #expect(actions.contains(.persist))
     #expect(actions.contains(.sendAppendEntriesReply(to: "leader", term: 4, success: true)))
     #expect(actions.scheduledDelay == electionTimeout)
   }
@@ -424,6 +430,7 @@ import Testing
       actions.contains(
         .clientWriteAppended(
           logIndex: 1, requestId: 1, client: RaftClient.defaultClientID)))
+    #expect(actions.contains(.persist))
     #expect(actions.contains(where: { if case .sendAppendEntry = $0 { true } else { false } }))
   }
 
@@ -484,6 +491,7 @@ import Testing
     #expect(instance.currentTerm == 2)
     #expect(instance.votedFor == nil)
     #expect(instance.votes.isEmpty)
+    #expect(actions.contains(.persist))
     #expect(actions.scheduledDelay == electionTimeout)
   }
 

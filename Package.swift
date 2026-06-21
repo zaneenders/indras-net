@@ -41,6 +41,8 @@ let package = Package(
         .product(name: "Logging", package: "swift-log"),
         .product(name: "NIO", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "_NIOFileSystem", package: "swift-nio"),
+        .product(name: "_NIOFileSystemFoundationCompat", package: "swift-nio"),
         .product(name: "OrderedCollections", package: "swift-collections"),
       ],
       swiftSettings: [

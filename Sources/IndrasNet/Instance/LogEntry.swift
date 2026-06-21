@@ -1,6 +1,6 @@
 import Foundation
 
-package struct LogEntry: Equatable, Sendable {
+package struct LogEntry: Equatable, Sendable, Codable {
   let term: Term
   let command: Data
 
