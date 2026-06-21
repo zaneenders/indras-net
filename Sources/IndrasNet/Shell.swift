@@ -28,7 +28,7 @@ extension Shell {
       case .scheduleNext(let delay):
         nextDelay = delay
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return nextDelay }
       case .requestVote(let peer, let args):
         deliverRequestVote(to: peer, args: args)
       case .sendAppendEntry(let peer, let args):
@@ -108,7 +108,7 @@ extension Shell {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return }
       }
     }
 
@@ -130,7 +130,7 @@ extension Shell {
       case .scheduleNext(let delay):
         scheduleNext(delay: delay)
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return }
       }
     }
 
@@ -149,7 +149,7 @@ extension Shell {
       case .apply(let entry, let index):
         applyLogEntry(entry, atIndex: index)
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return }
       }
     }
 
@@ -173,7 +173,7 @@ extension Shell {
       case .apply(let entry, let index):
         applyLogEntry(entry, atIndex: index)
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return }
       }
     }
 
@@ -212,16 +212,19 @@ extension Shell {
       case .sendAppendEntry(let peer, let appendArgs):
         deliverAppendEntries(to: peer, args: appendArgs)
       case .persist:
-        await persistRaftState()
+        guard await persistOrHalt() else { return }
       }
     }
   }
 
-  private func persistRaftState() async {
+  private func persistOrHalt() async -> Bool {
     do {
       try await store.save(instance.persistentState)
+      return true
     } catch {
       logger.error("[\(peerId)] failed to persist raft state: \(error)")
+      halt()
+      return false
     }
   }
 
@@ -517,6 +520,19 @@ package actor Shell<Transport: NodeTransport> {
     }
     for task in deliveries {
       _ = await task.value
+    }
+  }
+
+  private func halt() {
+    // Invalid state, crashing
+    isStopped = true
+    failPendingClientWrites()
+    timerTask?.cancel()
+    let deliveries = Array(inflightDeliveries.values)
+    inflightDeliveries.removeAll()
+    inflightMessages.removeAll()
+    for task in deliveries {
+      task.cancel()
     }
   }
 
