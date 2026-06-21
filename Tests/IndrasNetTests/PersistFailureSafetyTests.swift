@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import TestUtils
 import Testing
 
@@ -30,7 +31,8 @@ import Testing
     }
   }
 
-  @Test func followerDoesNotGrantVoteItFailedToPersist() async throws {
+  @Test func followerHaltsWithoutGrantingVoteWhenPersistFails() async throws {
+    let halted = Atomic<Bool>(false)
     let transport = RecordingTransport()
     let follower = Shell(
       NodeAddress(host: "sim", port: 1),
@@ -38,6 +40,7 @@ import Testing
       store: FailingRaftStore(),
       rng: SeededRandomNumberGenerator(seed: 1),
       timerSleep: { _ in try? await Task.sleep(for: .seconds(3600)) },
+      persistenceHaltHandler: { halted.store(true, ordering: .relaxed) },
       logger: TestHelpers.quietLogger
     )
     _ = try await follower.start(with: [])
@@ -46,21 +49,21 @@ import Testing
     let request = RequestVote.Args(term: 1, candidateId: "a", lastLogIndex: 0, lastLogTerm: 0)
     await follower.receiveMessage(message: .requestVote(request), from: "a")
 
-    // Collect any vote reply the follower emitted (or time out if it stayed silent).
-    let reply = await TestHelpers.pollForValue(timeout: .milliseconds(500)) {
-      await transport.sent.first { message, _ in
-        if case .requestVoteReply = message { return true }
-        return false
-      }?.message
-    }
-
-    try await follower.shutdown()
+    // A persistence failure is unrecoverable: the node must halt rather than
+    // continue in a state whose vote was never durably recorded.
+    let didHalt = halted.load(ordering: .relaxed)
+    #expect(didHalt, "follower should halt when persist fails")
 
     // A grant here is a safety violation: the vote was never durably recorded,
     // so a crash/restart could re-grant the same term's vote to a different
     // candidate and elect two leaders in one term.
-    if case .requestVoteReply(let payload)? = reply {
-      #expect(!payload.granted, "follower granted a vote it failed to persist")
+    let sent = await transport.sent
+    let grantedReply = sent.first { message, _ in
+      if case .requestVoteReply(let reply) = message { return reply.granted }
+      return false
     }
+    #expect(grantedReply == nil, "follower granted a vote it failed to persist")
+
+    try await follower.shutdown()
   }
 }

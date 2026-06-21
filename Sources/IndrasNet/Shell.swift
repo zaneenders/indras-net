@@ -338,6 +338,7 @@ package actor Shell<Transport: NodeTransport> {
   private let timing: NodeTiming
   private let rng: any RandomNumberGenerator & Sendable
   private let timerSleep: @Sendable (Duration) async -> Void
+  private let persistenceHaltHandler: @Sendable () -> Void
 
   package init(
     _ node: NodeAddress,
@@ -346,6 +347,9 @@ package actor Shell<Transport: NodeTransport> {
     store: any RaftStore = InMemoryRaftStore(),
     rng: any RandomNumberGenerator & Sendable = SystemRandomNumberGenerator(),
     timerSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+    persistenceHaltHandler: @escaping @Sendable () -> Void = {
+      fatalError("indras-net: persistence failed, halting to preserve Raft safety")
+    },
     logger: Logger? = nil
   ) {
     self.peerId = node.addressKey
@@ -354,6 +358,7 @@ package actor Shell<Transport: NodeTransport> {
     self.store = store
     self.rng = rng
     self.timerSleep = timerSleep
+    self.persistenceHaltHandler = persistenceHaltHandler
     self.instance = Instance(id: node.addressKey, timing: timing, rng: rng)
     self.logger = logger ?? Logger(label: "indras-net.shell")
   }
@@ -524,7 +529,6 @@ package actor Shell<Transport: NodeTransport> {
   }
 
   private func halt() {
-    // Invalid state, crashing
     isStopped = true
     failPendingClientWrites()
     timerTask?.cancel()
@@ -534,6 +538,7 @@ package actor Shell<Transport: NodeTransport> {
     for task in deliveries {
       task.cancel()
     }
+    persistenceHaltHandler()
   }
 
   private func ensureConnected(to peer: PeerId) async -> Bool {
