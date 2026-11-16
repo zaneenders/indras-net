@@ -1,4 +1,4 @@
-import IndrasNet
+import Networking
 import NIOCore
 
 /// A finite, public-API loopback demonstration. The server sends an unsolicited

@@ -24,7 +24,7 @@ let package = Package(
   ],
   targets: [
     .target(
-      name: "IndrasNet",
+      name: "Networking",
       dependencies: [
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio")
@@ -33,13 +33,13 @@ let package = Package(
     ),
     .executableTarget(
       name: "IndrasEcho",
-      dependencies: ["IndrasNet", .product(name: "NIOCore", package: "swift-nio")],
+      dependencies: ["Networking", .product(name: "NIOCore", package: "swift-nio")],
       swiftSettings: sharedSwiftSettings
     ),
     .testTarget(
-      name: "IndrasNetTests",
+      name: "NetworkingTests",
       dependencies: [
-        "IndrasNet",
+        "Networking",
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOEmbedded", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio")
