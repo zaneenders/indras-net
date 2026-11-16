@@ -6,6 +6,31 @@ public typealias Listener = NIOAsyncChannel<Connection, Never>
 /// TCP adapters for the frame codec, using NIO's scoped async I/O and backpressure.
 /// Each connection has one inbound consumer. There is no automatic replay or reconnect.
 public enum TCP: Sendable {
+  public static func connect(unixDomainSocketPath: String, connectTimeout: TimeAmount) async throws -> Connection {
+    try Task.checkCancellation()
+    let connection = try await ClientBootstrap(group: .singletonMultiThreadedEventLoopGroup)
+      .connectTimeout(connectTimeout)
+      .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+      .connect(unixDomainSocketPath: unixDomainSocketPath) { channel in configure(channel) }
+    if Task.isCancelled {
+      try? await connection.channel.close()
+      throw CancellationError()
+    }
+    return connection
+  }
+
+  public static func listen(unixDomainSocketPath: String) async throws -> Listener {
+    try Task.checkCancellation()
+    let listener = try await ServerBootstrap(group: .singletonMultiThreadedEventLoopGroup)
+      .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+      .bind(unixDomainSocketPath: unixDomainSocketPath) { channel in configure(channel) }
+    if Task.isCancelled {
+      try? await listener.channel.close()
+      throw CancellationError()
+    }
+    return listener
+  }
+
   /// Opens one connection. Use `executeThenClose` to consume it and release its socket.
   public static func connect(
     host: String, port: Int,

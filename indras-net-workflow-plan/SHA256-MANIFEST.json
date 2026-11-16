@@ -1,0 +1,95 @@
+{
+  "format": "indras-net-workflow-plan-v1",
+  "files": [
+    {
+      "path": "PLAN.md",
+      "bytes": 12846,
+      "sha256": "1cdb149a9644a46119cbd913520196e4144d85c5354622d374e2c72b7fe33c09"
+    },
+    {
+      "path": "LAYERED_WORKFLOW_PLAN.md",
+      "bytes": 354,
+      "sha256": "0e34356a9e92fc9a00110499861dc23f6477b461e4c9fc1b61e33c7be193e38c"
+    },
+    {
+      "path": "milestones/00-demo-harness.md",
+      "bytes": 3805,
+      "sha256": "e702dabf72a1381c793eaa7501f9d55a1b790bbf4e89654c6bca0134cf297d0a"
+    },
+    {
+      "path": "milestones/01-tcp-transport.md",
+      "bytes": 4072,
+      "sha256": "5d3012b478fd73ccee7784d7e5f128e896992233e4df59ce52b8170d5a803d6a"
+    },
+    {
+      "path": "milestones/02-actor-messaging.md",
+      "bytes": 4283,
+      "sha256": "1cc0a789341eccf6ab21f9071710f79213915671fe74619fe1ed44b5ae8faf0b"
+    },
+    {
+      "path": "milestones/03-swiftdb-storage.md",
+      "bytes": 3712,
+      "sha256": "590692aef55982a8df9fe5697ffb6a14fb7e5d3c4abf85ec13b4a1d9ab9f82ae"
+    },
+    {
+      "path": "milestones/04-standalone-raft.md",
+      "bytes": 4038,
+      "sha256": "5da93ae396fbe0990b831524fd6fd4eec93545f1ac6f661292eb1d12d833232c"
+    },
+    {
+      "path": "milestones/05-replicated-application.md",
+      "bytes": 4345,
+      "sha256": "f66a95d668d6b1505060bbfaf14149bdd1472ced22311a564ba7deab19ca671f"
+    },
+    {
+      "path": "milestones/06-replicated-checkpoints.md",
+      "bytes": 3937,
+      "sha256": "822282d8970f23d712d9180ddff9afdb70d12e5f42bd8710d545d13c40323bc5"
+    },
+    {
+      "path": "milestones/07-coordinator-workers.md",
+      "bytes": 4336,
+      "sha256": "7b8f2a65c440853e0b58267506f46553a3ea94e97fb4df3a230d62f75ae29bf5"
+    },
+    {
+      "path": "milestones/08-dynamic-steps.md",
+      "bytes": 3999,
+      "sha256": "fe648ec0630a68c849a5e915dc83db79391c7439b75e0b43592358cf29b7f980"
+    },
+    {
+      "path": "milestones/09-signals-approvals.md",
+      "bytes": 3567,
+      "sha256": "9687cf46c149604d1ff513018404f4bb7c8bcb147397ac06924b01760c90fe9a"
+    },
+    {
+      "path": "milestones/10-durable-timers.md",
+      "bytes": 3627,
+      "sha256": "af76a03dc94bda0339b6970d3375df10a4208b8360e7dd08e2cf438b3317d66e"
+    },
+    {
+      "path": "milestones/11-workflow-cancellation.md",
+      "bytes": 3782,
+      "sha256": "e971a14018721627cf69ffecd374cce8e3042f925f1e34fa847bed83b302130f"
+    },
+    {
+      "path": "milestones/12-version-compatibility.md",
+      "bytes": 3888,
+      "sha256": "0aa4455b63726726be04b21afbb9bfb4525474d4ee1e624216b90f37097f5d5e"
+    },
+    {
+      "path": "milestones/13-setu-data-services.md",
+      "bytes": 8616,
+      "sha256": "d8866bbe4ad8eb6f08271700fbf34ca8d399900e00b92d9f328dd72ab257d7c2"
+    },
+    {
+      "path": "milestones/14-reference-application.md",
+      "bytes": 4676,
+      "sha256": "0f5c226cbdda47d09dd8de52946f58955ce439826cdfb23558a856b7dc248000"
+    },
+    {
+      "path": "milestones/15-sustained-operation.md",
+      "bytes": 4558,
+      "sha256": "3643595008164bc7dc4b1625a5eec64402b2efa4a97f86aac292fb339a674104"
+    }
+  ]
+}
