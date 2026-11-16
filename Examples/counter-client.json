@@ -1,0 +1,9 @@
+{
+  "counter": {
+    "peerPort": 9000,
+    "callTimeoutMilliseconds": 2000,
+    "connectTimeoutMilliseconds": 5000,
+    "delayMilliseconds": 5000,
+    "concurrentCalls": 64
+  }
+}
