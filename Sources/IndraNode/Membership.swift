@@ -38,12 +38,14 @@ public struct PingResult: Codable, Sendable {
 
 private enum MembershipWork: Sendable {
   case bootstrap(PeerAddress)
+  case refreshServices
   case ping(ClusterMembership.Node, SWIM.GossipPayload, Duration, UInt32)
   case indirect(SWIM.Instance.SendPingRequestDirective)
 }
 
 public actor NodeRuntime {
   public let system: TCPActorSystem
+  public nonisolated let receptionist: Receptionist
   private let configurationPath: String
   private var configuration: NodeConfiguration
   private var swim: SWIM.Instance
@@ -58,6 +60,8 @@ public actor NodeRuntime {
   private var stopped = false
   private var membershipRequested = false
   private var membershipSleep: Task<Void, any Error>?
+  private var refreshingServices = false
+  private var serviceRefreshRequested = false
 
   public init(configuration: NodeConfiguration, configurationPath: String, system: TCPActorSystem) {
     self.configuration = configuration
@@ -69,12 +73,16 @@ public actor NodeRuntime {
     // Membership is informational: unreachable peers can recover after a partition.
     settings.unreachability = .enabled
     let node = NodeIdentity(id: configuration.id, name: configuration.name, endpoint: system.endpoint)
+    self.receptionist = Receptionist(system: system, cluster: configuration.cluster, node: node)
     self.swim = SWIM.Instance(settings: settings, myself: node.swimNode)
     (work, pendingWork) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
   }
 
-  public func start() throws {
-    try system.publish(MembershipService(actorSystem: system, runtime: self), as: MembershipService.serviceName)
+  public func start() async throws {
+    let membership = MembershipService(actorSystem: system, runtime: self)
+    try system.publish(membership, as: MembershipService.serviceName)
+    try await receptionist.start()
+    try await receptionist.register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
   }
 
   static func transportTimeoutMilliseconds(configuration: NodeConfiguration) -> Int64 {
@@ -103,7 +111,7 @@ public actor NodeRuntime {
       seeds: configuration.seeds, configurationError: configurationError, discoveryErrors: discoveryErrors)
   }
 
-  public func reload() throws {
+  public func reload() async throws {
     do {
       let updated = try NodeConfiguration.load(path: configurationPath)
       guard configuration.canReload(updated) else {
@@ -115,6 +123,7 @@ public actor NodeRuntime {
         membershipSleep?.cancel()
       }
       configurationError = nil
+      await updateServices()
     } catch {
       configurationError = String(describing: error)
       throw error
@@ -123,12 +132,12 @@ public actor NodeRuntime {
 
   public func join(_ address: PeerAddress) async throws -> PingResult {
     try address.validate()
-    try reload()
+    try await reload()
     if !configuration.seeds.contains(address) {
       var updated = configuration
       updated.seeds.append(address)
       try updated.save(path: configurationPath, overwrite: true)
-      try reload()
+      try await reload()
     }
     return try await contact(address)
   }
@@ -168,6 +177,7 @@ public actor NodeRuntime {
     pendingWork.finish()
     membershipSleep?.cancel()
     membershipServices.removeAll()
+    await receptionist.shutdown()
     await system.shutdown()
   }
 
@@ -229,6 +239,7 @@ public actor NodeRuntime {
       }
       response = forwarded ?? .nack(target: target, sequenceNumber: sequenceNumber)
     }
+    await updateServices()
     return MembershipReply(version: 1, cluster: configuration.cluster, node: identity, response: response)
   }
 
@@ -242,7 +253,20 @@ public actor NodeRuntime {
     return identity
   }
 
-  private func tick() -> Duration {
+  private func updateServices() async {
+    if await receptionist.update(node: identity, members: status().members) { requestServiceRefresh() }
+  }
+
+  private func requestServiceRefresh() {
+    guard !stopped else { return }
+    serviceRefreshRequested = true
+    if !refreshingServices {
+      refreshingServices = true
+      pendingWork.yield(.refreshServices)
+    }
+  }
+
+  private func tick() async -> Duration {
     guard !stopped else { return .zero }
     // Retry bootstrap addresses; SWIM selects the established peers to probe.
     let seeds = configuration.seeds
@@ -270,6 +294,8 @@ public actor NodeRuntime {
       case .membershipChanged: break
       }
     }
+    await updateServices()
+    requestServiceRefresh()
     return nextDelay
   }
 
@@ -295,6 +321,12 @@ public actor NodeRuntime {
     case .bootstrap(let address):
       defer { bootstrapping.remove(address) }
       _ = try? await contact(address)
+    case .refreshServices:
+      repeat {
+        serviceRefreshRequested = false
+        await receptionist.refresh()
+      } while serviceRefreshRequested && !stopped && !Task.isCancelled
+      refreshingServices = false
     case .ping(let target, let payload, let timeout, let sequenceNumber):
       let response = await probe(
         target, payload: payload, timeout: timeout, sequenceNumber: sequenceNumber, pingRequestOrigin: nil)
@@ -304,6 +336,7 @@ public actor NodeRuntime {
       }
     case .indirect(let directive): await probeIndirectly(directive)
     }
+    await updateServices()
   }
 
   private func probe(
@@ -332,13 +365,13 @@ public actor NodeRuntime {
         if case .ack = response, firstAck == nil {
           firstAck = response
           // Apply the first ack immediately; allow the other probes to finish for Lifeguard accounting.
-          self.acceptIndirect(response, target: directive.target)
+          await self.acceptIndirect(response, target: directive.target)
         }
       }
       return firstAck
     }
     if response == nil, !stopped, !Task.isCancelled {
-      acceptIndirect(
+      await acceptIndirect(
         .timeout(
           target: directive.target, pingRequestOrigin: nil,
           timeout: directive.timeout, sequenceNumber: 0), target: directive.target)
@@ -364,13 +397,17 @@ public actor NodeRuntime {
         target: target.swimNode, pingRequestOrigin: identity.swimNode,
         timeout: timeout, sequenceNumber: detail.sequenceNumber)
     }
-    if !stopped, !Task.isCancelled { _ = swim.onEveryPingRequestResponse(response, pinged: target.swimNode) }
+    if !stopped, !Task.isCancelled {
+      _ = swim.onEveryPingRequestResponse(response, pinged: target.swimNode)
+      await updateServices()
+    }
     return response
   }
 
-  private func acceptIndirect(_ response: SWIM.PingResponse, target: ClusterMembership.Node) {
+  private func acceptIndirect(_ response: SWIM.PingResponse, target: ClusterMembership.Node) async {
     guard !stopped, !Task.isCancelled else { return }
     _ = swim.onPingRequestResponse(response, pinged: target)
+    await updateServices()
   }
 
   private func contact(_ address: PeerAddress) async throws -> PingResult {
@@ -384,6 +421,7 @@ public actor NodeRuntime {
     _ = swim.onPingResponse(
       response: reply.response.swimResponse(excludingStaleIncarnationsOf: identity), pingRequestOrigin: nil,
       pingRequestSequenceNumber: nil)
+    await updateServices()
     let elapsed = start.duration(to: .now).components
     return PingResult(
       node: reply.node,

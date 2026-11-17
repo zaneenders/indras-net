@@ -144,6 +144,13 @@ struct NodeTests {
               let status = try await daemon.status()
               return status.members.filter { $0.state == .alive }.count == 2
             }
+            try await eventually {
+              guard case .services(let services) = try await NodeControl.request(.services, socket: daemon.socket)
+              else {
+                throw IndraError("Expected service listing")
+              }
+              return services.count == 6 && Set(services.map(\.node.id)).count == 3
+            }
           }
           guard case .pong(let ping) = try await NodeControl.request(.ping("third"), socket: first.socket) else {
             throw IndraError("Expected pong")
@@ -186,7 +193,12 @@ struct NodeTests {
         try updated.save(path: first.config, overwrite: true)
         try await eventually {
           let status = try await first.status()
+          guard case .services(let services) = try await NodeControl.request(.services, socket: first.socket) else {
+            throw IndraError("Expected service listing")
+          }
+          let local = services.filter { $0.node.id == first.identity.id }
           return status.node.name == "renamed" && status.members.contains { $0.node.id == second.identity.id }
+            && local.count == 2 && local.allSatisfy { $0.node.name == "renamed" }
         }
         #expect(try await first.status().node.id == first.identity.id)
         var invalid = updated
@@ -267,6 +279,12 @@ struct NodeTests {
         _ = try await NodeControl.request(.reload, socket: first.socket)
         try await eventually {
           try await first.status().members.first { $0.node.id == second.identity.id }?.state == .alive
+        }
+        try await eventually {
+          guard case .services(let services) = try await NodeControl.request(.services, socket: first.socket) else {
+            throw IndraError("Expected service listing")
+          }
+          return services.filter { $0.node.id == second.identity.id }.count == 2
         }
         try await second.stop()
       } catch {

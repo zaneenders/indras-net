@@ -235,8 +235,16 @@ private func serveProbeTarget(listener: Listener, target: NodeIdentity, history:
               for try await frame in input {
                 switch try WireMessage(frame: frame) {
                 case .hello: break
-                case .lookup(let id, _, _):
-                  try await output.write(WireMessage.reply(id, .value(try JSONEncoder().encode(address))).frame())
+                case .lookup(let id, let name, let actorType):
+                  let result: CallResult
+                  if name != MembershipService.serviceName {
+                    result = .systemError(.unknownService(name))
+                  } else if actorType != String(reflecting: MembershipService.self) {
+                    result = .systemError(.actorTypeMismatch)
+                  } else {
+                    result = .value(try JSONEncoder().encode(address))
+                  }
+                  try await output.write(WireMessage.reply(id, result).frame())
                 case .call(let invocation):
                   let request = try JSONDecoder().decode(
                     MembershipRequest.self, from: #require(invocation.arguments.first))

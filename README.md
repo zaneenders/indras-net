@@ -13,6 +13,8 @@ swift run indra init --name beta --listen-host 0.0.0.0 --advertised-host 192.168
 swift run indra daemon
 # List cluster members and their SWIM states.
 swift run indra nodes
+# List available services and their hosting nodes; add --json for actor addresses.
+swift run indra services
 # Ping by node name, UUID, or host:port.
 swift run indra ping beta
 # Persist another seed and register with it.

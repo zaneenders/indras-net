@@ -16,6 +16,7 @@ import Glibc
 
 public enum ControlRequest: Codable, Sendable {
   case status
+  case services
   case ping(String)
   case join(PeerAddress)
   case reload
@@ -23,6 +24,7 @@ public enum ControlRequest: Codable, Sendable {
 
 public enum ControlReply: Codable, Sendable {
   case status(NodeStatus)
+  case services([DiscoveredService])
   case pong(PingResult)
   case failure(String)
 }
@@ -116,7 +118,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
       throw error
     }
   } catch {
-    await system.shutdown()
+    await runtime.shutdown()
     throw error
   }
 }
@@ -124,6 +126,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
 private func handle(_ request: ControlRequest, runtime: NodeRuntime) async throws -> ControlReply {
   switch request {
   case .status: return .status(await runtime.status())
+  case .services: return .services(await runtime.receptionist.services())
   case .ping(let target): return .pong(try await runtime.ping(target))
   case .join(let address): return .pong(try await runtime.join(address))
   case .reload:

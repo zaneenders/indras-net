@@ -8,7 +8,9 @@ import UnixSignals
 struct Indra: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "indra", abstract: "Discover and communicate with Indra nodes.",
-    subcommands: [Initialize.self, Daemon.self, Status.self, Nodes.self, Ping.self, Join.self, Reload.self])
+    subcommands: [
+      Initialize.self, Daemon.self, Status.self, Nodes.self, Services.self, Ping.self, Join.self, Reload.self
+    ])
 }
 
 struct LocalOptions: ParsableArguments {
@@ -95,6 +97,29 @@ struct Nodes: AsyncParsableCommand {
       let node = member.node
       let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
       print("\(node.id)  \(node.name)  \(address)  \(member.state.rawValue)")
+    }
+  }
+}
+
+struct Services: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(abstract: "List available actors and their hosting nodes.")
+  @OptionGroup var options: LocalOptions
+
+  func run() async throws {
+    guard case .services(let services) = try await NodeControl.request(.services, socket: options.socket) else {
+      throw IndraError("Unexpected daemon response")
+    }
+    if options.json {
+      try printJSON(services)
+      return
+    }
+    print("KEY  TYPE  NODE  ADDRESS  ACTOR")
+    for service in services {
+      let registration = service.registration
+      let endpoint = registration.address.endpoint
+      let address = PeerAddress(host: endpoint.host, port: endpoint.port)
+      print(
+        "\(registration.key)  \(registration.actorType)  \(service.node.name)  \(address)  \(registration.address.id)")
     }
   }
 }

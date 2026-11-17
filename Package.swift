@@ -20,6 +20,7 @@ let package = Package(
   products: [
     .library(name: "Networking", targets: ["Networking"]),
     .library(name: "TCPActorSystem", targets: ["TCPActorSystem"]),
+    .library(name: "IndraNode", targets: ["IndraNode"]),
     .executable(name: "indra", targets: ["IndraCLI"])
   ],
   dependencies: [
