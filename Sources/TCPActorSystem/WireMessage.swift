@@ -19,7 +19,7 @@ enum CallResult: Codable, Sendable {
 }
 
 enum WireMessage: Codable, Sendable {
-  static let version = 2
+  static let version = 1
 
   case hello(version: Int, endpoint: ActorEndpoint)
   case call(RemoteInvocation)

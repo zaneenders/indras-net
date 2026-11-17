@@ -31,7 +31,7 @@ struct TCPActorSystemTests {
       try await connection.executeThenClose { inbound, outbound in
         var frames = inbound.makeAsyncIterator()
         #expect(try await frames.next() != nil)
-        try await outbound.write(WireMessage.hello(version: 1, endpoint: client.endpoint).frame())
+        try await outbound.write(WireMessage.hello(version: WireMessage.version + 1, endpoint: client.endpoint).frame())
         #expect(try await frames.next() == nil)
       }
       #expect(try await client.peerEndpoint(host: server.endpoint.host, port: server.endpoint.port) == server.endpoint)
