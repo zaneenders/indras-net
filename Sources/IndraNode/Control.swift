@@ -92,18 +92,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
                   let token = connections.insert(connection.channel)
                   clients.addTask {
                     defer { connections.remove(token) }
-                    try? await withDeadline(timeout: .seconds(65)) {
-                      try await connection.executeThenClose { input, output in
-                        var iterator = input.makeAsyncIterator()
-                        guard let frame = try await iterator.next() else { return }
-                        let reply: ControlReply
-                        do {
-                          let request = try decode(frame, opcode: 1, as: ControlRequest.self)
-                          reply = try await handle(request, runtime: runtime)
-                        } catch { reply = .failure(String(describing: error)) }
-                        try await output.write(encode(reply, opcode: 2))
-                      }
-                    }
+                    try? await serveControlConnection(connection, runtime: runtime)
                   }
                 }
               }
@@ -124,6 +113,26 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
   } catch {
     await runtime.shutdown()
     throw error
+  }
+}
+
+func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) async throws {
+  try await withDeadline(timeout: .seconds(65)) {
+    try await withTaskCancellationHandler {
+      try await connection.executeThenClose { input, _ in
+        var iterator = input.makeAsyncIterator()
+        guard let frame = try await iterator.next() else { return }
+        let reply: ControlReply
+        do {
+          let request = try decode(frame, opcode: 1, as: ControlRequest.self)
+          reply = try await handle(request, runtime: runtime)
+        } catch { reply = .failure(String(describing: error)) }
+        // Async writer completion only enqueues data; await the socket write before closing.
+        try await connection.channel.writeAndFlush(encode(reply, opcode: 2)).get()
+      }
+    } onCancel: {
+      connection.channel.close(promise: nil)
+    }
   }
 }
 
