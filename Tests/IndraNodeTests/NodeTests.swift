@@ -1,0 +1,304 @@
+import Foundation
+import NIOCore
+import Networking
+import TCPActorSystem
+import Testing
+
+@testable import IndraNode
+
+@Suite(.timeLimit(.minutes(1)))
+struct NodeTests {
+  @Test func unavailableSeedRetriesAndRestartKeepsStableNodeIdentity() async throws {
+    let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
+    let port = try #require(reservation.channel.localAddress?.port)
+    try await reservation.channel.close()
+    let address = PeerAddress(host: "127.0.0.1", port: port)
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: [address]))
+    do {
+      try await eventually { try await first.status().discoveryErrors[address.description] != nil }
+      var configuration = makeConfiguration(name: "second", seeds: [])
+      configuration.port = port
+      let second = try await TestDaemon.start(configuration: configuration)
+      do {
+        try await eventually {
+          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .reachable
+        }
+        try await second.stop()
+        try await eventually {
+          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .unreachable
+        }
+        let replacement = try await TestDaemon.start(configuration: configuration)
+        do {
+          #expect(replacement.identity.id == second.identity.id)
+          #expect(replacement.identity.endpoint.node != second.identity.endpoint.node)
+          try await eventually {
+            let member = try await first.status().members.first { $0.node.id == replacement.identity.id }
+            return member?.state == .reachable && member?.node.endpoint == replacement.identity.endpoint
+          }
+          #expect(try await first.status().members.count == 1)
+          try await replacement.stop()
+        } catch {
+          try? await replacement.stop()
+          throw error
+        }
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func duplicateNamesRequireUUIDsAndDuplicateIDsAreRejected() async throws {
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "same", seeds: []))
+    do {
+      var configuration = makeConfiguration(name: "same", seeds: [first.address])
+      let second = try await TestDaemon.start(configuration: configuration)
+      do {
+        try await eventually { try await first.status().members.first?.state == .reachable }
+        await #expect(throws: IndraError.self) {
+          try await NodeControl.request(.ping("same"), socket: first.socket)
+        }
+        guard
+          case .pong(let pong) = try await NodeControl.request(
+            .ping(second.identity.id.uuidString.lowercased()), socket: first.socket)
+        else { throw IndraError("Expected pong") }
+        #expect(pong.node.id == second.identity.id)
+        configuration.id = first.identity.id
+        let duplicate = try await TestDaemon.start(configuration: configuration)
+        do {
+          try await eventually { try await duplicate.status().discoveryErrors[first.address.description] != nil }
+          #expect(try await first.status().members.count == 1)
+          #expect(try await duplicate.status().members.isEmpty)
+          try await duplicate.stop()
+        } catch {
+          try? await duplicate.stop()
+          throw error
+        }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func referralsStayUnknownUntilDirectContactAndInvalidExchangesAreAtomic() async throws {
+    let configuration = makeConfiguration(name: "first", seeds: [])
+    let system = try await TCPActorSystem(
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(1), connectTimeout: .seconds(1))
+    let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
+    do {
+      let peer = NodeIdentity(
+        id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()))
+      _ = try await runtime.receive(
+        MembershipExchange(version: 1, cluster: configuration.cluster, node: peer, peers: []))
+      #expect(await runtime.status().members.first?.state == .unknown)
+      #expect(await runtime.status().members.first?.lastSeen == nil)
+      let invalid = NodeIdentity(
+        id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()))
+      await #expect(throws: IndraError.self) {
+        try await runtime.receive(
+          MembershipExchange(version: 1, cluster: configuration.cluster, node: peer, peers: [invalid]))
+      }
+      #expect(await runtime.status().members.count == 1)
+      await runtime.shutdown()
+    } catch {
+      await runtime.shutdown()
+      throw error
+    }
+  }
+
+  @Test func seedsDiscoverTransitivePeersAndPingThroughLocalControl() async throws {
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
+    do {
+      let second = try await TestDaemon.start(
+        configuration: makeConfiguration(name: "second", seeds: [first.address]))
+      do {
+        let third = try await TestDaemon.start(
+          configuration: makeConfiguration(name: "third", seeds: [second.address]))
+        do {
+          for daemon in [first, second, third] {
+            try await eventually {
+              let status = try await daemon.status()
+              return status.members.filter { $0.state == .reachable }.count == 2
+            }
+          }
+          guard case .pong(let ping) = try await NodeControl.request(.ping("third"), socket: first.socket) else {
+            throw IndraError("Expected pong")
+          }
+          #expect(ping.node.id == third.identity.id)
+          #expect(ping.milliseconds > 0)
+          guard
+            case .pong(let byID) = try await NodeControl.request(
+              .ping(second.identity.id.uuidString), socket: third.socket)
+          else { throw IndraError("Expected pong by UUID") }
+          #expect(byID.node.id == second.identity.id)
+          try await third.stop()
+          try await eventually {
+            try await first.status().members.first { $0.node.id == third.identity.id }?.state == .unreachable
+          }
+        } catch {
+          try? await third.stop()
+          throw error
+        }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func automaticReloadKeepsIdentityAndRejectsRestartChanges() async throws {
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
+    do {
+      let second = try await TestDaemon.start(configuration: makeConfiguration(name: "second", seeds: []))
+      do {
+        var updated = try NodeConfiguration.load(path: first.config)
+        updated.name = "renamed"
+        updated.seeds = [second.address]
+        try updated.save(path: first.config, overwrite: true)
+        try await eventually {
+          let status = try await first.status()
+          return status.node.name == "renamed" && status.members.contains { $0.node.id == second.identity.id }
+        }
+        #expect(try await first.status().node.id == first.identity.id)
+        var invalid = updated
+        invalid.port = 9999
+        try invalid.save(path: first.config, overwrite: true)
+        try await eventually { try await first.status().configurationError != nil }
+        #expect(try await first.status().node.endpoint == first.identity.endpoint)
+        try updated.save(path: first.config, overwrite: true)
+        try await eventually { try await first.status().configurationError == nil }
+        try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: first.config), options: .atomic)
+        await #expect(throws: IndraError.self) { try await NodeControl.request(.reload, socket: first.socket) }
+        #expect(try await first.status().node.name == "renamed")
+        try updated.save(path: first.config, overwrite: true)
+        try await eventually { try await first.status().configurationError == nil }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func joinPersistsSeedsAndWrongClustersAreRejected() async throws {
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
+    do {
+      var foreignConfiguration = makeConfiguration(name: "foreign", seeds: [])
+      foreignConfiguration.cluster = "elsewhere"
+      let foreign = try await TestDaemon.start(configuration: foreignConfiguration)
+      do {
+        await #expect(throws: IndraError.self) {
+          try await NodeControl.request(.join(foreign.address), socket: first.socket)
+        }
+        #expect(try NodeConfiguration.load(path: first.config).seeds == [foreign.address])
+        #expect(try await first.status().members.isEmpty)
+        #expect(try await foreign.status().members.isEmpty)
+        #expect(try await first.status().discoveryErrors[foreign.address.description] != nil)
+        try await foreign.stop()
+      } catch {
+        try? await foreign.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func duplicateDaemonCannotRemoveLiveSocketAndIdleClientsDoNotBlockShutdown() async throws {
+    let daemon = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
+    do {
+      await #expect(throws: IndraError.self) {
+        try await runNode(configurationPath: daemon.config, socket: daemon.socket, onReady: { _ in })
+      }
+      #expect(try await daemon.status().node.id == daemon.identity.id)
+      let idle = try await TCP.connect(unixDomainSocketPath: daemon.socket, connectTimeout: .seconds(1))
+      try await daemon.stop()
+      try? await idle.channel.close()
+      #expect(!FileManager.default.fileExists(atPath: daemon.socket))
+    } catch {
+      try? await daemon.stop()
+      throw error
+    }
+  }
+}
+
+private struct TestDaemon: Sendable {
+  let config: String
+  let socket: String
+  let root: URL
+  let identity: NodeIdentity
+  let task: Task<Void, any Error>
+
+  var address: PeerAddress { PeerAddress(host: identity.endpoint.host, port: identity.endpoint.port) }
+
+  static func start(configuration: NodeConfiguration) async throws -> Self {
+    let root = URL(fileURLWithPath: "/tmp/indra-\(UUID().uuidString)")
+    let config = root.appendingPathComponent("config.json").path
+    let socket = root.appendingPathComponent("run/control.sock").path
+    try configuration.save(path: config, overwrite: false)
+    let (events, ready) = AsyncThrowingStream<NodeStatus, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    let task = Task {
+      do {
+        try await runNode(configurationPath: config, socket: socket) {
+          ready.yield($0)
+          ready.finish()
+        }
+      } catch {
+        ready.finish(throwing: error)
+        throw error
+      }
+    }
+    do {
+      var iterator = events.makeAsyncIterator()
+      let status = try #require(try await iterator.next())
+      return Self(config: config, socket: socket, root: root, identity: status.node, task: task)
+    } catch {
+      task.cancel()
+      _ = try? await task.value
+      try? FileManager.default.removeItem(at: root)
+      throw error
+    }
+  }
+
+  func status() async throws -> NodeStatus {
+    guard case .status(let status) = try await NodeControl.request(.status, socket: socket) else {
+      throw IndraError("Expected status")
+    }
+    return status
+  }
+
+  func stop() async throws {
+    task.cancel()
+    do { try await task.value } catch is CancellationError {}
+    try? FileManager.default.removeItem(at: root)
+  }
+}
+
+private func eventually(_ condition: @Sendable () async throws -> Bool) async throws {
+  let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+  while try await !condition() {
+    guard ContinuousClock.now < deadline else { throw IndraError("Condition did not become true") }
+    try await Task.sleep(for: .milliseconds(25))
+  }
+}

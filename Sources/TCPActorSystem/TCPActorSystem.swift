@@ -15,8 +15,12 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
   private let registry = NIOLockedValueBox(Registry())
   private let transport: RPCTransport
 
-  public init(host: String, port: Int, callTimeout: Duration, connectTimeout: TimeAmount) async throws {
-    guard !host.isEmpty, (0...65535).contains(port), callTimeout > .zero, connectTimeout.nanoseconds > 0 else {
+  public init(host: String, advertisedHost: String, port: Int, callTimeout: Duration, connectTimeout: TimeAmount)
+    async throws
+  {
+    guard !host.isEmpty, !advertisedHost.isEmpty, (0...65535).contains(port), callTimeout > .zero,
+      connectTimeout.nanoseconds > 0
+    else {
       throw RPCError.invalidConfiguration
     }
     let listener = try await TCP.listen(host: host, port: port)
@@ -24,7 +28,7 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
       try? await listener.channel.close()
       throw RPCError.invalidConfiguration
     }
-    self.endpoint = ActorEndpoint(host: host, port: boundPort, node: UUID())
+    self.endpoint = ActorEndpoint(host: advertisedHost, port: boundPort, node: UUID())
     self.transport = RPCTransport(listener: listener, callTimeout: callTimeout, connectTimeout: connectTimeout)
     await transport.start(system: self)
   }

@@ -20,15 +20,40 @@ let package = Package(
   products: [
     .library(name: "Networking", targets: ["Networking"]),
     .library(name: "TCPActorSystem", targets: ["TCPActorSystem"]),
-    .executable(name: "indras-counter", targets: ["IndrasCounter"])
+    .executable(name: "indra", targets: ["IndraCLI"])
   ],
   dependencies: [
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.105.0"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
-    .package(url: "https://github.com/apple/swift-configuration.git", from: "1.5.0"),
+    .package(url: "https://github.com/apple/swift-configuration.git", from: "1.5.0", traits: ["JSON", "Reloading"]),
+    .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.13.0"),
     .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0")
   ],
   targets: [
+    .target(
+      name: "IndraNode",
+      dependencies: [
+        "Networking", "TCPActorSystem",
+        .product(name: "Configuration", package: "swift-configuration"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "SystemPackage", package: "swift-system")
+      ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .executableTarget(
+      name: "IndraCLI",
+      dependencies: [
+        "IndraNode", "TCPActorSystem",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "UnixSignals", package: "swift-service-lifecycle")
+      ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .testTarget(
+      name: "IndraNodeTests",
+      dependencies: ["IndraNode", "TCPActorSystem", "Networking", .product(name: "NIOCore", package: "swift-nio")],
+      swiftSettings: sharedSwiftSettings
+    ),
     .target(
       name: "Networking",
       dependencies: [
@@ -43,17 +68,6 @@ let package = Package(
         "Networking",
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOConcurrencyHelpers", package: "swift-nio")
-      ],
-      swiftSettings: sharedSwiftSettings
-    ),
-    .executableTarget(
-      name: "IndrasCounter",
-      dependencies: [
-        "TCPActorSystem",
-        .product(name: "NIOCore", package: "swift-nio"),
-        .product(name: "ArgumentParser", package: "swift-argument-parser"),
-        .product(name: "Configuration", package: "swift-configuration"),
-        .product(name: "SystemPackage", package: "swift-system")
       ],
       swiftSettings: sharedSwiftSettings
     ),

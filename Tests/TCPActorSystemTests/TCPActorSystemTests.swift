@@ -48,7 +48,7 @@ struct TCPActorSystemTests {
 
   @Test func localResolutionAndWeakRegistration() async throws {
     let system = try await TCPActorSystem(
-      host: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
     do {
       var counter: TestCounter? = TestCounter(actorSystem: system, started: nil)
       let address = try #require(counter?.id)
@@ -207,21 +207,23 @@ struct TCPActorSystemTests {
 
   @Test func invalidConfigurationIsRejected() async throws {
     await #expect(throws: RPCError.invalidConfiguration) {
-      try await TCPActorSystem(host: "127.0.0.1", port: 0, callTimeout: .zero, connectTimeout: .seconds(1))
+      try await TCPActorSystem(
+        host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .zero, connectTimeout: .seconds(1))
     }
   }
 
   @Test func staleNodeIdentityIsRejectedAfterRestart() async throws {
     let original = try await TCPActorSystem(
-      host: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
     let oldActor = TestCounter(actorSystem: original, started: nil)
     let address = oldActor.id
     await original.shutdown()
     let replacement = try await TCPActorSystem(
-      host: address.endpoint.host, port: address.endpoint.port, callTimeout: .seconds(2), connectTimeout: .seconds(2))
+      host: address.endpoint.host, advertisedHost: address.endpoint.host, port: address.endpoint.port,
+      callTimeout: .seconds(2), connectTimeout: .seconds(2))
     do {
       let client = try await TCPActorSystem(
-        host: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
+        host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2))
       do {
         let stale = try TestCounter.resolve(id: address, using: client)
         await #expect(throws: RPCError.disconnected) { try await stale.value() }
@@ -260,7 +262,8 @@ struct TCPActorSystemTests {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let port = try #require(listener.channel.localAddress?.port)
     let client = try await TCPActorSystem(
-      host: "127.0.0.1", port: 0, callTimeout: .milliseconds(100), connectTimeout: .seconds(2))
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .milliseconds(100),
+      connectTimeout: .seconds(2))
     let endpoint = ActorEndpoint(host: "127.0.0.1", port: port, node: UUID())
     let remote = try TestCounter.resolve(id: ActorAddress(endpoint: endpoint, id: UUID()), using: client)
     do {
@@ -292,10 +295,10 @@ private func withSystems(
   _ body: @Sendable (TCPActorSystem, TCPActorSystem) async throws -> Void
 ) async throws {
   let server = try await TCPActorSystem(
-    host: host, port: port, callTimeout: callTimeout, connectTimeout: connectTimeout)
+    host: host, advertisedHost: host, port: port, callTimeout: callTimeout, connectTimeout: connectTimeout)
   do {
     let client = try await TCPActorSystem(
-      host: host, port: port, callTimeout: callTimeout, connectTimeout: connectTimeout)
+      host: host, advertisedHost: host, port: port, callTimeout: callTimeout, connectTimeout: connectTimeout)
     do {
       try await body(server, client)
       await client.shutdown()

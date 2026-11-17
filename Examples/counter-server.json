@@ -1,8 +1,0 @@
-{
-  "counter": {
-    "port": 9000,
-    "callTimeoutMilliseconds": 5000,
-    "connectTimeoutMilliseconds": 5000,
-    "lifetimeSeconds": 300
-  }
-}
