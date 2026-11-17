@@ -9,10 +9,10 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct SWIMMembershipTests {
-  @Test func indirectProbeKeepsMemberAliveWhenDirectTCPPathFails() async throws {
+  @Test func indirectProbeKeepsMemberAliveWhenDirectProbeFails() async throws {
     try await withProbeTarget { target, probes in
-      try await withSWIMRuntime(name: "origin") { origin in
-        try await withSWIMRuntime(name: "intermediary") { intermediary in
+      try await withSWIMRuntime(configuration: makeConfiguration(name: "origin", seeds: [])) { origin in
+        try await withSWIMRuntime(configuration: makeConfiguration(name: "intermediary", seeds: [])) { intermediary in
           _ = try await intermediary.ping(target.address.description)
           let intermediaryIdentity = await intermediary.status().node
           _ = try await origin.ping(intermediaryIdentity.address.description)
@@ -22,7 +22,6 @@ struct SWIMMembershipTests {
           await #expect(throws: (any Error).self) { try await origin.ping(target.name) }
           let before = try #require(await origin.status().members.first { $0.node.id == target.id })
           #expect(before.state == .alive)
-          #expect(before.reachability == .unreachable)
           let intermediaryProbes = await probes.count(intermediaryIdentity.id)
           let membership = Task { try await origin.runMembership() }
           do {
@@ -30,7 +29,6 @@ struct SWIMMembershipTests {
               let member = await origin.status().members.first { $0.node.id == target.id }
               let indirectProbes = await probes.count(intermediaryIdentity.id)
               return indirectProbes > intermediaryProbes && member?.state == .alive
-                && member?.reachability == .unreachable
             }
             membership.cancel()
             do { try await membership.value } catch is CancellationError {}
@@ -46,7 +44,7 @@ struct SWIMMembershipTests {
 
   @Test func lifeguardExtendsProbeDeadlineAndDiagnosticPingKeepsItsOwnDeadline() async throws {
     try await withProbeTarget { target, probes in
-      try await withSWIMRuntime(name: "origin") { origin in
+      try await withSWIMRuntime(configuration: makeConfiguration(name: "origin", seeds: [])) { origin in
         _ = try await origin.ping(target.address.description)
         let node = await origin.status().node
         await probes.block(node.id)
@@ -56,7 +54,7 @@ struct SWIMMembershipTests {
           await probes.allow(node.id, delay: .milliseconds(250))
           try await waitForMembership {
             let member = await origin.status().members.first
-            return member?.state == .alive && member?.reachability == .reachable
+            return member?.state == .alive
           }
           await #expect(throws: IndraError.self) { try await origin.ping(target.name) }
           membership.cancel()
@@ -71,7 +69,7 @@ struct SWIMMembershipTests {
   }
 
   @Test func previousLocalProcessInGossipCannotReplaceCurrentProcess() async throws {
-    try await withSWIMRuntime(name: "current") { runtime in
+    try await withSWIMRuntime(configuration: makeConfiguration(name: "current", seeds: [])) { runtime in
       let current = await runtime.status().node
       let previous = NodeIdentity(
         id: current.id, name: current.name,
@@ -111,7 +109,7 @@ struct SWIMMembershipTests {
       endpoint: ActorEndpoint(
         host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port), node: UUID()))
     try await reservation.channel.close()
-    try await withSWIMRuntime(name: "intermediary") { runtime in
+    try await withSWIMRuntime(configuration: makeConfiguration(name: "intermediary", seeds: [])) { runtime in
       let origin = NodeIdentity(
         id: UUID(), name: "origin",
         endpoint: ActorEndpoint(
@@ -119,13 +117,61 @@ struct SWIMMembershipTests {
       let reply = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: origin,
-          probe: .pingRequest(target: target, sequenceNumber: 42, payload: [])))
+          probe: .pingRequest(
+            target: target, sequenceNumber: 42,
+            payload: [GossipMember(node: origin, status: .alive(0), protocolPeriod: 0)])))
       guard case .nack(let node, let sequenceNumber) = reply.response else {
         Issue.record("Expected a negative acknowledgement")
         return
       }
       #expect(node == target)
       #expect(sequenceNumber == 42)
+      #expect(await runtime.status().members.first { $0.node == target }?.state == .alive)
+    }
+  }
+
+  @Test(arguments: [false, true])
+  func failedForwardedProbeDoesNotStartIndirectProbes(timeOut: Bool) async throws {
+    try await withProbeTarget { requester, requests in
+      try await withProbeTarget { target, probes in
+        var configuration = makeConfiguration(name: "intermediary", seeds: [requester.address])
+        configuration.probeIntervalMilliseconds = 60_000
+        try await withSWIMRuntime(configuration: configuration) { intermediary in
+          let node = await intermediary.status().node
+          let membership = Task { try await intermediary.runMembership() }
+          do {
+            try await waitForMembership {
+              await intermediary.status().members.contains { $0.node == requester && $0.state == .alive }
+            }
+            _ = try await intermediary.ping(target.address.description)
+            let previousProbes = await probes.count(node.id)
+            if timeOut {
+              await probes.allow(node.id, delay: .seconds(1))
+            } else {
+              await probes.block(node.id)
+            }
+            let reply = try await intermediary.receive(
+              MembershipRequest(
+                version: 1, cluster: "test", node: requester,
+                probe: .pingRequest(target: target, sequenceNumber: 42, payload: [])))
+            guard case .nack(let pinged, let sequenceNumber) = reply.response else {
+              throw IndraError("Expected a negative acknowledgement for the forwarded probe")
+            }
+            #expect(pinged == target)
+            #expect(sequenceNumber == 42)
+            #expect(await intermediary.status().members.first { $0.node == target }?.state == .alive)
+            try await Task.sleep(for: .milliseconds(250))
+            #expect(await probes.count(node.id) == previousProbes + 1)
+            #expect(await requests.indirectCount(node.id) == 0)
+            membership.cancel()
+            do { try await membership.value } catch is CancellationError {}
+          } catch {
+            membership.cancel()
+            _ = try? await membership.value
+            throw error
+          }
+        }
+      }
     }
   }
 }
@@ -133,19 +179,22 @@ struct SWIMMembershipTests {
 private actor ProbeHistory {
   private var blocked: UUID?
   private var counts: [UUID: Int] = [:]
+  private var indirectCounts: [UUID: Int] = [:]
   private var incarnation: UInt64 = 0
   private var delays: [UUID: Duration] = [:]
 
   func block(_ id: UUID) { blocked = id }
   func count(_ id: UUID) -> Int { counts[id] ?? 0 }
+  func indirectCount(_ id: UUID) -> Int { indirectCounts[id] ?? 0 }
 
   func allow(_ id: UUID, delay: Duration) {
     if blocked == id { blocked = nil }
     delays[id] = delay
   }
 
-  func record(_ id: UUID) async throws -> UInt64 {
+  func record(_ id: UUID, probe: MembershipProbe) async throws -> UInt64 {
     counts[id, default: 0] += 1
+    if case .pingRequest = probe { indirectCounts[id, default: 0] += 1 }
     guard id != blocked else { throw RPCError.timedOut }
     try await Task.sleep(for: delays[id] ?? .zero)
     incarnation += 1
@@ -193,7 +242,7 @@ private func serveProbeTarget(listener: Listener, target: NodeIdentity, history:
                     MembershipRequest.self, from: #require(invocation.arguments.first))
                   let result: CallResult
                   do {
-                    let incarnation = try await history.record(request.node.id)
+                    let incarnation = try await history.record(request.node.id, probe: request.probe)
                     let reply = MembershipReply(
                       version: 1, cluster: "test", node: target,
                       response: .ack(
@@ -218,8 +267,9 @@ private func serveProbeTarget(listener: Listener, target: NodeIdentity, history:
   }
 }
 
-private func withSWIMRuntime(name: String, body: @Sendable (NodeRuntime) async throws -> Void) async throws {
-  let configuration = makeConfiguration(name: name, seeds: [])
+private func withSWIMRuntime(
+  configuration: NodeConfiguration, body: @Sendable (NodeRuntime) async throws -> Void
+) async throws {
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost,
     port: configuration.port,

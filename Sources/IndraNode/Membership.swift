@@ -18,12 +18,8 @@ public struct NodeIdentity: Codable, Hashable, Sendable {
 
 public struct Member: Codable, Sendable {
   public enum State: String, Codable, Sendable { case alive, suspect, unreachable, dead }
-  public enum Reachability: String, Codable, Sendable { case unknown, reachable, unreachable }
   public let node: NodeIdentity
   public var state: State
-  public var reachability: Reachability
-  public var lastSeen: Double?
-  public var error: String?
 }
 
 public struct NodeStatus: Codable, Sendable {
@@ -46,19 +42,12 @@ private enum MembershipWork: Sendable {
   case indirect(SWIM.Instance.SendPingRequestDirective)
 }
 
-private struct Observation: Sendable {
-  var reachability: Member.Reachability
-  var lastSeen: Double?
-  var error: String?
-}
-
 public actor NodeRuntime {
   public let system: TCPActorSystem
   private let configurationPath: String
   private var configuration: NodeConfiguration
   private var swim: SWIM.Instance
   private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
-  private var observations: [ClusterMembership.Node: Observation] = [:]
   private var membershipServices: [PeerAddress: MembershipService] = [:]
   private var configurationError: String?
   private var discoveryErrors: [String: String] = [:]
@@ -93,10 +82,9 @@ public actor NodeRuntime {
   }
 
   public func status() -> NodeStatus {
-    var members: [UUID: Member] = [:]
+    var members: [Member] = []
     for member in swim.members where member.node != identity.swimNode {
       guard let node = identities[member.node] else { continue }
-      let observation = observations[member.node]
       let state: Member.State
       switch member.status {
       case .alive: state = .alive
@@ -104,16 +92,14 @@ public actor NodeRuntime {
       case .unreachable: state = .unreachable
       case .dead: state = .dead
       }
-      if let current = members[node.id], state == .dead || (current.lastSeen ?? 0) > (observation?.lastSeen ?? 0) {
-        continue
-      }
-      members[node.id] = Member(
-        node: node, state: state, reachability: observation?.reachability ?? .unknown,
-        lastSeen: observation?.lastSeen, error: observation?.error)
+      members.append(Member(node: node, state: state))
     }
     return NodeStatus(
       node: identity, cluster: configuration.cluster,
-      members: members.values.sorted { $0.node.id.uuidString < $1.node.id.uuidString },
+      members: members.sorted {
+        if $0.node.id == $1.node.id { return $0.node.endpoint.node.uuidString < $1.node.endpoint.node.uuidString }
+        return $0.node.id.uuidString < $1.node.id.uuidString
+      },
       seeds: configuration.seeds, configurationError: configurationError, discoveryErrors: discoveryErrors)
   }
 
@@ -220,7 +206,8 @@ public actor NodeRuntime {
       var forwarded: MembershipResponse?
       for directive in directives {
         if case .sendPing(let node, let payload, let origin, let originSequence, let timeout, let number) = directive {
-          let result = await probe(node, payload: payload, timeout: timeout, sequenceNumber: number)
+          let result = await probe(
+            node, payload: payload, timeout: timeout, sequenceNumber: number, pingRequestOrigin: origin)
           guard !stopped, !Task.isCancelled else { throw CancellationError() }
           for reply in swim.onPingResponse(
             response: result, pingRequestOrigin: origin,
@@ -234,7 +221,8 @@ public actor NodeRuntime {
             case .sendNack(_, let number, let node):
               forwarded = .nack(target: try identity(for: node), sequenceNumber: number)
             case .gossipProcessed: break
-            case .sendPingRequests(let directive): pendingWork.yield(.indirect(directive))
+            case .sendPingRequests:
+              throw IndraError("Unexpected recursive indirect SWIM probe")
             }
           }
         }
@@ -308,7 +296,8 @@ public actor NodeRuntime {
       defer { bootstrapping.remove(address) }
       _ = try? await contact(address)
     case .ping(let target, let payload, let timeout, let sequenceNumber):
-      let response = await probe(target, payload: payload, timeout: timeout, sequenceNumber: sequenceNumber)
+      let response = await probe(
+        target, payload: payload, timeout: timeout, sequenceNumber: sequenceNumber, pingRequestOrigin: nil)
       guard !stopped, !Task.isCancelled else { return }
       for directive in swim.onPingResponse(response: response, pingRequestOrigin: nil, pingRequestSequenceNumber: nil) {
         if case .sendPingRequests(let directive) = directive { pendingWork.yield(.indirect(directive)) }
@@ -319,7 +308,7 @@ public actor NodeRuntime {
 
   private func probe(
     _ target: ClusterMembership.Node, payload: SWIM.GossipPayload,
-    timeout: Duration, sequenceNumber: UInt32
+    timeout: Duration, sequenceNumber: UInt32, pingRequestOrigin: ClusterMembership.Node?
   ) async -> SWIM.PingResponse {
     do {
       let reply = try await request(
@@ -327,7 +316,8 @@ public actor NodeRuntime {
         address: PeerAddress(host: target.host, port: target.port), timeout: timeout)
       return reply.response.swimResponse(excludingStaleIncarnationsOf: identity)
     } catch {
-      return .timeout(target: target, pingRequestOrigin: nil, timeout: timeout, sequenceNumber: sequenceNumber)
+      return .timeout(
+        target: target, pingRequestOrigin: pingRequestOrigin, timeout: timeout, sequenceNumber: sequenceNumber)
     }
   }
 
@@ -424,9 +414,6 @@ public actor NodeRuntime {
         }
       }
       learn(sender: reply.node, payload: reply.response.payload)
-      observations[reply.node.swimNode] = Observation(
-        reachability: .reachable,
-        lastSeen: Date().timeIntervalSince1970, error: nil)
       discoveryErrors[address.description] = nil
       return reply
     } catch {
@@ -434,10 +421,6 @@ public actor NodeRuntime {
         let message = String(describing: error)
         if discoveryErrors.count < 512 || discoveryErrors[address.description] != nil {
           discoveryErrors[address.description] = message
-        }
-        for (node, identity) in identities where identity.address == address {
-          observations[node] = Observation(
-            reachability: .unreachable, lastSeen: observations[node]?.lastSeen, error: message)
         }
       }
       throw error

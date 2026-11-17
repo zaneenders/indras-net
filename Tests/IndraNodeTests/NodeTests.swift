@@ -91,7 +91,7 @@ struct NodeTests {
     }
   }
 
-  @Test func gossipMembershipIsSeparateFromDirectReachabilityAndInvalidMessagesAreAtomic() async throws {
+  @Test func gossipDeterminesMembershipAndInvalidMessagesAreAtomic() async throws {
     let configuration = makeConfiguration(name: "first", seeds: [])
     let system = try await TCPActorSystem(
       host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(1), connectTimeout: .seconds(1))
@@ -108,8 +108,6 @@ struct NodeTests {
               GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)
             ])))
       #expect(await runtime.status().members.first?.state == .alive)
-      #expect(await runtime.status().members.first?.reachability == .unknown)
-      #expect(await runtime.status().members.first?.lastSeen == nil)
       let invalid = NodeIdentity(
         id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()))
       await #expect(throws: IndraError.self) {
@@ -123,6 +121,8 @@ struct NodeTests {
               ])))
       }
       #expect(await runtime.status().members.count == 1)
+      #expect(await runtime.status().members.first?.node == peer)
+      #expect(await runtime.status().members.first?.state == .alive)
       await runtime.shutdown()
     } catch {
       await runtime.shutdown()
