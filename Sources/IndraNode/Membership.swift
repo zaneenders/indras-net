@@ -62,6 +62,8 @@ public actor NodeRuntime {
   private var swim: SWIM.Instance
   private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
   private var membershipServices: [PeerAddress: MembershipService] = [:]
+  private var verified: [PeerAddress: ActorEndpoint] = [:]
+  private var retired: Set<ActorEndpoint> = []
   private var configurationError: String?
   private var discoveryErrors: [String: String] = [:]
   private let work: AsyncStream<MembershipWork>
@@ -218,10 +220,11 @@ public actor NodeRuntime {
   func receive(_ message: MembershipRequest) async throws -> MembershipReply {
     try validate(
       version: message.version, cluster: message.cluster, sender: message.node, payload: message.probe.payload)
+    guard isCurrent(message.node) else { throw IndraError("Peer process has been replaced") }
     if case .pingRequest(let target, _, _) = message.probe {
       try target.validate()
-      guard target.id != identity.id || target.endpoint == identity.endpoint else {
-        throw IndraError("Indirect probe targets a previous local process")
+      guard isCurrent(target) else {
+        throw IndraError("Indirect probe targets a previous process")
       }
     }
     learn(sender: message.node, payload: message.probe.payload)
@@ -258,7 +261,7 @@ public actor NodeRuntime {
           let result = await probe(
             node, payload: payload, timeout: timeout, sequenceNumber: number, pingRequestOrigin: origin)
           guard !stopped, !Task.isCancelled else { throw CancellationError() }
-          for reply in swim.onPingResponse(
+          for reply in onPingResponse(
             response: result, pingRequestOrigin: origin,
             pingRequestSequenceNumber: originSequence)
           {
@@ -411,7 +414,7 @@ public actor NodeRuntime {
       guard !stopped, !Task.isCancelled else { return }
       // SWIM intentionally omits a directive for direct timeout -> suspect transitions.
       let previous = swim.status(of: target).map(Member.State.init)
-      let directives = swim.onPingResponse(response: response, pingRequestOrigin: nil, pingRequestSequenceNumber: nil)
+      let directives = onPingResponse(response: response, pingRequestOrigin: nil, pingRequestSequenceNumber: nil)
       for directive in directives {
         if case .gossipProcessed(let gossip) = directive { record(gossip) }
         if case .sendPingRequests(let directive) = directive { pendingWork.yield(.indirect(directive)) }
@@ -490,7 +493,7 @@ public actor NodeRuntime {
   }
 
   private func acceptIndirect(_ response: SWIM.PingResponse, target: ClusterMembership.Node) async {
-    guard !stopped, !Task.isCancelled else { return }
+    guard !stopped, !Task.isCancelled, isCurrent(target), let response = currentResponse(response) else { return }
     let previous = swim.status(of: target).map(Member.State.init)
     for directive in swim.onPingRequestResponse(response, pinged: target) {
       if case .gossipProcessed(.applied(let change)) = directive, let change, change.member.node != target {
@@ -512,7 +515,7 @@ public actor NodeRuntime {
       .ping(sequenceNumber: sequenceNumber, payload: payload), address: address,
       timeout: .milliseconds(configuration.requestTimeoutMilliseconds))
     guard case .ack = reply.response else { throw IndraError("Expected SWIM acknowledgement") }
-    for directive in swim.onPingResponse(
+    for directive in onPingResponse(
       response: reply.response.swimResponse(excludingStaleIncarnationsOf: identity), pingRequestOrigin: nil,
       pingRequestSequenceNumber: nil)
     {
@@ -533,11 +536,14 @@ public actor NodeRuntime {
     record(probe, direction: .outbound, peer: address)
     telemetry.inFlight += 1
     defer { telemetry.inFlight -= 1 }
+    let observed = verified
+    var peerAddress = address
     do {
       let message = MembershipRequest(version: 1, cluster: configuration.cluster, node: identity, probe: probe)
-      let reply = try await withMembershipDeadline(timeout: timeout) {
+      let (reply, remote) = try await withMembershipDeadline(timeout: timeout) {
         try await self.exchange(message, address: address)
       }
+      peerAddress = reply.node.address
       try Task.checkCancellation()
       try validate(version: reply.version, cluster: reply.cluster, sender: reply.node, payload: reply.response.payload)
       try reply.response.target.validate()
@@ -552,16 +558,29 @@ public actor NodeRuntime {
           throw IndraError("Invalid indirect SWIM acknowledgement")
         }
       }
+      guard verified[peerAddress] == observed[peerAddress] || verified[peerAddress] == reply.node.endpoint else {
+        throw IndraError("Peer process changed while the request was in flight")
+      }
+      if verified[peerAddress] != reply.node.endpoint {
+        verified[peerAddress] = reply.node.endpoint
+        for previous in identities.values
+        where previous.address == peerAddress && previous.endpoint != reply.node.endpoint {
+          retired.insert(previous.endpoint)
+          if case .applied(let change) = swim.confirmDead(node: previous.swimNode) { record(change) }
+        }
+        membershipServices = membershipServices.filter { !retired.contains($0.value.id.endpoint) }
+      }
       learn(sender: reply.node, payload: reply.response.payload)
       if case .ack = reply.response { rememberAlive(reply.response.target) }
       bootstrapRetries[address] = nil
+      if membershipServices.count < 256 || membershipServices[address] != nil { membershipServices[address] = remote }
       discoveryErrors[address.description] = nil
       record(
         reply.response, direction: .inbound, peer: address,
         roundTripMilliseconds: started.duration(to: .now).secondsValue * 1000)
       return reply
     } catch {
-      if !Task.isCancelled, !stopped {
+      if !Task.isCancelled, !stopped, verified[peerAddress] == observed[peerAddress] {
         let message = String(describing: error)
         telemetry.record(
           direction: .outbound, kind: .failure, peer: address, target: nil,
@@ -619,12 +638,14 @@ public actor NodeRuntime {
       current: Member.State(change.status))
   }
 
-  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws -> MembershipReply {
+  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws
+    -> (MembershipReply, MembershipService)
+  {
     if let remote = membershipServices[address] {
       do {
         let reply = try await remote.probe(message)
         guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
-        return reply
+        return (reply, remote)
       } catch let error as RPCError where error == .disconnected || error == .unknownActor {
         if membershipServices[address]?.id == remote.id { membershipServices[address] = nil }
       }
@@ -635,8 +656,7 @@ public actor NodeRuntime {
       port: address.port, as: MembershipService.self)
     let reply = try await remote.probe(message)
     guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
-    if membershipServices.count < 256 || membershipServices[address] != nil { membershipServices[address] = remote }
-    return reply
+    return (reply, remote)
   }
 
   private func validate(version: Int, cluster: String, sender: NodeIdentity, payload: [GossipMember]) throws {
@@ -645,6 +665,7 @@ public actor NodeRuntime {
       throw IndraError("Peer uses a different cluster or protocol version")
     }
     try sender.validate()
+    guard !retired.contains(sender.endpoint) else { throw IndraError("Peer process has been retired") }
     guard sender.id != identity.id || sender.endpoint == identity.endpoint else {
       throw IndraError("Duplicate node ID; generate a separate configuration for each node")
     }
@@ -656,7 +677,7 @@ public actor NodeRuntime {
   }
 
   private func learn(sender: NodeIdentity, payload: [GossipMember]) {
-    for member in payload where member.node.id != identity.id {
+    for member in payload where member.node.id != identity.id && isCurrent(member.node) {
       remember(member.node)
     }
     remember(sender)
@@ -670,7 +691,34 @@ public actor NodeRuntime {
   }
 
   private func gossip(_ payload: [GossipMember]) -> SWIM.GossipPayload {
-    .membership(payload.filter { $0.node.id != identity.id || $0.node.endpoint == identity.endpoint }.map(\.member))
+    .membership(payload.filter { isCurrent($0.node) }.map(\.member))
+  }
+
+  private func isCurrent(_ node: NodeIdentity) -> Bool {
+    if node.id == identity.id { return node.endpoint == identity.endpoint }
+    return !retired.contains(node.endpoint)
+      && (verified[node.address] == nil || verified[node.address] == node.endpoint)
+  }
+
+  private func isCurrent(_ node: ClusterMembership.Node) -> Bool {
+    node == identity.swimNode || identities[node].map { isCurrent($0) } == true
+  }
+
+  private func currentResponse(_ response: SWIM.PingResponse) -> SWIM.PingResponse? {
+    guard case .ack(let target, let incarnation, var payload, let sequenceNumber) = response else { return response }
+    guard isCurrent(target) else { return nil }
+    if case .membership(let members) = payload {
+      payload = .membership(members.filter { isCurrent($0.node) })
+    }
+    return .ack(target: target, incarnation: incarnation, payload: payload, sequenceNumber: sequenceNumber)
+  }
+
+  private func onPingResponse(
+    response: SWIM.PingResponse, pingRequestOrigin: ClusterMembership.Node?, pingRequestSequenceNumber: UInt32?
+  ) -> [SWIM.Instance.PingResponseDirective] {
+    guard let response = currentResponse(response) else { return [] }
+    return swim.onPingResponse(
+      response: response, pingRequestOrigin: pingRequestOrigin, pingRequestSequenceNumber: pingRequestSequenceNumber)
   }
 
   private func wire(_ payload: SWIM.GossipPayload) throws -> [GossipMember] {
@@ -681,7 +729,7 @@ public actor NodeRuntime {
     }
     members.removeAll { $0.node == identity.swimNode }
     members.append(swim.member)
-    return try members.map {
+    return try members.filter { isCurrent($0.node) }.map {
       GossipMember(node: try identity(for: $0.node), status: GossipStatus($0.status), protocolPeriod: $0.protocolPeriod)
     }
   }
