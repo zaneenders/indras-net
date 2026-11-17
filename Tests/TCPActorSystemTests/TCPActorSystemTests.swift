@@ -2,47 +2,39 @@ import Distributed
 import Foundation
 import NIOCore
 import Networking
-import TCPActorSystem
 import Testing
+
+@testable import TCPActorSystem
 
 @Suite(.timeLimit(.minutes(1)))
 struct TCPActorSystemTests {
-  @Test func namedServiceResolvesByHostAndPort() async throws {
+  @Test func handshakeResolvesTheEndpointForAReservedActor() async throws {
     try await withSystems(host: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2)) {
       server, client in
-      let counter = TestCounter(actorSystem: server, started: nil)
-      try server.publish(counter, as: "counter")
-      let remote = try await client.service(
-        named: "counter", host: server.endpoint.host, port: server.endpoint.port, as: TestCounter.self)
-      #expect(try await remote.add(5) == 5)
+      try server.reserveFixedActorIDs([ReservedCounter.fixedID])
+      let counter = ReservedCounter(actorSystem: server)
+      let endpoint = try await client.peerEndpoint(host: "localhost", port: server.endpoint.port)
+      #expect(endpoint == server.endpoint)
+      let remote = try ReservedCounter.resolve(
+        id: ActorAddress(endpoint: endpoint, id: ReservedCounter.fixedID), using: client)
+      #expect(try await remote.value() == 42)
       #expect(remote.id == counter.id)
-      await #expect(throws: RPCError.unknownService("missing")) {
-        try await client.service(
-          named: "missing", host: server.endpoint.host, port: server.endpoint.port, as: TestCounter.self)
-      }
-      await #expect(throws: RPCError.actorTypeMismatch) {
-        try await client.service(
-          named: "counter", host: server.endpoint.host, port: server.endpoint.port, as: OtherActor.self)
-      }
-      #expect(throws: RPCError.serviceAlreadyPublished("counter")) { try server.publish(counter, as: "counter") }
+      withExtendedLifetime(counter) {}
     }
   }
 
-  @Test func publishedServiceRetainsItsActorUntilUnpublished() async throws {
+  @Test func unsupportedHandshakeVersionClosesTheConnection() async throws {
     try await withSystems(host: "127.0.0.1", port: 0, callTimeout: .seconds(2), connectTimeout: .seconds(2)) {
       server, client in
-      var counter: TestCounter? = TestCounter(actorSystem: server, started: nil)
-      try server.publish(try #require(counter), as: "counter")
-      counter = nil
-      let remote = try await client.service(
-        named: "counter", host: server.endpoint.host, port: server.endpoint.port, as: TestCounter.self)
-      #expect(try await remote.add(2) == 2)
-      server.unpublish("counter")
-      await #expect(throws: RPCError.unknownService("counter")) {
-        try await client.service(
-          named: "counter", host: server.endpoint.host, port: server.endpoint.port, as: TestCounter.self)
+      let connection = try await TCP.connect(
+        host: server.endpoint.host, port: server.endpoint.port, connectTimeout: .seconds(2))
+      try await connection.executeThenClose { inbound, outbound in
+        var frames = inbound.makeAsyncIterator()
+        #expect(try await frames.next() != nil)
+        try await outbound.write(WireMessage.hello(version: 1, endpoint: client.endpoint).frame())
+        #expect(try await frames.next() == nil)
       }
-      await #expect(throws: RPCError.unknownActor) { try await remote.value() }
+      #expect(try await client.peerEndpoint(host: server.endpoint.host, port: server.endpoint.port) == server.endpoint)
     }
   }
 
@@ -78,10 +70,8 @@ struct TCPActorSystemTests {
         Issue.record("Expected a remote error")
       } catch let error as RemoteActorError {
         #expect(error.type == String(reflecting: CounterFailure.self))
-        #expect(error.payload != nil)
+        #expect(error.message == "rejected")
       }
-      client.registerError(CounterFailure.self)
-      await #expect(throws: CounterFailure.rejected) { try await remote.fail() }
       #expect(try await remote.add(1) == 1)
       withExtendedLifetime(local) {}
     }
@@ -258,7 +248,8 @@ struct TCPActorSystemTests {
     }
   }
 
-  @Test func timeoutIncludesHandshakeAndShutdownClosesTheDial() async throws {
+  @Test(arguments: [false, true])
+  func timeoutIncludesHandshakeAndShutdownClosesTheDial(discoveringEndpoint: Bool) async throws {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let port = try #require(listener.channel.localAddress?.port)
     let client = try await TCPActorSystem(
@@ -267,7 +258,13 @@ struct TCPActorSystemTests {
     let endpoint = ActorEndpoint(host: "127.0.0.1", port: port, node: UUID())
     let remote = try TestCounter.resolve(id: ActorAddress(endpoint: endpoint, id: UUID()), using: client)
     do {
-      let call = Task { try await remote.value() }
+      let call = Task {
+        if discoveringEndpoint {
+          _ = try await client.peerEndpoint(host: endpoint.host, port: endpoint.port)
+        } else {
+          _ = try await remote.value()
+        }
+      }
       try await listener.executeThenClose { connections in
         var connections = connections.makeAsyncIterator()
         let connection = try #require(try await connections.next())
@@ -315,6 +312,13 @@ private func withSystems(
 
 private enum CounterFailure: Error, Codable, Sendable {
   case rejected
+}
+
+private distributed actor ReservedCounter: FixedActorID {
+  typealias ActorSystem = TCPActorSystem
+  static let fixedID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3))
+
+  distributed func value() -> Int { 42 }
 }
 
 distributed actor TestCounter {

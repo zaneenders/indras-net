@@ -11,7 +11,7 @@ actor RPCTransport {
   private var stopped = false
   private var sessions: [UUID: Session] = [:]
   private var routes: [ActorEndpoint: UUID] = [:]
-  private var dials: [DialDestination: Dial] = [:]
+  private var dials: [DialDestination: Task<UUID, any Error>] = [:]
   private var pending: [UUID: PendingCall] = [:]
 
   init(listener: Listener, callTimeout: Duration, connectTimeout: TimeAmount) {
@@ -33,27 +33,40 @@ actor RPCTransport {
   }
 
   func call(_ invocation: RemoteInvocation, system: TCPActorSystem) async throws -> CallResult {
-    try await request(id: invocation.requestID) {
+    let result = try await request(id: invocation.requestID) {
       let endpoint = invocation.actorID.endpoint
       let sessionID = try await self.session(
         host: endpoint.host, port: endpoint.port, expected: endpoint, system: system)
       try await self.sendRequest(.call(invocation), requestID: invocation.requestID, sessionID: sessionID)
     }
+    guard case .reply(let reply) = result else { throw RPCError.invalidMessage }
+    return reply
   }
 
-  func lookup(name: String, actorType: String, host: String, port: Int, system: TCPActorSystem) async throws
-    -> CallResult
-  {
-    let id = UUID()
-    return try await request(id: id) {
-      let sessionID = try await self.session(host: host, port: port, expected: nil, system: system)
-      try await self.sendRequest(
-        .lookup(requestID: id, name: name, actorType: actorType), requestID: id, sessionID: sessionID)
+  func peerEndpoint(host: String, port: Int, system: TCPActorSystem) async throws -> ActorEndpoint {
+    try Task.checkCancellation()
+    guard !stopped else { throw RPCError.shutDown }
+    let destination = DialDestination(host: host, port: port, node: nil)
+    if let session = sessionAtAddress(destination), let endpoint = session.value.endpoint { return endpoint }
+
+    let requestID = UUID()
+    let result = try await request(id: requestID) {
+      try await self.discoverEndpoint(host: host, port: port, requestID: requestID, system: system)
     }
+    guard case .endpoint(let endpoint) = result else { throw RPCError.invalidMessage }
+    return endpoint
+  }
+
+  private func discoverEndpoint(
+    host: String, port: Int, requestID: UUID, system: TCPActorSystem
+  ) async throws {
+    let sessionID = try await session(host: host, port: port, expected: nil, system: system)
+    guard let endpoint = sessions[sessionID]?.endpoint else { throw RPCError.disconnected }
+    complete(requestID, result: .success(.endpoint(endpoint)))
   }
 
   private func request(id requestID: UUID, send operation: @escaping @Sendable () async throws -> Void) async throws
-    -> CallResult
+    -> RequestResult
   {
     return try await withTaskCancellationHandler {
       try Task.checkCancellation()
@@ -102,7 +115,7 @@ actor RPCTransport {
     let accepting = acceptTask
     for id in Array(pending.keys) { complete(id, result: .failure(RPCError.shutDown)) }
     accepting?.cancel()
-    for dial in dialing { dial.task.cancel() }
+    for dial in dialing { dial.cancel() }
     try? await listener.channel.close()
     for session in active {
       session.task.cancel()
@@ -111,7 +124,7 @@ actor RPCTransport {
       try? await session.connection.channel.close()
     }
     await accepting?.value
-    for dial in dialing { _ = try? await dial.task.value }
+    for dial in dialing { _ = try? await dial.value }
     for session in active { await session.task.value }
     acceptTask = nil
     routes.removeAll()
@@ -123,22 +136,19 @@ actor RPCTransport {
       Task { try? await connection.channel.close() }
       return
     }
-    install(connection, expected: nil, ready: nil, system: system)
+    install(connection, destination: nil, expected: nil, ready: nil, system: system)
   }
 
   private func session(host: String, port: Int, expected: ActorEndpoint?, system: TCPActorSystem) async throws -> UUID {
     guard !stopped else { throw RPCError.shutDown }
     guard !host.isEmpty, (1...65535).contains(port) else { throw RPCError.invalidMessage }
-    if let expected {
-      if let id = routes[expected], sessions[id] != nil { return id }
-    } else if let route = routes.first(where: { $0.key.host == host && $0.key.port == port }),
-      sessions[route.value] != nil
-    {
-      return route.value
-    }
     let destination = DialDestination(host: host, port: port, node: expected?.node)
-    if let dial = dials[destination] { return try await dial.task.value }
-    let token = UUID()
+    if let expected {
+      if let id = routes[expected], sessions[id]?.connection.channel.isActive == true { return id }
+    } else if let entry = sessionAtAddress(destination) {
+      return entry.key
+    }
+    if let dial = dials[destination] { return try await dial.value }
     let task = Task {
       let connection = try await TCP.connect(host: host, port: port, connectTimeout: connectTimeout)
       guard !stopped, !Task.isCancelled else {
@@ -146,16 +156,25 @@ actor RPCTransport {
         throw RPCError.shutDown
       }
       return try await withCheckedThrowingContinuation { continuation in
-        install(connection, expected: expected, ready: continuation, system: system)
+        install(connection, destination: destination, expected: expected, ready: continuation, system: system)
       }
     }
-    dials[destination] = Dial(token: token, task: task)
-    defer { if dials[destination]?.token == token { dials[destination] = nil } }
+    dials[destination] = task
+    defer { dials[destination] = nil }
     return try await task.value
   }
 
+  private func sessionAtAddress(_ destination: DialDestination) -> (key: UUID, value: Session)? {
+    sessions.first { _, session in
+      guard let endpoint = session.endpoint, session.connection.channel.isActive else { return false }
+      return session.destination == destination
+        || (endpoint.host == destination.host && endpoint.port == destination.port)
+    }
+  }
+
   private func install(
-    _ connection: Connection, expected: ActorEndpoint?, ready: CheckedContinuation<UUID, any Error>?,
+    _ connection: Connection, destination: DialDestination?, expected: ActorEndpoint?,
+    ready: CheckedContinuation<UUID, any Error>?,
     system: TCPActorSystem
   ) {
     let id = UUID()
@@ -163,7 +182,7 @@ actor RPCTransport {
       do {
         try await connection.executeThenClose { inbound, outbound in
           await self.opened(id, writer: outbound)
-          try await outbound.write(WireMessage.hello(system.endpoint).frame())
+          try await outbound.write(WireMessage.hello(version: WireMessage.version, endpoint: system.endpoint).frame())
           for try await frame in inbound {
             try await self.receive(WireMessage(frame: frame), sessionID: id, system: system)
           }
@@ -179,7 +198,7 @@ actor RPCTransport {
     }
     sessions[id] = Session(
       connection: connection, task: task, handshakeTimeout: handshakeTimeout,
-      expected: expected, endpoint: nil, writer: nil, ready: ready, executions: [:])
+      destination: destination, expected: expected, endpoint: nil, writer: nil, ready: ready, executions: [:])
   }
 
   private func opened(_ id: UUID, writer: NIOAsyncChannelOutboundWriter<Frame>) {
@@ -189,8 +208,9 @@ actor RPCTransport {
   private func receive(_ message: WireMessage, sessionID: UUID, system: TCPActorSystem) throws {
     guard var session = sessions[sessionID] else { throw RPCError.disconnected }
     switch message {
-    case .hello(let endpoint):
-      guard session.endpoint == nil, session.expected == nil || session.expected == endpoint,
+    case .hello(let version, let endpoint):
+      guard version == WireMessage.version, session.endpoint == nil,
+        session.expected == nil || session.expected == endpoint,
         !endpoint.host.isEmpty, (1...65535).contains(endpoint.port)
       else { throw RPCError.invalidMessage }
       session.endpoint = endpoint
@@ -198,11 +218,13 @@ actor RPCTransport {
       session.ready?.resume(returning: sessionID)
       session.ready = nil
       sessions[sessionID] = session
-      if routes[endpoint] == nil { routes[endpoint] = sessionID }
+      if routes[endpoint].flatMap({ sessions[$0]?.connection.channel.isActive }) != true {
+        routes[endpoint] = sessionID
+      }
     case .reply(let id, let result):
       guard session.endpoint != nil else { throw RPCError.invalidMessage }
       guard pending[id]?.sessionID == sessionID else { return }
-      complete(id, result: .success(result))
+      complete(id, result: .success(.reply(result)))
     case .call(let invocation):
       guard session.endpoint != nil, session.executions[invocation.requestID] == nil else {
         throw RPCError.invalidMessage
@@ -212,14 +234,6 @@ actor RPCTransport {
         executionFinished(invocation.requestID, sessionID: sessionID)
       }
       session.executions[invocation.requestID] = task
-      sessions[sessionID] = session
-    case .lookup(let requestID, let name, let actorType):
-      guard session.endpoint != nil, session.executions[requestID] == nil else { throw RPCError.invalidMessage }
-      let task = Task {
-        await system.lookup(requestID: requestID, name: name, actorType: actorType, sessionID: sessionID)
-        executionFinished(requestID, sessionID: sessionID)
-      }
-      session.executions[requestID] = task
       sessions[sessionID] = session
     }
   }
@@ -239,7 +253,12 @@ actor RPCTransport {
     guard let session = sessions.removeValue(forKey: id) else { return }
     session.handshakeTimeout.cancel()
     session.ready?.resume(throwing: RPCError.disconnected)
-    if let endpoint = session.endpoint, routes[endpoint] == id { routes[endpoint] = nil }
+    if let endpoint = session.endpoint, routes[endpoint] == id {
+      routes[endpoint] =
+        sessions.first {
+          $0.value.endpoint == endpoint && $0.value.connection.channel.isActive
+        }?.key
+    }
     for requestID in Array(pending.keys) where pending[requestID]?.sessionID == id {
       complete(requestID, result: .failure(RPCError.disconnected))
     }
@@ -247,7 +266,7 @@ actor RPCTransport {
     for task in session.executions.values { await task.value }
   }
 
-  private func complete(_ id: UUID, result: Result<CallResult, any Error>) {
+  private func complete(_ id: UUID, result: Result<RequestResult, any Error>) {
     guard let call = pending.removeValue(forKey: id) else { return }
     call.timeout.cancel()
     call.send.cancel()
@@ -255,16 +274,16 @@ actor RPCTransport {
   }
 }
 
+private enum RequestResult: Sendable {
+  case endpoint(ActorEndpoint)
+  case reply(CallResult)
+}
+
 private struct PendingCall {
-  let continuation: CheckedContinuation<CallResult, any Error>
+  let continuation: CheckedContinuation<RequestResult, any Error>
   let timeout: Task<Void, Never>
   let send: Task<Void, Never>
   var sessionID: UUID?
-}
-
-private struct Dial {
-  let token: UUID
-  let task: Task<UUID, any Error>
 }
 
 private struct DialDestination: Hashable {
@@ -277,6 +296,7 @@ private struct Session {
   let connection: Connection
   let task: Task<Void, Never>
   let handshakeTimeout: Task<Void, Never>
+  let destination: DialDestination?
   let expected: ActorEndpoint?
   var endpoint: ActorEndpoint?
   var writer: NIOAsyncChannelOutboundWriter<Frame>?

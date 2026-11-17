@@ -1,8 +1,12 @@
 public import Distributed
-import Foundation
-import NIOConcurrencyHelpers
+package import Foundation
 public import NIOCore
 import Networking
+import Synchronization
+
+package protocol FixedActorID {
+  static var fixedID: UUID { get }
+}
 
 public final class TCPActorSystem: DistributedActorSystem, Sendable {
   public typealias ActorID = ActorAddress
@@ -12,7 +16,7 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
   public typealias SerializationRequirement = Codable
 
   public let endpoint: ActorEndpoint
-  private let registry = NIOLockedValueBox(Registry())
+  private let registry = Mutex(Registry())
   private let transport: RPCTransport
 
   public init(host: String, advertisedHost: String, port: Int, callTimeout: Duration, connectTimeout: TimeAmount)
@@ -33,53 +37,36 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
     await transport.start(system: self)
   }
 
-  public func registerError<E: Error & Codable & Sendable>(_ type: E.Type) {
-    registry.withLockedValue {
-      $0.errors[String(reflecting: type)] = { try JSONDecoder().decode(type, from: $0) }
+  package func peerEndpoint(host: String, port: Int) async throws -> ActorEndpoint {
+    try await transport.peerEndpoint(host: host, port: port, system: self)
+  }
+
+  package func reserveFixedActorIDs(_ ids: Set<UUID>) throws {
+    try registry.withLock {
+      guard !$0.shutDown else { throw RPCError.shutDown }
+      guard $0.fixedIDs.isDisjoint(with: ids) else { throw RPCError.invalidConfiguration }
+      $0.fixedIDs.formUnion(ids)
     }
-  }
-
-  public func publish<Act>(_ actor: Act, as name: String) throws
-  where Act: DistributedActor, Act.ActorSystem == TCPActorSystem {
-    try registry.withLockedValue { state in
-      guard !state.shutDown else { throw RPCError.shutDown }
-      guard !name.isEmpty else { throw RPCError.invalidConfiguration }
-      guard actor.id.endpoint == endpoint, state.actors[actor.id]?.actor != nil else { throw RPCError.unknownActor }
-      guard state.services[name] == nil else { throw RPCError.serviceAlreadyPublished(name) }
-      state.services[name] = actor
-    }
-  }
-
-  public func unpublish(_ name: String) {
-    let actor = registry.withLockedValue { $0.services.removeValue(forKey: name) }
-    withExtendedLifetime(actor) {}
-  }
-
-  public func service<Act>(named name: String, host: String, port: Int, as actorType: Act.Type) async throws -> Act
-  where Act: DistributedActor, Act.ActorSystem == TCPActorSystem {
-    let result = try await transport.lookup(
-      name: name, actorType: String(reflecting: actorType), host: host, port: port, system: self)
-    try checkError(result)
-    guard case .value(let data) = result else { throw RPCError.invalidMessage }
-    let address = try JSONDecoder().decode(ActorAddress.self, from: data)
-    return try Act.resolve(id: address, using: self)
   }
 
   public func assignID<Act>(_ actorType: Act.Type) -> ActorID where Act: DistributedActor, Act.ID == ActorID {
-    ActorID(endpoint: endpoint, id: UUID())
+    ActorID(endpoint: endpoint, id: (actorType as? any FixedActorID.Type)?.fixedID ?? UUID())
   }
 
   public func actorReady<Act>(_ actor: Act) where Act: DistributedActor, Act.ID == ActorID {
-    registry.withLockedValue { $0.actors[actor.id] = WeakActor(actor: actor) }
+    registry.withLock {
+      precondition($0.actors[actor.id] == nil, "An actor ID is already registered")
+      $0.actors[actor.id] = WeakActor(actor: actor)
+    }
   }
 
   public func resignID(_ id: ActorID) {
-    registry.withLockedValue { $0.actors[id] = nil }
+    registry.withLock { $0.actors[id] = nil }
   }
 
   public func resolve<Act>(id: ActorID, as actorType: Act.Type) throws -> Act?
   where Act: DistributedActor, Act.ID == ActorID {
-    let actor = try registry.withLockedValue { state -> (any DistributedActor)? in
+    let actor = try registry.withLock { state -> (any DistributedActor)? in
       guard !state.shutDown else { throw RPCError.shutDown }
       guard id.endpoint == endpoint else { return nil }
       guard let actor = state.actors[id]?.actor else { throw RPCError.unknownActor }
@@ -117,36 +104,14 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
   }
 
   public func shutdown() async {
-    let services = registry.withLockedValue { state in
-      state.shutDown = true
-      let services = state.services
-      state.services.removeAll()
-      return services
-    }
+    registry.withLock { $0.shutDown = true }
     await transport.shutdown()
-    withExtendedLifetime(services) {}
-  }
-
-  func lookup(requestID: UUID, name: String, actorType: String, sessionID: UUID) async {
-    let handler = ResultHandler(requestID: requestID, sessionID: sessionID, transport: transport)
-    do {
-      let actor = try registry.withLockedValue { state in
-        guard !state.shutDown else { throw RPCError.shutDown }
-        guard let actor = state.services[name] else { throw RPCError.unknownService(name) }
-        return actor
-      }
-      guard String(reflecting: Swift.type(of: actor)) == actorType else { throw RPCError.actorTypeMismatch }
-      guard let address = actor.id as? ActorAddress else { throw RPCError.actorTypeMismatch }
-      try await handler.onReturn(value: address)
-    } catch {
-      try? await handler.onThrow(error: error)
-    }
   }
 
   func execute(_ invocation: RemoteInvocation, sessionID: UUID) async {
     let handler = ResultHandler(requestID: invocation.requestID, sessionID: sessionID, transport: transport)
     do {
-      let actor = try registry.withLockedValue { state in
+      let actor = try registry.withLock { state in
         guard !state.shutDown else { throw RPCError.shutDown }
         guard let actor = state.actors[invocation.actorID]?.actor else { throw RPCError.unknownActor }
         return actor
@@ -175,22 +140,18 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
   private func checkError(_ result: CallResult) throws {
     switch result {
     case .systemError(let error): throw error
-    case .applicationError(let error):
-      let decode = registry.withLockedValue { $0.errors[error.type] }
-      if let decode, let payload = error.payload { throw try decode(payload) }
-      throw error
+    case .applicationError(let error): throw error
     case .value, .void: break
     }
   }
 }
 
-private struct WeakActor {
+private struct WeakActor: Sendable {
   weak var actor: (any DistributedActor)?
 }
 
-private struct Registry {
+private struct Registry: Sendable {
   var actors: [ActorAddress: WeakActor] = [:]
-  var services: [String: any DistributedActor] = [:]
-  var errors: [String: @Sendable (Data) throws -> any Error] = [:]
+  var fixedIDs: Set<UUID> = []
   var shutDown = false
 }

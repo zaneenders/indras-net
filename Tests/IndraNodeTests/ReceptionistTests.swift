@@ -154,9 +154,8 @@ struct ReceptionistTests {
       await receptionist.refresh()
       // Recovery must obtain the owner's current snapshot, which has no worker registrations.
       #expect(try await receptionist.lookup(key).isEmpty)
-      let remote = try await client.system.service(
-        named: ReceptionistService.serviceName, host: peer.endpoint.host,
-        port: peer.endpoint.port, as: ReceptionistService.self)
+      let remote = try ReceptionistService.resolve(
+        id: ActorAddress(endpoint: peer.endpoint, id: ReceptionistService.fixedID), using: client.system)
       await #expect(throws: RemoteActorError.self) { try await remote.snapshot(version: 1, cluster: "foreign") }
     }
   }

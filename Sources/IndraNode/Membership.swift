@@ -61,7 +61,6 @@ public actor NodeRuntime {
   private var configuration: NodeConfiguration
   private var swim: SWIM.Instance
   private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
-  private var membershipServices: [PeerAddress: MembershipService] = [:]
   private var verified: [PeerAddress: ActorEndpoint] = [:]
   private var retired: Set<ActorEndpoint> = []
   private var configurationError: String?
@@ -72,8 +71,6 @@ public actor NodeRuntime {
   private var bootstrapRetries: [PeerAddress: BootstrapRetry] = [:]
   private var bootstrapOffset = 0
   private var stopped = false
-  private var membershipRequested = false
-  private var membershipSleep: Task<Void, any Error>?
   private var refreshingServices = false
   private var serviceRefreshRequested = false
   private var telemetry = MembershipTelemetry(capacity: 128)
@@ -106,10 +103,7 @@ public actor NodeRuntime {
         discoveryErrors["peer-history"] = String(describing: error)
       }
     }
-    let membership = MembershipService(actorSystem: system, runtime: self)
-    try system.publish(membership, as: MembershipService.serviceName)
-    try await receptionist.start()
-    try await receptionist.register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
+    try await receptionist.start(runtime: self)
   }
 
   static func transportTimeoutMilliseconds(configuration: NodeConfiguration) -> Int64 {
@@ -145,7 +139,8 @@ public actor NodeRuntime {
     do {
       let updated = try NodeConfiguration.load(path: configurationPath)
       guard configuration.canReload(updated) else {
-        throw IndraError("Identity, cluster, listen/advertised address, port, and timeout changes require a restart")
+        throw IndraError(
+          "Identity, cluster, listen/advertised address, port, and SWIM timing changes require a restart")
       }
       if updated != configuration {
         let addedSeeds = updated.seeds.filter { !configuration.seeds.contains($0) }
@@ -154,8 +149,6 @@ public actor NodeRuntime {
         for address in addedSeeds where address != identity.address {
           if bootstrapping.insert(address).inserted { pendingWork.yield(.bootstrap(address)) }
         }
-        membershipRequested = true
-        membershipSleep?.cancel()
       }
       configurationError = nil
       await updateServices()
@@ -196,7 +189,7 @@ public actor NodeRuntime {
       tasks.addTask {
         while !Task.isCancelled {
           let delay = await self.tick()
-          try await self.waitForTick(delay)
+          try await Task.sleep(for: delay)
         }
       }
       for await item in work {
@@ -211,8 +204,6 @@ public actor NodeRuntime {
     stopped = true
     savePeerHistory(force: true)
     pendingWork.finish()
-    membershipSleep?.cancel()
-    membershipServices.removeAll()
     await receptionist.shutdown()
     await system.shutdown()
   }
@@ -345,11 +336,9 @@ public actor NodeRuntime {
     }
     for offset in 0..<min(8, addresses.count) {
       let address = addresses[(bootstrapOffset + offset) % addresses.count]
-      let cachedEndpoint = membershipServices[address]?.id.endpoint
       let known = swim.members.contains {
         let sameAddress = $0.node.host == address.host && $0.node.port == address.port
-        let samePeer = cachedEndpoint != nil && identities[$0.node]?.endpoint == cachedEndpoint
-        return (sameAddress || samePeer) && ($0.status.isAlive || $0.status.isSuspect)
+        return sameAddress && ($0.status.isAlive || $0.status.isSuspect)
       }
       let ready = bootstrapRetries[address].map { $0.nextAttempt <= .now } ?? true
       if address != identity.address, !known, ready, bootstrapping.insert(address).inserted {
@@ -362,31 +351,13 @@ public actor NodeRuntime {
       switch directive {
       case .sendPing(let target, let payload, let timeout, let sequenceNumber):
         pendingWork.yield(.ping(target, payload, timeout, sequenceNumber))
-      case .scheduleNextTick(let delay):
-        nextDelay =
-          delay * (Duration.milliseconds(configuration.probeIntervalMilliseconds) / swim.settings.probeInterval)
+      case .scheduleNextTick(let delay): nextDelay = delay
       case .membershipChanged(let change): record(change)
       }
     }
     await updateServices()
     requestServiceRefresh()
     return nextDelay
-  }
-
-  private func waitForTick(_ delay: Duration) async throws {
-    if membershipRequested {
-      membershipRequested = false
-      return
-    }
-    let sleep = Task { try await Task.sleep(for: delay) }
-    membershipSleep = sleep
-    await withTaskCancellationHandler {
-      _ = try? await sleep.value
-    } onCancel: {
-      sleep.cancel()
-    }
-    membershipSleep = nil
-    try Task.checkCancellation()
   }
 
   private func perform(_ item: MembershipWork) async {
@@ -540,7 +511,7 @@ public actor NodeRuntime {
     var peerAddress = address
     do {
       let message = MembershipRequest(version: 1, cluster: configuration.cluster, node: identity, probe: probe)
-      let (reply, remote) = try await withMembershipDeadline(timeout: timeout) {
+      let reply = try await withDeadline(timeout: timeout, timeoutError: IndraError("SWIM probe timed out")) {
         try await self.exchange(message, address: address)
       }
       peerAddress = reply.node.address
@@ -568,12 +539,10 @@ public actor NodeRuntime {
           retired.insert(previous.endpoint)
           if case .applied(let change) = swim.confirmDead(node: previous.swimNode) { record(change) }
         }
-        membershipServices = membershipServices.filter { !retired.contains($0.value.id.endpoint) }
       }
       learn(sender: reply.node, payload: reply.response.payload)
       if case .ack = reply.response { rememberAlive(reply.response.target) }
       bootstrapRetries[address] = nil
-      if membershipServices.count < 256 || membershipServices[address] != nil { membershipServices[address] = remote }
       discoveryErrors[address.description] = nil
       record(
         reply.response, direction: .inbound, peer: address,
@@ -638,25 +607,14 @@ public actor NodeRuntime {
       current: Member.State(change.status))
   }
 
-  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws
-    -> (MembershipReply, MembershipService)
-  {
-    if let remote = membershipServices[address] {
-      do {
-        let reply = try await remote.probe(message)
-        guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
-        return (reply, remote)
-      } catch let error as RPCError where error == .disconnected || error == .unknownActor {
-        if membershipServices[address]?.id == remote.id { membershipServices[address] = nil }
-      }
-    }
+  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws -> MembershipReply {
+    let endpoint = try await system.peerEndpoint(host: address.host, port: address.port)
     try Task.checkCancellation()
-    let remote = try await system.service(
-      named: MembershipService.serviceName, host: address.host,
-      port: address.port, as: MembershipService.self)
+    let remote = try MembershipService.resolve(
+      id: ActorAddress(endpoint: endpoint, id: MembershipService.fixedID), using: system)
     let reply = try await remote.probe(message)
-    guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
-    return (reply, remote)
+    guard reply.node.endpoint == endpoint else { throw IndraError("Peer endpoint mismatch") }
+    return reply
   }
 
   private func validate(version: Int, cluster: String, sender: NodeIdentity, payload: [GossipMember]) throws {
@@ -732,20 +690,5 @@ public actor NodeRuntime {
     return try members.filter { isCurrent($0.node) }.map {
       GossipMember(node: try identity(for: $0.node), status: GossipStatus($0.status), protocolPeriod: $0.protocolPeriod)
     }
-  }
-}
-
-private func withMembershipDeadline<Value: Sendable>(
-  timeout: Duration, operation: @escaping @Sendable () async throws -> Value
-) async throws -> Value {
-  try await withThrowingTaskGroup(of: Value.self) { tasks in
-    tasks.addTask { try await operation() }
-    tasks.addTask {
-      try await Task.sleep(for: timeout)
-      throw IndraError("SWIM probe timed out")
-    }
-    defer { tasks.cancelAll() }
-    guard let result = try await tasks.next() else { throw CancellationError() }
-    return result
   }
 }

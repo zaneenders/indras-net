@@ -8,26 +8,36 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct MembershipCachingTests {
+  @Test func actorSystemRejectsASecondSetOfBootstrapActors() async throws {
+    let configuration = cacheConfiguration(name: "client", port: 0)
+    try await withTestRuntime(configuration: configuration) { runtime in
+      let system = await runtime.system
+      let duplicate = NodeRuntime(
+        configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
+      await #expect(throws: RPCError.invalidConfiguration) { try await duplicate.start() }
+      #expect(await runtime.receptionist.services().count == 2)
+    }
+  }
+
   @Test(arguments: [false, true])
-  func pingsReuseLookupAndRefreshReplacedActors(replaceService: Bool) async throws {
+  func pingsReuseTheHandshakeAndAddressTheReservedActor(viaAlias: Bool) async throws {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let endpoint = ActorEndpoint(
       host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
     let peer = NodeIdentity(id: UUID(), name: "peer", endpoint: endpoint, build: nil)
     let server = Task {
       try await serveMembership(
-        listener: listener, peer: peer, exchanges: 4, replaceService: replaceService, beforeReply: { _ in })
+        listener: listener, peer: peer, exchanges: 4, beforeReply: { _ in })
     }
     do {
       try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { runtime in
-        let first = try await runtime.ping("127.0.0.1:\(endpoint.port)")
+        let address = PeerAddress(host: viaAlias ? "localhost" : endpoint.host, port: endpoint.port)
+        let first = try await runtime.ping(address.description)
         #expect(first.node == peer)
+        #expect(try await runtime.ping(address.description).node == peer)
         #expect(try await runtime.ping(peer.name).node == peer)
         #expect(try await runtime.ping(peer.id.uuidString).node == peer)
-        _ = try await runtime.ping(peer.name)
-        let counts = try await server.value
-        #expect(counts.lookups == (replaceService ? 2 : 1))
-        #expect(counts.calls == (replaceService ? 5 : 4))
+        try await server.value
         #expect(await runtime.status().members.first?.state == .alive)
       }
     } catch {
@@ -38,7 +48,7 @@ struct MembershipCachingTests {
     }
   }
 
-  @Test func firstPingAfterPeerRestartRefreshesCachedService() async throws {
+  @Test func firstPingAfterPeerRestartLearnsTheNewEndpoint() async throws {
     try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
       let configuration = cacheConfiguration(name: "peer", port: 0)
       try await withTestRuntime(configuration: configuration) { original in
@@ -131,7 +141,7 @@ struct MembershipCachingTests {
     }
     let originalServer = Task {
       try await serveMembership(
-        listener: originalListener, peer: original, exchanges: knowPrevious ? 2 : 1, replaceService: false,
+        listener: originalListener, peer: original, exchanges: knowPrevious ? 2 : 1,
         beforeReply: { completed in
           if completed == (knowPrevious ? 1 : 0) {
             start.yield(())
@@ -142,7 +152,7 @@ struct MembershipCachingTests {
     }
     let replacementServer = Task {
       try await serveMembership(
-        listener: replacementListener, peer: replacement, exchanges: 2, replaceService: false, beforeReply: { _ in })
+        listener: replacementListener, peer: replacement, exchanges: 2, beforeReply: { _ in })
     }
     do {
       try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
@@ -161,8 +171,8 @@ struct MembershipCachingTests {
         #expect(members.first?.node == replacement)
         #expect(members.first?.state == .alive)
       }
-      _ = try await originalServer.value
-      _ = try await replacementServer.value
+      try await originalServer.value
+      try await replacementServer.value
     } catch {
       release.finish()
       originalServer.cancel()
@@ -176,40 +186,23 @@ struct MembershipCachingTests {
   }
 }
 
-private struct MembershipRequestCounts: Sendable {
-  let lookups: Int
-  let calls: Int
-}
-
 private func serveMembership(
-  listener: Listener, peer: NodeIdentity, exchanges: Int, replaceService: Bool,
+  listener: Listener, peer: NodeIdentity, exchanges: Int,
   beforeReply: @Sendable (Int) async throws -> Void
-) async throws
-  -> MembershipRequestCounts
-{
+) async throws {
   try await listener.executeThenClose { connections in
     var connections = connections.makeAsyncIterator()
     let connection = try #require(try await connections.next())
-    return try await connection.executeThenClose { input, output in
-      try await output.write(WireMessage.hello(peer.endpoint).frame())
-      var address = ActorAddress(endpoint: peer.endpoint, id: UUID())
-      var lookups = 0
-      var calls = 0
+    try await connection.executeThenClose { input, output in
+      try await output.write(WireMessage.hello(version: WireMessage.version, endpoint: peer.endpoint).frame())
+      let address = ActorAddress(endpoint: peer.endpoint, id: MembershipService.fixedID)
       var completed = 0
       for try await frame in input {
         switch try WireMessage(frame: frame) {
         case .hello: break
-        case .lookup(let id, let name, let actorType):
-          #expect(name == MembershipService.serviceName)
-          #expect(actorType == String(reflecting: MembershipService.self))
-          lookups += 1
-          try await output.write(WireMessage.reply(id, .value(try JSONEncoder().encode(address))).frame())
         case .call(let invocation):
-          calls += 1
-          guard invocation.actorID == address else {
-            try await output.write(WireMessage.reply(invocation.requestID, .systemError(.unknownActor)).frame())
-            continue
-          }
+          try #require(invocation.actorID == address)
+          #expect(invocation.actorType == String(reflecting: MembershipService.self))
           let request = try JSONDecoder().decode(MembershipRequest.self, from: #require(invocation.arguments.first))
           try await beforeReply(completed)
           let response = MembershipReply(
@@ -221,8 +214,7 @@ private func serveMembership(
           try await output.write(
             WireMessage.reply(invocation.requestID, .value(try JSONEncoder().encode(response))).frame())
           completed += 1
-          if completed == exchanges { return MembershipRequestCounts(lookups: lookups, calls: calls) }
-          if replaceService && completed == 1 { address = ActorAddress(endpoint: peer.endpoint, id: UUID()) }
+          if completed == exchanges { return }
         case .reply:
           throw IndraError("Unexpected reply from membership client")
         }

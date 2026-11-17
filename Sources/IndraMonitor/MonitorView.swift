@@ -161,7 +161,7 @@ struct MonitorView: Block, Sendable {
       MonitorLine(text: "\(node.name) / \(member.state.rawValue)", style: MonitorPalette.state(member.state))
     ]
     var text = [
-      address(node), "Build: \(node.build?.summary ?? "unknown (older daemon)")",
+      address(node), "Build: \(node.build?.summary ?? "unknown")",
       "Node: \(node.id.uuidString)", "Process: \(node.endpoint.node.uuidString)"
     ]
     if let build = node.build { text.append("Commit: \(build.commit)") }
@@ -197,10 +197,7 @@ struct MonitorView: Block, Sendable {
       return result
     }
     guard let snapshot = model.snapshot else {
-      result.append(
-        MonitorLine(
-          text: model.status == nil ? "Waiting for daemon…" : "Update daemon to enable probe telemetry.",
-          style: MonitorPalette.warning))
+      result.append(MonitorLine(text: "Waiting for daemon…", style: MonitorPalette.warning))
       return result
     }
     if let error = snapshot.status.configurationError {

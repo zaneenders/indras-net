@@ -8,6 +8,30 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct ControlTests {
+  @Test func requestUsesTheCallersDeadline() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let socket = root.appendingPathComponent("control.sock").path
+    let listener = try await TCP.listen(unixDomainSocketPath: socket)
+    try await listener.executeThenClose { connections in
+      let reply = Task { try await NodeControl.request(.monitor, socket: socket, timeout: .milliseconds(250)) }
+      defer { reply.cancel() }
+      var connections = connections.makeAsyncIterator()
+      let connection = try #require(try await connections.next())
+      try await connection.executeThenClose { input, _ in
+        var frames = input.makeAsyncIterator()
+        #expect(try await frames.next()?.opcode == 1)
+        do {
+          _ = try await reply.value
+          Issue.record("Expected a control deadline error")
+        } catch let error as IndraError {
+          #expect(error.description == "Control request timed out")
+        }
+      }
+    }
+  }
+
   @Test(arguments: [false, true])
   func largeMonitorReplyHandlesBackpressureAndCancellation(cancel: Bool) async throws {
     try await withControlRuntime { runtime in

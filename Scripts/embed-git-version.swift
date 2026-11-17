@@ -42,16 +42,14 @@ guard CommandLine.arguments.count == 3 else {
 let package = CommandLine.arguments[1]
 let output = URL(fileURLWithPath: CommandLine.arguments[2])
 let fullHash = validatedHash(git(["rev-parse", "HEAD"], in: package))
-let hash = fullHash == "unknown" ? "unknown" : validatedHash(git(["rev-parse", "--short", fullHash], in: package))
 let isDirty: String
-if hash != "unknown", let status = git(["status", "--porcelain", "--untracked-files=normal"], in: package) {
+if fullHash != "unknown", let status = git(["status", "--porcelain", "--untracked-files=normal"], in: package) {
   isDirty = status.isEmpty ? "false" : "true"
 } else {
   isDirty = "nil"
 }
 let source = """
   enum EmbeddedBuildIdentity {
-    static let hash = "\(hash)"
     static let fullHash = "\(fullHash)"
     static let isDirty: Bool? = \(isDirty)
   }

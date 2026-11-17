@@ -36,10 +36,7 @@ public actor Receptionist {
   private var stopped = false
   private var revision: UInt64 = 0
   private var local: [ServiceRegistration: any DistributedActor] = [:]
-  private var members: [ActorEndpoint: NodeIdentity] = [:]
-  private var generations: [ActorEndpoint: UUID] = [:]
-  private var snapshots: [ActorEndpoint: ServiceSnapshot] = [:]
-  private var remotes: [ActorEndpoint: ReceptionistService] = [:]
+  private var peers: [ActorEndpoint: ServicePeer] = [:]
   private var watchers: [UUID: ServiceWatcher] = [:]
 
   init(system: TCPActorSystem, cluster: String, node: NodeIdentity) {
@@ -48,10 +45,14 @@ public actor Receptionist {
     self.node = node
   }
 
-  func start() throws {
+  func start(runtime: NodeRuntime) throws {
+    guard !stopped else { throw IndraError("Receptionist is stopping") }
+    guard local.count <= 1022 else { throw IndraError("Too many local service registrations") }
+    try system.reserveFixedActorIDs([ReceptionistService.fixedID, MembershipService.fixedID])
     let service = ReceptionistService(actorSystem: system, receptionist: self)
-    try system.publish(service, as: ReceptionistService.serviceName)
+    let membership = MembershipService(actorSystem: system, runtime: runtime)
     try register(service, with: ServiceKey<ReceptionistService>(ReceptionistService.serviceName))
+    try register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
   }
 
   public func register<Act>(_ actor: Act, with key: ServiceKey<Act>) throws {
@@ -101,9 +102,9 @@ public actor Receptionist {
 
   public func services() -> [DiscoveredService] {
     let owned = local.keys.map { DiscoveredService(node: node, registration: $0) }
-    let discovered = snapshots.values.flatMap { snapshot in
-      snapshot.registrations.map {
-        DiscoveredService(node: members[snapshot.node.endpoint] ?? snapshot.node, registration: $0)
+    let discovered = peers.values.flatMap { peer in
+      (peer.snapshot?.registrations ?? []).map {
+        DiscoveredService(node: peer.identity, registration: $0)
       }
     }
     return (owned + discovered).sorted {
@@ -118,23 +119,26 @@ public actor Receptionist {
 
   func update(node: NodeIdentity, members: [Member]) -> Bool {
     guard !stopped else { return false }
-    let previous = Set(self.members.keys)
     self.node = node
-    self.members = Dictionary(
+    let reachable = Dictionary(
       members.filter { $0.state == .alive || $0.state == .suspect }.map { ($0.node.endpoint, $0.node) },
       uniquingKeysWith: { first, _ in first })
-    generations = Dictionary(uniqueKeysWithValues: self.members.keys.map { ($0, generations[$0] ?? UUID()) })
-    snapshots = snapshots.filter { self.members[$0.key] != nil }
-    remotes = remotes.filter { self.members[$0.key] != nil }
+    let endpointsChanged = Set(peers.keys) != Set(reachable.keys)
+    guard endpointsChanged || reachable.contains(where: { peers[$0.key]?.identity != $0.value }) else { return false }
+    peers = reachable.mapValues { identity in
+      var peer = peers[identity.endpoint] ?? ServicePeer(identity: identity, generation: UUID(), snapshot: nil)
+      peer.identity = identity
+      return peer
+    }
     notifyWatchers()
-    return Set(self.members.keys) != previous
+    return endpointsChanged
   }
 
   func refresh() async {
-    let peers = Array(members.values)
+    let identities = peers.values.map(\.identity)
     await withTaskGroup(of: Void.self) { tasks in
-      var iterator = peers.makeIterator()
-      for _ in 0..<min(8, peers.count) {
+      var iterator = identities.makeIterator()
+      for _ in 0..<min(8, identities.count) {
         if let peer = iterator.next() { tasks.addTask { await self.refresh(peer) } }
       }
       while await tasks.next() != nil {
@@ -153,59 +157,52 @@ public actor Receptionist {
   }
 
   func accept(_ snapshot: ServiceSnapshot, from peer: NodeIdentity) throws {
-    guard !stopped, members[peer.endpoint] != nil else { return }
+    guard !stopped, let current = peers[peer.endpoint] else { return }
     guard snapshot.version == 1, snapshot.cluster == cluster,
       snapshot.node.id == peer.id, snapshot.node.endpoint == peer.endpoint
     else { throw IndraError("Service snapshot owner mismatch") }
     try snapshot.node.validate()
-    guard snapshot.registrations.count <= 1024,
-      Set(snapshot.registrations).count == snapshot.registrations.count
-    else { throw IndraError("Invalid service snapshot registrations") }
+    guard snapshot.registrations.count <= 1024 else { throw IndraError("Invalid service snapshot registrations") }
+    let registrations = Set(snapshot.registrations)
+    guard registrations.count == snapshot.registrations.count else {
+      throw IndraError("Invalid service snapshot registrations")
+    }
     for registration in snapshot.registrations { try registration.validate(owner: peer) }
-    if let previous = snapshots[peer.endpoint] {
+    var changed = !registrations.isEmpty
+    if let previous = current.snapshot {
       guard snapshot.revision >= previous.revision else { return }
-      guard snapshot.revision != previous.revision || Set(snapshot.registrations) == Set(previous.registrations) else {
+      changed = registrations != Set(previous.registrations)
+      guard snapshot.revision != previous.revision || !changed else {
         throw IndraError("Conflicting service snapshot revision")
       }
     }
-    snapshots[peer.endpoint] = snapshot
-    notifyWatchers()
+    peers[peer.endpoint]?.snapshot = snapshot
+    if changed { notifyWatchers() }
   }
 
   func shutdown() {
     stopped = true
-    system.unpublish(ReceptionistService.serviceName)
     local.removeAll()
-    members.removeAll()
-    generations.removeAll()
-    snapshots.removeAll()
-    remotes.removeAll()
+    peers.removeAll()
     for watcher in watchers.values { watcher.finish() }
     watchers.removeAll()
   }
 
   private func refresh(_ peer: NodeIdentity) async {
-    guard !stopped, !Task.isCancelled, let generation = generations[peer.endpoint] else { return }
+    guard !stopped, !Task.isCancelled, let generation = peers[peer.endpoint]?.generation else { return }
     do {
-      let remote: ReceptionistService
-      if let cached = remotes[peer.endpoint] {
-        remote = cached
-      } else {
-        remote = try await system.service(
-          named: ReceptionistService.serviceName, host: peer.endpoint.host,
-          port: peer.endpoint.port, as: ReceptionistService.self)
-      }
-      guard remote.id.endpoint == peer.endpoint else { throw IndraError("Receptionist endpoint mismatch") }
+      let remote = try ReceptionistService.resolve(
+        id: ActorAddress(endpoint: peer.endpoint, id: ReceptionistService.fixedID), using: system)
       let snapshot = try await remote.snapshot(version: 1, cluster: cluster)
       try Task.checkCancellation()
-      guard generations[peer.endpoint] == generation else { return }
+      guard peers[peer.endpoint]?.generation == generation else { return }
       try accept(snapshot, from: peer)
-      if !stopped, members[peer.endpoint] != nil { remotes[peer.endpoint] = remote }
     } catch {
-      guard !stopped, !Task.isCancelled, generations[peer.endpoint] == generation else { return }
-      snapshots[peer.endpoint] = nil
-      remotes[peer.endpoint] = nil
-      notifyWatchers()
+      guard !stopped, !Task.isCancelled, let current = peers[peer.endpoint],
+        current.generation == generation, let snapshot = current.snapshot
+      else { return }
+      peers[peer.endpoint]?.snapshot = nil
+      if !snapshot.registrations.isEmpty { notifyWatchers() }
     }
   }
 
@@ -214,14 +211,15 @@ public actor Receptionist {
   }
 
   private func notifyWatchers() {
-    let services = services()
+    guard !watchers.isEmpty else { return }
+    let registrations = services().map(\.registration)
     for (id, watcher) in watchers {
-      let registrations = services.map(\.registration).filter {
+      let listing = registrations.filter {
         $0.key == watcher.key && $0.actorType == watcher.actorType
       }
-      if registrations != watcher.previous {
-        watchers[id]?.previous = registrations
-        watcher.yield(registrations)
+      if listing != watcher.previous {
+        watchers[id]?.previous = listing
+        watcher.yield(listing)
       }
     }
   }
@@ -239,6 +237,12 @@ struct ServiceSnapshot: Codable, Sendable {
   let registrations: [ServiceRegistration]
 }
 
+private struct ServicePeer {
+  var identity: NodeIdentity
+  let generation: UUID
+  var snapshot: ServiceSnapshot?
+}
+
 private struct ServiceWatcher {
   let key: String
   let actorType: String
@@ -247,8 +251,9 @@ private struct ServiceWatcher {
   let finish: @Sendable () -> Void
 }
 
-distributed actor ReceptionistService {
+distributed actor ReceptionistService: FixedActorID {
   typealias ActorSystem = TCPActorSystem
+  static let fixedID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2))
   static let serviceName = "indra.receptionist.v1"
   private let receptionist: Receptionist
 

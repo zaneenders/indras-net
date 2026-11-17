@@ -19,9 +19,10 @@ enum CallResult: Codable, Sendable {
 }
 
 enum WireMessage: Codable, Sendable {
-  case hello(ActorEndpoint)
+  static let version = 2
+
+  case hello(version: Int, endpoint: ActorEndpoint)
   case call(RemoteInvocation)
-  case lookup(requestID: UUID, name: String, actorType: String)
   case reply(UUID, CallResult)
 
   func frame() throws -> Frame {

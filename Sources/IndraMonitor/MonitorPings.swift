@@ -55,9 +55,10 @@ struct ManualPing: Sendable {
       let outcome: ManualPing.Outcome
       do {
         let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
-        guard case .pong(let pong) = try await monitorRequest(.ping(address.description), socket: socket) else {
-          throw IndraError("Unexpected ping response")
-        }
+        guard
+          case .pong(let pong) = try await NodeControl.request(
+            .ping(address.description), socket: socket, timeout: .seconds(3))
+        else { throw IndraError("Unexpected ping response") }
         outcome = .success(pong)
       } catch {
         guard !Task.isCancelled else { return }

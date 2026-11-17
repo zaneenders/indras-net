@@ -1,10 +1,8 @@
 import Foundation
 import NIOCore
 import Networking
-import Synchronization
 import SystemPackage
 import TCPActorSystem
-import UnixSignals
 
 #if canImport(Darwin)
 import Darwin
@@ -32,23 +30,29 @@ public enum ControlReply: Codable, Sendable {
 }
 
 public enum NodeControl: Sendable {
-  public static func request(_ request: ControlRequest, socket: String) async throws -> ControlReply {
+  public static func request(_ request: ControlRequest, socket: String, timeout: Duration) async throws -> ControlReply
+  {
+    guard timeout > .zero else { throw IndraError("Control request timeout must be positive") }
     try validateSocketPath(socket)
-    return try await withDeadline(timeout: .seconds(65)) {
+    return try await withDeadline(timeout: timeout, timeoutError: IndraError("Control request timed out")) {
       let connection: Connection
       do {
         connection = try await TCP.connect(unixDomainSocketPath: socket, connectTimeout: .seconds(2))
       } catch {
         throw IndraError("Cannot connect to daemon at \(socket). Start 'indra daemon' with the same --socket. \(error)")
       }
-      return try await connection.executeThenClose { input, output in
-        try await output.write(encode(request, opcode: 1))
-        output.finish()
-        var iterator = input.makeAsyncIterator()
-        guard let frame = try await iterator.next() else { throw IndraError("Daemon disconnected") }
-        let reply = try decode(frame, opcode: 2, as: ControlReply.self)
-        if case .failure(let message) = reply { throw IndraError(message) }
-        return reply
+      return try await withTaskCancellationHandler {
+        try await connection.executeThenClose { input, output in
+          try await output.write(encode(request, opcode: 1))
+          output.finish()
+          var iterator = input.makeAsyncIterator()
+          guard let frame = try await iterator.next() else { throw IndraError("Daemon disconnected") }
+          let reply = try decode(frame, opcode: 2, as: ControlReply.self)
+          if case .failure(let message) = reply { throw IndraError(message) }
+          return reply
+        }
+      } onCancel: {
+        connection.channel.close(promise: nil)
       }
     }
   }
@@ -69,55 +73,36 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
     try await runtime.start()
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
     defer { try? FileManager.default.removeItem(atPath: socket) }
-    let connections = ControlConnections()
-    let reloadSignals = await UnixSignalsSequence(trapping: [.sighup])
     onReady(await runtime.status())
-    do {
-      try await withThrowingTaskGroup(of: Void.self) { tasks in
-        tasks.addTask { try await runtime.runMembership() }
-        tasks.addTask {
-          while !Task.isCancelled {
-            try? await runtime.reload()
-            try await Task.sleep(for: .seconds(1))
-          }
-        }
-        tasks.addTask {
-          for await _ in reloadSignals { try? await runtime.reload() }
-        }
-        tasks.addTask {
-          try await withTaskCancellationHandler {
-            try await listener.executeThenClose { incoming in
-              try await withThrowingDiscardingTaskGroup { clients in
-                for try await connection in incoming {
-                  let token = connections.insert(connection.channel)
-                  clients.addTask {
-                    defer { connections.remove(token) }
-                    try? await serveControlConnection(connection, runtime: runtime)
-                  }
+    try await withThrowingTaskGroup(of: Void.self) { tasks in
+      tasks.addTask { try await runtime.runMembership() }
+      tasks.addTask {
+        try await withTaskCancellationHandler {
+          try await listener.executeThenClose { incoming in
+            try await withThrowingDiscardingTaskGroup { clients in
+              for try await connection in incoming {
+                clients.addTask {
+                  try? await serveControlConnection(connection, runtime: runtime)
                 }
               }
             }
-          } onCancel: {
-            listener.channel.close(promise: nil)
-            connections.close()
           }
+        } onCancel: {
+          listener.channel.close(promise: nil)
         }
-        defer { tasks.cancelAll() }
-        _ = try await tasks.next()
       }
-      await runtime.shutdown()
-    } catch {
-      await runtime.shutdown()
-      throw error
+      defer { tasks.cancelAll() }
+      _ = try await tasks.next()
     }
   } catch {
     await runtime.shutdown()
     throw error
   }
+  await runtime.shutdown()
 }
 
 func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) async throws {
-  try await withDeadline(timeout: .seconds(65)) {
+  try await withDeadline(timeout: .seconds(65), timeoutError: IndraError("Control request timed out")) {
     try await withTaskCancellationHandler {
       try await connection.executeThenClose { input, _ in
         var iterator = input.makeAsyncIterator()
@@ -158,36 +143,18 @@ private func decode<Value: Decodable>(_ frame: Frame, opcode: UInt32, as type: V
   return try JSONDecoder().decode(type, from: Data(frame.payload.readableBytesView))
 }
 
-private func withDeadline<Value: Sendable>(
-  timeout: Duration, operation: @escaping @Sendable () async throws -> Value
+func withDeadline<Value: Sendable>(
+  timeout: Duration, timeoutError: any Error, operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
   try await withThrowingTaskGroup(of: Value.self) { tasks in
     tasks.addTask { try await operation() }
     tasks.addTask {
       try await Task.sleep(for: timeout)
-      throw IndraError("Control request timed out")
+      throw timeoutError
     }
     defer { tasks.cancelAll() }
     guard let value = try await tasks.next() else { throw CancellationError() }
     return value
-  }
-}
-
-private final class ControlConnections: Sendable {
-  private let channels = Mutex<[UUID: any Channel]>([:])
-
-  func insert(_ channel: any Channel) -> UUID {
-    let token = UUID()
-    channels.withLock { $0[token] = channel }
-    return token
-  }
-
-  func remove(_ token: UUID) { _ = channels.withLock { $0.removeValue(forKey: token) } }
-
-  func close() {
-    channels.withLock { channels in
-      for channel in channels.values { channel.close(promise: nil) }
-    }
   }
 }
 

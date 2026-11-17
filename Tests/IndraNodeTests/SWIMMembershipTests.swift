@@ -230,22 +230,17 @@ private func serveProbeTarget(listener: Listener, target: NodeIdentity, history:
         for try await connection in connections {
           clients.addTask {
             try await connection.executeThenClose { input, output in
-              try await output.write(WireMessage.hello(target.endpoint).frame())
-              let address = ActorAddress(endpoint: target.endpoint, id: UUID())
+              try await output.write(WireMessage.hello(version: WireMessage.version, endpoint: target.endpoint).frame())
+              let address = ActorAddress(endpoint: target.endpoint, id: MembershipService.fixedID)
               for try await frame in input {
                 switch try WireMessage(frame: frame) {
                 case .hello: break
-                case .lookup(let id, let name, let actorType):
-                  let result: CallResult
-                  if name != MembershipService.serviceName {
-                    result = .systemError(.unknownService(name))
-                  } else if actorType != String(reflecting: MembershipService.self) {
-                    result = .systemError(.actorTypeMismatch)
-                  } else {
-                    result = .value(try JSONEncoder().encode(address))
-                  }
-                  try await output.write(WireMessage.reply(id, result).frame())
                 case .call(let invocation):
+                  guard invocation.actorID == address else {
+                    try await output.write(
+                      WireMessage.reply(invocation.requestID, .systemError(.unknownActor)).frame())
+                    continue
+                  }
                   let request = try JSONDecoder().decode(
                     MembershipRequest.self, from: #require(invocation.arguments.first))
                   let result: CallResult

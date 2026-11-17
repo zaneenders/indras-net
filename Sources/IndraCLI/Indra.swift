@@ -43,7 +43,7 @@ struct Initialize: AsyncParsableCommand {
 
 struct Daemon: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    abstract: "Run the node in the foreground for launchd/systemd; reload config every second or on SIGHUP.")
+    abstract: "Run the node in the foreground for launchd/systemd.")
   @Option(help: "Configuration file.") var config = NodePaths.configuration
   @Option(help: "Private control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
 
@@ -73,7 +73,9 @@ struct Status: AsyncParsableCommand {
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
-    guard case .status(let status) = try await NodeControl.request(.status, socket: options.socket) else {
+    guard
+      case .status(let status) = try await NodeControl.request(.status, socket: options.socket, timeout: .seconds(65))
+    else {
       throw IndraError("Unexpected daemon response")
     }
     try printStatus(status, json: options.json)
@@ -86,7 +88,9 @@ struct Nodes: AsyncParsableCommand {
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
-    guard case .status(let status) = try await NodeControl.request(.status, socket: options.socket) else {
+    guard
+      case .status(let status) = try await NodeControl.request(.status, socket: options.socket, timeout: .seconds(65))
+    else {
       throw IndraError("Unexpected daemon response")
     }
     if options.json {
@@ -111,7 +115,10 @@ struct Monitor: AsyncParsableCommand {
 
   func run() async throws {
     if options.json {
-      guard case .monitor(let snapshot) = try await NodeControl.request(.monitor, socket: options.socket) else {
+      guard
+        case .monitor(let snapshot) = try await NodeControl.request(
+          .monitor, socket: options.socket, timeout: .seconds(65))
+      else {
         throw IndraError("Unexpected daemon response")
       }
       try printJSON(snapshot)
@@ -126,7 +133,10 @@ struct Services: AsyncParsableCommand {
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
-    guard case .services(let services) = try await NodeControl.request(.services, socket: options.socket) else {
+    guard
+      case .services(let services) = try await NodeControl.request(
+        .services, socket: options.socket, timeout: .seconds(65))
+    else {
       throw IndraError("Unexpected daemon response")
     }
     if options.json {
@@ -150,7 +160,8 @@ struct Ping: AsyncParsableCommand {
   @Argument var target: String
 
   func run() async throws {
-    try printPong(try await NodeControl.request(.ping(target), socket: options.socket), json: options.json)
+    try printPong(
+      try await NodeControl.request(.ping(target), socket: options.socket, timeout: .seconds(65)), json: options.json)
   }
 }
 
@@ -161,7 +172,8 @@ struct Join: AsyncParsableCommand {
 
   func run() async throws {
     try printPong(
-      try await NodeControl.request(.join(PeerAddress(address)), socket: options.socket), json: options.json)
+      try await NodeControl.request(.join(PeerAddress(address)), socket: options.socket, timeout: .seconds(65)),
+      json: options.json)
   }
 }
 
@@ -170,7 +182,9 @@ struct Reload: AsyncParsableCommand {
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
-    guard case .status(let status) = try await NodeControl.request(.reload, socket: options.socket) else {
+    guard
+      case .status(let status) = try await NodeControl.request(.reload, socket: options.socket, timeout: .seconds(65))
+    else {
       throw IndraError("Unexpected daemon response")
     }
     try printStatus(status, json: options.json)

@@ -111,6 +111,7 @@ public struct NodeConfiguration: Codable, Sendable, Equatable {
   func canReload(_ other: Self) -> Bool {
     version == other.version && id == other.id && cluster == other.cluster && listenHost == other.listenHost
       && advertisedHost == other.advertisedHost && port == other.port
+      && probeIntervalMilliseconds == other.probeIntervalMilliseconds
       && requestTimeoutMilliseconds == other.requestTimeoutMilliseconds
   }
 }

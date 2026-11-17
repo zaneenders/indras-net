@@ -48,10 +48,10 @@ import Testing
     }
   }
 
-  @Test func pingResultIsVisibleWithOlderDaemonsAndDistinguishesProcessReplacement() throws {
+  @Test func pingResultDistinguishesProcessReplacement() throws {
     var model = MonitorModel()
     let status = fixtureStatus(process: UUID())
-    model.apply(MonitorReading(generation: 1, status: status, snapshot: nil, error: nil, receivedAt: .now))
+    model.apply(reading(status: status, uptime: 10, inbound: 0, outbound: 0, generation: 1))
     let selected = try #require(model.selected?.node)
     let replacement = NodeIdentity(
       id: selected.id, name: selected.name,
@@ -61,7 +61,6 @@ import Testing
     let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
     #expect(text.contains("P ping"))
     #expect(text.contains("PONG studio 127.0.0.1:7332: 12.34 ms (different process replied)"))
-    #expect(text.contains("Update daemon to enable probe telemetry."))
     #expect(model.status?.members.first?.node.endpoint == selected.endpoint)
   }
 
@@ -90,13 +89,13 @@ import Testing
     model.apply(reading(status: status, uptime: 12, inbound: 6, outbound: 9, generation: 2))
     #expect(model.generation == 1)
     model.paused = false
-    model.apply(MonitorReading(generation: 3, status: nil, snapshot: nil, error: "Disconnected", receivedAt: .now))
+    model.apply(MonitorReading(generation: 3, result: .failure("Disconnected")))
     #expect(model.status?.node.name == "tower")
     #expect(model.error == "Disconnected")
     #expect(model.snapshot?.uptimeSeconds == 10)
-    model.apply(MonitorReading(generation: 4, status: status, snapshot: nil, error: nil, receivedAt: .now))
+    model.apply(reading(status: status, uptime: 14, inbound: 10, outbound: 15, generation: 4))
     #expect(model.error == nil)
-    #expect(model.snapshot == nil)
+    #expect(model.snapshot?.uptimeSeconds == 14)
     #expect(model.selected?.node.name == "pi")
   }
 
@@ -154,7 +153,7 @@ import Testing
       probeIntervalMilliseconds: 3000, requestTimeoutMilliseconds: 2000,
       outbound: ProbeTotals(), inbound: ProbeTotals(), inFlight: 0, events: events, changes: changes)
     var model = MonitorModel()
-    model.apply(MonitorReading(generation: 1, status: status, snapshot: snapshot, error: nil, receivedAt: .now))
+    model.apply(MonitorReading(generation: 1, result: .snapshot(snapshot, receivedAt: .now)))
     model.move(255)
     model.manualPing = ManualPing(target: peers[255].node, outcome: .pending)
     let text = try render(model, size: MonitorScreen.configuration.maximumSize)
@@ -171,9 +170,7 @@ import Testing
     var model = MonitorModel()
     model.apply(reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, generation: 1))
     model.apply(
-      MonitorReading(
-        generation: 2, status: nil, snapshot: nil,
-        error: String(repeating: "e\u{301}", count: 5000), receivedAt: .now))
+      MonitorReading(generation: 2, result: .failure(String(repeating: "e\u{301}", count: 5000))))
     let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
     #expect(text.contains("DISCONNECTED"))
     #expect(text.contains("STALE VIEW:"))
@@ -228,5 +225,5 @@ private func reading(status: NodeStatus, uptime: Double, inbound: Int, outbound:
     status: status, uptimeSeconds: uptime, protocolPeriod: 1, localHealthMultiplier: 0,
     probeIntervalMilliseconds: 3000, requestTimeoutMilliseconds: 2000, outbound: outgoing, inbound: incoming,
     inFlight: 0, events: [], changes: [])
-  return MonitorReading(generation: generation, status: status, snapshot: snapshot, error: nil, receivedAt: .now)
+  return MonitorReading(generation: generation, result: .snapshot(snapshot, receivedAt: .now))
 }

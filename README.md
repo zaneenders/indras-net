@@ -5,7 +5,7 @@
 swift test
 # Create this node's config at $XDG_CONFIG_HOME/indra/config.json or ~/.config/indra/config.json.
 swift run indra init --name alpha --listen-host 0.0.0.0 --advertised-host 192.168.1.10
-# Run the foreground daemon; configuration reloads automatically and on SIGHUP.
+# Run the foreground daemon.
 swift run indra daemon
 # On another machine, create a unique node with a seed address.
 swift run indra init --name beta --listen-host 0.0.0.0 --advertised-host 192.168.1.11 --seed 192.168.1.10:7331
@@ -25,7 +25,7 @@ swift run indra ping beta
 swift run indra join 192.168.1.12:7331
 # Inspect membership and configuration errors as JSON.
 swift run indra status --json
-# Apply config edits immediately; identity, binding, cluster, and timeout changes require a restart.
+# Apply config edits; identity, binding, cluster, and SWIM timing changes require a restart.
 swift run indra reload
 # Use separate configurations and private socket directories for multiple local nodes.
 swift run indra daemon --config /absolute/path/config.json --socket /absolute/private/run/control.sock

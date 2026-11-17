@@ -41,8 +41,7 @@ let package = Package(
         .product(name: "ClusterMembership", package: "swift-cluster-membership"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "SystemPackage", package: "swift-system"),
-        .product(name: "DequeModule", package: "swift-collections"),
-        .product(name: "UnixSignals", package: "swift-service-lifecycle")
+        .product(name: "DequeModule", package: "swift-collections")
       ],
       swiftSettings: sharedSwiftSettings,
       plugins: [.plugin(name: "GitBuildPlugin")]
@@ -84,8 +83,7 @@ let package = Package(
       name: "TCPActorSystem",
       dependencies: [
         "Networking",
-        .product(name: "NIOCore", package: "swift-nio"),
-        .product(name: "NIOConcurrencyHelpers", package: "swift-nio")
+        .product(name: "NIOCore", package: "swift-nio")
       ],
       swiftSettings: sharedSwiftSettings
     ),

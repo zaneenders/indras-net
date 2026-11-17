@@ -14,70 +14,36 @@ import TCPActorSystem
 }
 
 struct MonitorReading: Sendable {
-  var generation: UInt64 = 0
-  var status: NodeStatus?
-  var snapshot: MonitorSnapshot?
-  var error: String?
-  var receivedAt: ContinuousClock.Instant?
+  enum Result: Sendable {
+    case snapshot(MonitorSnapshot, receivedAt: ContinuousClock.Instant)
+    case failure(String)
+  }
+
+  let generation: UInt64
+  let result: Result
 }
 
 private func poll(socket: String, readings: ScreenSource<MonitorReading>) async {
-  var reading = MonitorReading()
-  func publish(status: NodeStatus?, snapshot: MonitorSnapshot?, error: String?) {
-    reading.generation &+= 1
-    reading.status = status
-    reading.snapshot = snapshot
-    reading.error = error
-    if error == nil { reading.receivedAt = .now }
-    readings.publish(reading)
-  }
-  var legacy = false
-  var iteration = 0
+  var generation: UInt64 = 0
   while !Task.isCancelled {
+    generation &+= 1
+    let result: MonitorReading.Result
     do {
-      if !legacy || iteration % 5 == 0 {
-        do {
-          guard case .monitor(let snapshot) = try await monitorRequest(.monitor, socket: socket) else {
-            throw IndraError("Unexpected monitor response")
-          }
-          publish(status: snapshot.status, snapshot: snapshot, error: nil)
-          legacy = false
-        } catch {
-          try Task.checkCancellation()
-          guard case .status(let status) = try await monitorRequest(.status, socket: socket) else { throw error }
-          publish(status: status, snapshot: nil, error: nil)
-          legacy = true
-        }
-      } else {
-        guard case .status(let status) = try await monitorRequest(.status, socket: socket) else {
-          throw IndraError("Unexpected status response")
-        }
-        publish(status: status, snapshot: nil, error: nil)
-      }
+      guard case .monitor(let snapshot) = try await NodeControl.request(.monitor, socket: socket, timeout: .seconds(3))
+      else { throw IndraError("Expected a monitor snapshot. Check that the daemon supports monitor.") }
+      result = .snapshot(snapshot, receivedAt: .now)
     } catch {
-      if !Task.isCancelled { publish(status: nil, snapshot: nil, error: String(describing: error)) }
+      guard !Task.isCancelled else { return }
+      result = .failure(String(describing: error))
     }
-    iteration &+= 1
+    readings.publish(MonitorReading(generation: generation, result: result))
     do { try await Task.sleep(for: .seconds(1)) } catch { return }
-  }
-}
-
-func monitorRequest(_ request: ControlRequest, socket: String) async throws -> ControlReply {
-  try await withThrowingTaskGroup(of: ControlReply.self) { tasks in
-    tasks.addTask { try await NodeControl.request(request, socket: socket) }
-    tasks.addTask {
-      try await Task.sleep(for: .seconds(3))
-      throw IndraError("Daemon did not respond within 3 seconds")
-    }
-    defer { tasks.cancelAll() }
-    guard let reply = try await tasks.next() else { throw CancellationError() }
-    return reply
   }
 }
 
 struct MonitorModel: Sendable {
   var generation: UInt64 = 0
-  var status: NodeStatus?
+  var status: NodeStatus? { snapshot?.status }
   var snapshot: MonitorSnapshot?
   var error: String?
   var receivedAt: ContinuousClock.Instant?
@@ -92,28 +58,34 @@ struct MonitorModel: Sendable {
   mutating func apply(_ reading: MonitorReading) {
     guard !paused, reading.generation != generation else { return }
     generation = reading.generation
-    error = reading.error
-    guard let next = reading.status else { return }
+    switch reading.result {
+    case .failure(let message): error = message
+    case .snapshot(let next, let receivedAt): apply(next, receivedAt: receivedAt)
+    }
+  }
+
+  private mutating func apply(_ nextSnapshot: MonitorSnapshot, receivedAt: ContinuousClock.Instant) {
+    error = nil
+    let next = nextSnapshot.status
     let sameProcess = status?.node.endpoint.node == next.node.endpoint.node
     inboundRate = nil
     outboundRate = nil
-    if sameProcess, let before = snapshot, let after = reading.snapshot {
-      let elapsed = after.uptimeSeconds - before.uptimeSeconds
-      if elapsed > 0, after.inbound.messages >= before.inbound.messages,
-        after.outbound.messages >= before.outbound.messages
+    if sameProcess, let before = snapshot {
+      let elapsed = nextSnapshot.uptimeSeconds - before.uptimeSeconds
+      if elapsed > 0, nextSnapshot.inbound.messages >= before.inbound.messages,
+        nextSnapshot.outbound.messages >= before.outbound.messages
       {
-        inboundRate = Double(after.inbound.messages - before.inbound.messages) / elapsed
-        outboundRate = Double(after.outbound.messages - before.outbound.messages) / elapsed
+        inboundRate = Double(nextSnapshot.inbound.messages - before.inbound.messages) / elapsed
+        outboundRate = Double(nextSnapshot.outbound.messages - before.outbound.messages) / elapsed
       }
     }
-    if !sameProcess || reading.snapshot == nil { history.removeAll(keepingCapacity: true) }
+    if !sameProcess { history.removeAll(keepingCapacity: true) }
     if let inboundRate, let outboundRate {
       if history.count == 60 { history.removeFirst() }
       history.append(inboundRate + outboundRate)
     }
-    status = next
-    snapshot = reading.snapshot
-    receivedAt = reading.receivedAt
+    snapshot = nextSnapshot
+    self.receivedAt = receivedAt
     if !next.members.contains(where: { $0.node.endpoint.node == selectedProcess }) {
       selectedProcess = next.members.first?.node.endpoint.node
     }

@@ -61,11 +61,11 @@ struct NodeTests {
       do {
         try await eventually { try await first.status().members.first?.state == .alive }
         await #expect(throws: IndraError.self) {
-          try await NodeControl.request(.ping("same"), socket: first.socket)
+          try await NodeControl.request(.ping("same"), socket: first.socket, timeout: .seconds(3))
         }
         guard
           case .pong(let pong) = try await NodeControl.request(
-            .ping(second.identity.id.uuidString.lowercased()), socket: first.socket)
+            .ping(second.identity.id.uuidString.lowercased()), socket: first.socket, timeout: .seconds(3))
         else { throw IndraError("Expected pong") }
         #expect(pong.node.id == second.identity.id)
         configuration.id = first.identity.id
@@ -147,21 +147,26 @@ struct NodeTests {
               return status.members.filter { $0.state == .alive }.count == 2
             }
             try await eventually {
-              guard case .services(let services) = try await NodeControl.request(.services, socket: daemon.socket)
+              guard
+                case .services(let services) = try await NodeControl.request(
+                  .services, socket: daemon.socket, timeout: .seconds(3))
               else {
                 throw IndraError("Expected service listing")
               }
               return services.count == 6 && Set(services.map(\.node.id)).count == 3
             }
           }
-          guard case .pong(let ping) = try await NodeControl.request(.ping("third"), socket: first.socket) else {
+          guard
+            case .pong(let ping) = try await NodeControl.request(
+              .ping("third"), socket: first.socket, timeout: .seconds(3))
+          else {
             throw IndraError("Expected pong")
           }
           #expect(ping.node.id == third.identity.id)
           #expect(ping.milliseconds > 0)
           guard
             case .pong(let byID) = try await NodeControl.request(
-              .ping(second.identity.id.uuidString), socket: third.socket)
+              .ping(second.identity.id.uuidString), socket: third.socket, timeout: .seconds(3))
           else { throw IndraError("Expected pong by UUID") }
           #expect(byID.node.id == second.identity.id)
           try await third.stop()
@@ -184,7 +189,7 @@ struct NodeTests {
     }
   }
 
-  @Test func automaticReloadKeepsIdentityAndRejectsRestartChanges() async throws {
+  @Test func explicitReloadKeepsIdentityAndRejectsRestartChanges() async throws {
     let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
     do {
       let second = try await TestDaemon.start(configuration: makeConfiguration(name: "second", seeds: []))
@@ -193,9 +198,15 @@ struct NodeTests {
         updated.name = "renamed"
         updated.seeds = [second.address]
         try updated.save(path: first.config, overwrite: true)
+        try await Task.sleep(for: .milliseconds(1100))
+        #expect(try await first.status().node.name == "first")
+        _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
         try await eventually {
           let status = try await first.status()
-          guard case .services(let services) = try await NodeControl.request(.services, socket: first.socket) else {
+          guard
+            case .services(let services) = try await NodeControl.request(
+              .services, socket: first.socket, timeout: .seconds(3))
+          else {
             throw IndraError("Expected service listing")
           }
           let local = services.filter { $0.node.id == first.identity.id }
@@ -203,18 +214,21 @@ struct NodeTests {
             && local.count == 2 && local.allSatisfy { $0.node.name == "renamed" }
         }
         #expect(try await first.status().node.id == first.identity.id)
-        var invalid = updated
-        invalid.port = 9999
-        try invalid.save(path: first.config, overwrite: true)
-        try await eventually { try await first.status().configurationError != nil }
+        var changedPort = updated
+        changedPort.port = 9999
+        var changedInterval = updated
+        changedInterval.probeIntervalMilliseconds = 60_000
+        for invalid in [changedPort, changedInterval] {
+          try invalid.save(path: first.config, overwrite: true)
+          await #expect(throws: IndraError.self) {
+            try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
+          }
+          #expect(try await first.status().configurationError?.contains("require a restart") == true)
+        }
         #expect(try await first.status().node.endpoint == first.identity.endpoint)
         try updated.save(path: first.config, overwrite: true)
-        try await eventually { try await first.status().configurationError == nil }
-        try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: first.config), options: .atomic)
-        await #expect(throws: IndraError.self) { try await NodeControl.request(.reload, socket: first.socket) }
-        #expect(try await first.status().node.name == "renamed")
-        try updated.save(path: first.config, overwrite: true)
-        try await eventually { try await first.status().configurationError == nil }
+        _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
+        #expect(try await first.status().configurationError == nil)
         try await second.stop()
       } catch {
         try? await second.stop()
@@ -238,7 +252,7 @@ struct NodeTests {
           var configuration = try NodeConfiguration.load(path: first.config)
           configuration.seeds = [third.address]
           try configuration.save(path: first.config, overwrite: true)
-          _ = try await NodeControl.request(.reload, socket: first.socket)
+          _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
           try await eventually {
             try await first.status().members.contains { $0.node.id == third.identity.id && $0.state == .alive }
           }
@@ -260,27 +274,28 @@ struct NodeTests {
   }
 
   @Test(arguments: [false, true])
-  func automaticReloadReportsMalformedAndMissingFiles(removeFile: Bool) async throws {
+  func explicitReloadReportsMalformedAndMissingFiles(removeFile: Bool) async throws {
     let configuration = makeConfiguration(name: "first", seeds: [])
     let daemon = try await TestDaemon.start(configuration: configuration)
     do {
-      // Let the startup reload finish before testing failures in subsequent polling.
-      try await Task.sleep(for: .milliseconds(100))
       if removeFile {
         try FileManager.default.removeItem(atPath: daemon.config)
       } else {
         try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: daemon.config), options: .atomic)
       }
-      try await eventually { try await daemon.status().configurationError != nil }
+      await #expect(throws: IndraError.self) {
+        try await NodeControl.request(.reload, socket: daemon.socket, timeout: .seconds(3))
+      }
+      #expect(try await daemon.status().configurationError != nil)
       #expect(try await daemon.status().node == daemon.identity)
       var restored = configuration
       restored.name = "restored"
       try restored.save(path: daemon.config, overwrite: true)
-      try await eventually {
-        let status = try await daemon.status()
-        return status.configurationError == nil && status.node.name == "restored"
-      }
-      #expect(try await daemon.status().node.endpoint == daemon.identity.endpoint)
+      _ = try await NodeControl.request(.reload, socket: daemon.socket, timeout: .seconds(3))
+      let status = try await daemon.status()
+      #expect(status.configurationError == nil)
+      #expect(status.node.name == "restored")
+      #expect(status.node.endpoint == daemon.identity.endpoint)
       try await daemon.stop()
     } catch {
       try? await daemon.stop()
@@ -288,8 +303,7 @@ struct NodeTests {
     }
   }
 
-  @Test(arguments: [false, true])
-  func reloadWakesDiscoveryBeforePreviousIntervalExpires(changeInterval: Bool) async throws {
+  @Test func reloadContactsNewSeedsBeforeTheNextProbeTick() async throws {
     let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
     let port = try #require(reservation.channel.localAddress?.port)
     try await reservation.channel.close()
@@ -300,22 +314,20 @@ struct NodeTests {
     do {
       try await eventually { try await first.status().discoveryErrors[address.description] != nil }
       var peerConfiguration = makeConfiguration(name: "second", seeds: [])
-      peerConfiguration.port = changeInterval ? port : 0
       peerConfiguration.probeIntervalMilliseconds = 60_000
       let second = try await TestDaemon.start(configuration: peerConfiguration)
       do {
-        if changeInterval {
-          configuration.probeIntervalMilliseconds = 100
-        } else {
-          configuration.seeds = [second.address]
-        }
+        configuration.seeds = [second.address]
         try configuration.save(path: first.config, overwrite: true)
-        _ = try await NodeControl.request(.reload, socket: first.socket)
+        _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
         try await eventually {
           try await first.status().members.first { $0.node.id == second.identity.id }?.state == .alive
         }
         try await eventually {
-          guard case .services(let services) = try await NodeControl.request(.services, socket: first.socket) else {
+          guard
+            case .services(let services) = try await NodeControl.request(
+              .services, socket: first.socket, timeout: .seconds(3))
+          else {
             throw IndraError("Expected service listing")
           }
           return services.filter { $0.node.id == second.identity.id }.count == 2
@@ -340,7 +352,7 @@ struct NodeTests {
       let foreign = try await TestDaemon.start(configuration: foreignConfiguration)
       do {
         await #expect(throws: IndraError.self) {
-          try await NodeControl.request(.join(foreign.address), socket: first.socket)
+          try await NodeControl.request(.join(foreign.address), socket: first.socket, timeout: .seconds(3))
         }
         #expect(try NodeConfiguration.load(path: first.config).seeds == [foreign.address])
         #expect(try await first.status().members.isEmpty)
@@ -415,7 +427,7 @@ private struct TestDaemon: Sendable {
   }
 
   func status() async throws -> NodeStatus {
-    guard case .status(let status) = try await NodeControl.request(.status, socket: socket) else {
+    guard case .status(let status) = try await NodeControl.request(.status, socket: socket, timeout: .seconds(3)) else {
       throw IndraError("Expected status")
     }
     return status
