@@ -6,9 +6,9 @@ import Testing
 @testable import IndraMonitor
 @testable import IndraNode
 
-struct MonitorTests {
+@MainActor struct MonitorTests {
   @Test func pingKeyUsesSelectedAddressWhilePausedAndDoesNotQueueRepeatedPresses() async throws {
-    var screen = MonitorScreen()
+    let screen = MonitorScreen(socket: nil)
     let pings = MonitorPings()
     screen.pings = pings
     screen.model.apply(
@@ -26,7 +26,7 @@ struct MonitorTests {
     let worker = Task { await pings.run(socket: socket) }
     do {
       try await waitForPing(pings)
-      _ = screen.event(.tick(elapsed: .milliseconds(200)), copyBuffer: &copyBuffer)
+      screen.model.manualPing = pings.read()
       if case .failure = screen.model.manualPing?.outcome {
       } else {
         Issue.record("Expected the daemon connection failure to be shown")
@@ -181,7 +181,7 @@ struct MonitorTests {
   }
 }
 
-private func waitForPing(_ pings: MonitorPings) async throws {
+@MainActor private func waitForPing(_ pings: MonitorPings) async throws {
   let deadline = ContinuousClock.now.advanced(by: .seconds(3))
   while pings.read()?.isPending == true {
     guard ContinuousClock.now < deadline else { throw IndraError("Timed out waiting for ping result") }
@@ -189,7 +189,7 @@ private func waitForPing(_ pings: MonitorPings) async throws {
   }
 }
 
-private func render(_ model: MonitorModel, size: TerminalSize) throws -> String {
+@MainActor private func render(_ model: MonitorModel, size: TerminalSize) throws -> String {
   var surface = try Surface(maximumSize: size, layoutBudget: MonitorScreen.configuration.layoutBudget)
   try surface.render(size: size, content: { MonitorView(model: model, size: size) })
   var text = ""

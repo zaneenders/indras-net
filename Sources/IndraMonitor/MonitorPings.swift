@@ -1,6 +1,6 @@
 import Foundation
 import IndraNode
-import Synchronization
+import Slate
 import TCPActorSystem
 
 struct ManualPing: Sendable {
@@ -31,35 +31,31 @@ struct ManualPing: Sendable {
   }
 }
 
-final class MonitorPings: Sendable {
-  private let requests: AsyncStream<NodeIdentity>
-  private let pending: AsyncStream<NodeIdentity>.Continuation
-  private let latest = Mutex<ManualPing?>(nil)
+@MainActor final class MonitorPings {
+  private let requests = ScreenSource<NodeIdentity>(policy: .ordered(capacity: 1))
+  let updates = ScreenSource<ManualPing>(policy: .latest)
+  private var latest: ManualPing?
 
-  init() {
-    (requests, pending) = AsyncStream.makeStream(bufferingPolicy: .bufferingOldest(1))
-  }
-
-  func read() -> ManualPing? { latest.withLock { $0 } }
+  func read() -> ManualPing? { latest }
 
   func ping(_ node: NodeIdentity) {
-    let accepted = latest.withLock { result in
-      guard result?.isPending != true else { return false }
-      result = ManualPing(target: node, outcome: .pending)
-      return true
-    }
-    if accepted { pending.yield(node) }
+    guard latest?.isPending != true else { return }
+    guard requests.publish(node) == .accepted else { return }
+    latest = ManualPing(target: node, outcome: .pending)
   }
 
-  func finish() { pending.finish() }
+  func finish() {
+    requests.finish()
+    updates.finish()
+  }
 
   func run(socket: String) async {
-    for await node in requests {
+    while let node = await requests.next() {
       guard !Task.isCancelled else { return }
       let outcome: ManualPing.Outcome
       do {
         let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
-        guard case .pong(let pong) = try await NodeControl.request(.ping(address.description), socket: socket) else {
+        guard case .pong(let pong) = try await monitorRequest(.ping(address.description), socket: socket) else {
           throw IndraError("Unexpected ping response")
         }
         outcome = .success(pong)
@@ -67,7 +63,9 @@ final class MonitorPings: Sendable {
         guard !Task.isCancelled else { return }
         outcome = .failure(String(String(describing: error).prefix(512)))
       }
-      latest.withLock { $0 = ManualPing(target: node, outcome: outcome) }
+      let result = ManualPing(target: node, outcome: outcome)
+      latest = result
+      updates.publish(result)
     }
   }
 }

@@ -30,7 +30,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
     .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0"),
     .package(url: "https://github.com/apple/swift-collections.git", from: "1.7.6"),
-    .package(url: "ssh://git@github.com/zaneenders/slate.git", revision: "e9d88f19f19eb167bd232e6bbfd5e14c7792682a")
+    .package(url: "ssh://git@github.com/zaneenders/slate.git", revision: "3ea077821bbdd1bbb51e0cc10430302421be6e6c")
   ],
   targets: [
     .target(

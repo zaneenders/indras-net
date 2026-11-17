@@ -1,34 +1,16 @@
 import Foundation
 import IndraNode
+import Observation
 import Slate
-import Synchronization
 import TCPActorSystem
 
-public func runMonitor(socket: String) async throws {
-  let inbox = MonitorInbox()
-  let pings = MonitorPings()
-  let poller = Task.detached(priority: .utility) { await poll(socket: socket, inbox: inbox) }
-  let pinger = Task.detached(priority: .utility) { await pings.run(socket: socket) }
+@MainActor public func runMonitor(socket: String) async throws {
+  var screen = MonitorScreen(socket: socket)
+  let session = ScreenSession(maximumOutputBytes: 4 * 1_048_576, taskCapacity: 4)
   do {
-    try await MainActor.run {
-      var screen = MonitorScreen()
-      screen.inbox = inbox
-      screen.pings = pings
-      try screen.run(inputFileDescriptor: 0, outputFileDescriptor: 1, signalHandling: .managed)
-    }
-    poller.cancel()
-    pings.finish()
-    pinger.cancel()
-    await poller.value
-    await pinger.value
-  } catch {
-    poller.cancel()
-    pings.finish()
-    pinger.cancel()
-    await poller.value
-    await pinger.value
-    throw error
-  }
+    try await session.run(
+      application: &screen, inputFileDescriptor: 0, outputFileDescriptor: 1, signalHandling: .managed)
+  } catch ScreenApplicationError.cancelled { return }
 }
 
 struct MonitorReading: Sendable {
@@ -39,55 +21,48 @@ struct MonitorReading: Sendable {
   var receivedAt: ContinuousClock.Instant?
 }
 
-final class MonitorInbox: Sendable {
-  private let latest = Mutex(MonitorReading())
-
-  func read() -> MonitorReading { latest.withLock { $0 } }
-
+private func poll(socket: String, readings: ScreenSource<MonitorReading>) async {
+  var reading = MonitorReading()
   func publish(status: NodeStatus?, snapshot: MonitorSnapshot?, error: String?) {
-    latest.withLock { reading in
-      reading.generation &+= 1
-      reading.status = status
-      reading.snapshot = snapshot
-      reading.error = error
-      reading.receivedAt = error == nil ? .now : reading.receivedAt
-    }
+    reading.generation &+= 1
+    reading.status = status
+    reading.snapshot = snapshot
+    reading.error = error
+    if error == nil { reading.receivedAt = .now }
+    readings.publish(reading)
   }
-}
-
-private func poll(socket: String, inbox: MonitorInbox) async {
   var legacy = false
   var iteration = 0
   while !Task.isCancelled {
     do {
       if !legacy || iteration % 5 == 0 {
         do {
-          guard case .monitor(let snapshot) = try await request(.monitor, socket: socket) else {
+          guard case .monitor(let snapshot) = try await monitorRequest(.monitor, socket: socket) else {
             throw IndraError("Unexpected monitor response")
           }
-          inbox.publish(status: snapshot.status, snapshot: snapshot, error: nil)
+          publish(status: snapshot.status, snapshot: snapshot, error: nil)
           legacy = false
         } catch {
           try Task.checkCancellation()
-          guard case .status(let status) = try await request(.status, socket: socket) else { throw error }
-          inbox.publish(status: status, snapshot: nil, error: nil)
+          guard case .status(let status) = try await monitorRequest(.status, socket: socket) else { throw error }
+          publish(status: status, snapshot: nil, error: nil)
           legacy = true
         }
       } else {
-        guard case .status(let status) = try await request(.status, socket: socket) else {
+        guard case .status(let status) = try await monitorRequest(.status, socket: socket) else {
           throw IndraError("Unexpected status response")
         }
-        inbox.publish(status: status, snapshot: nil, error: nil)
+        publish(status: status, snapshot: nil, error: nil)
       }
     } catch {
-      if !Task.isCancelled { inbox.publish(status: nil, snapshot: nil, error: String(describing: error)) }
+      if !Task.isCancelled { publish(status: nil, snapshot: nil, error: String(describing: error)) }
     }
     iteration &+= 1
     do { try await Task.sleep(for: .seconds(1)) } catch { return }
   }
 }
 
-private func request(_ request: ControlRequest, socket: String) async throws -> ControlReply {
+func monitorRequest(_ request: ControlRequest, socket: String) async throws -> ControlReply {
   try await withThrowingTaskGroup(of: ControlReply.self) { tasks in
     tasks.addTask { try await NodeControl.request(request, socket: socket) }
     tasks.addTask {
@@ -156,12 +131,30 @@ struct MonitorModel: Sendable {
   }
 }
 
-struct MonitorScreen: ScreenApplication, ~Sendable {
-  var inbox: MonitorInbox?
+@MainActor @Observable final class MonitorScreen: ScreenApplication {
+  private let socket: String?
   var pings: MonitorPings?
   var model = MonitorModel()
+  private var latest: MonitorReading?
 
-  init() {}
+  init(socket: String?) { self.socket = socket }
+
+  func start(in session: ScreenSession) {
+    guard let socket else { return }
+    let readings = ScreenSource<MonitorReading>(policy: .latest)
+    let pings = MonitorPings()
+    self.pings = pings
+    precondition(
+      session.consume(readings, at: 0) { [self] reading in
+        latest = reading
+        model.apply(reading)
+      })
+    precondition(session.startTask(at: 1) { await poll(socket: socket, readings: readings) })
+    precondition(session.startTask(at: 2) { await pings.run(socket: socket) })
+    precondition(session.consume(pings.updates, at: 3) { [self] result in model.manualPing = result })
+  }
+
+  func stop() async { pings?.finish() }
 
   static var configuration: ScreenApplicationConfiguration {
     ScreenApplicationConfiguration(
@@ -171,13 +164,11 @@ struct MonitorScreen: ScreenApplication, ~Sendable {
       layoutBudget: MonitorView.layoutBudget)
   }
 
-  var tickInterval: Duration? { .milliseconds(200) }
+  var tickInterval: Duration? { .seconds(1) }
 
-  mutating func event(_ event: borrowing ScreenEvent, copyBuffer: inout CopyBuffer) -> ScreenUpdate {
+  func event(_ event: borrowing ScreenEvent, copyBuffer: inout CopyBuffer) -> ScreenUpdate {
     switch event {
     case .tick:
-      if let inbox { model.apply(inbox.read()) }
-      model.manualPing = pings?.read()
       return .redraw
     case .key(let key, let modifiers):
       if key == .control(.c) || (key == .character("c") && modifiers.contains(.control)) { return .quit }
@@ -194,7 +185,7 @@ struct MonitorScreen: ScreenApplication, ~Sendable {
         model.manualPing = pings.read()
       case .character(" "):
         model.paused.toggle()
-        if let inbox { model.apply(inbox.read()) }
+        if let latest { model.apply(latest) }
       default: return .none
       }
       return .redraw

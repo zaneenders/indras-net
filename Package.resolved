@@ -1,12 +1,12 @@
 {
-  "originHash" : "ee2cce87dc9f73091f87d397879d7aa66b3cb4d9025ef5417dd6726e65437ad7",
+  "originHash" : "c31a0ca3ffd113f2da58a941b0b3a04470b518d65fe12bf1e307ba422d7ab7f8",
   "pins" : [
     {
       "identity" : "slate",
       "kind" : "remoteSourceControl",
       "location" : "ssh://git@github.com/zaneenders/slate.git",
       "state" : {
-        "revision" : "e9d88f19f19eb167bd232e6bbfd5e14c7792682a"
+        "revision" : "3ea077821bbdd1bbb51e0cc10430302421be6e6c"
       }
     },
     {
