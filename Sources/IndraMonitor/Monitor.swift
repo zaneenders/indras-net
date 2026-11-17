@@ -159,7 +159,7 @@ struct MonitorModel: Sendable {
 struct MonitorScreen: ScreenApplication, ~Sendable {
   var inbox: MonitorInbox?
   var pings: MonitorPings?
-  let drawing = MonitorDrawing()
+  var model = MonitorModel()
 
   init() {}
 
@@ -168,7 +168,7 @@ struct MonitorScreen: ScreenApplication, ~Sendable {
       maximumSize: TerminalSize(columns: 320, rows: 120), viewportOverflow: .clip,
       mouseTracking: false, enhancedKeyboard: true, kittyGraphicsQueryID: nil,
       capabilities: TerminalCapabilities(color: .trueColor, unicode: .grapheme), maximumPasteBytes: 1024,
-      layoutBudget: LayoutBudget(nodeCapacity: 32, maximumBlockVisits: 128))
+      layoutBudget: MonitorView.layoutBudget)
   }
 
   var tickInterval: Duration? { .milliseconds(200) }
@@ -176,25 +176,25 @@ struct MonitorScreen: ScreenApplication, ~Sendable {
   mutating func event(_ event: borrowing ScreenEvent, copyBuffer: inout CopyBuffer) -> ScreenUpdate {
     switch event {
     case .tick:
-      if let inbox { drawing.model.apply(inbox.read()) }
-      drawing.model.manualPing = pings?.read()
+      if let inbox { model.apply(inbox.read()) }
+      model.manualPing = pings?.read()
       return .redraw
     case .key(let key, let modifiers):
       if key == .control(.c) || (key == .character("c") && modifiers.contains(.control)) { return .quit }
       switch key {
       case .character("q"): return .quit
       case .escape:
-        if drawing.model.showDetails { drawing.model.showDetails = false } else { return .quit }
-      case .up, .character("k"): drawing.model.move(-1)
-      case .down, .character("j"): drawing.model.move(1)
-      case .enter: drawing.model.showDetails.toggle()
+        if model.showDetails { model.showDetails = false } else { return .quit }
+      case .up, .character("k"): model.move(-1)
+      case .down, .character("j"): model.move(1)
+      case .enter: model.showDetails.toggle()
       case .character("p"), .character("P"):
-        guard let node = drawing.model.selected?.node, let pings else { return .none }
+        guard let node = model.selected?.node, let pings else { return .none }
         pings.ping(node)
-        drawing.model.manualPing = pings.read()
+        model.manualPing = pings.read()
       case .character(" "):
-        drawing.model.paused.toggle()
-        if let inbox { drawing.model.apply(inbox.read()) }
+        model.paused.toggle()
+        if let inbox { model.apply(inbox.read()) }
       default: return .none
       }
       return .redraw
@@ -203,6 +203,6 @@ struct MonitorScreen: ScreenApplication, ~Sendable {
   }
 
   borrowing func render(in size: TerminalSize) -> some Block {
-    Canvas(drawing).frame(width: .fill, height: .fill, alignment: .topLeading)
+    MonitorView(model: model, size: size)
   }
 }

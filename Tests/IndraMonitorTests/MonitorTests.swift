@@ -11,15 +11,15 @@ struct MonitorTests {
     var screen = MonitorScreen()
     let pings = MonitorPings()
     screen.pings = pings
-    screen.drawing.model.apply(
+    screen.model.apply(
       reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, generation: 1))
-    screen.drawing.model.paused = true
+    screen.model.paused = true
     var copyBuffer = CopyBuffer()
     #expect(screen.event(.key(.character("p"), modifiers: []), copyBuffer: &copyBuffer) == .redraw)
     let original = try #require(pings.read())
     #expect(original.isPending)
     #expect(original.target.endpoint.port == 7332)
-    screen.drawing.model.move(1)
+    screen.model.move(1)
     _ = screen.event(.key(.character("P"), modifiers: [.shift]), copyBuffer: &copyBuffer)
     #expect(pings.read()?.target == original.target)
     let socket = "/tmp/indra-missing-\(UUID().uuidString).sock"
@@ -27,17 +27,17 @@ struct MonitorTests {
     do {
       try await waitForPing(pings)
       _ = screen.event(.tick(elapsed: .milliseconds(200)), copyBuffer: &copyBuffer)
-      if case .failure = screen.drawing.model.manualPing?.outcome {
+      if case .failure = screen.model.manualPing?.outcome {
       } else {
         Issue.record("Expected the daemon connection failure to be shown")
       }
-      #expect(screen.drawing.model.paused)
-      #expect(screen.drawing.model.generation == 1)
+      #expect(screen.model.paused)
+      #expect(screen.model.generation == 1)
       #expect(pings.read()?.target == original.target)
       _ = screen.event(.key(.character("p"), modifiers: []), copyBuffer: &copyBuffer)
       try await waitForPing(pings)
       #expect(pings.read()?.target.name == "king-dog")
-      #expect(screen.drawing.model.status?.members.first?.state == .alive)
+      #expect(screen.model.status?.members.first?.state == .alive)
       pings.finish()
       await worker.value
     } catch {
@@ -49,20 +49,20 @@ struct MonitorTests {
   }
 
   @Test func pingResultIsVisibleWithOlderDaemonsAndDistinguishesProcessReplacement() throws {
-    let drawing = MonitorDrawing()
+    var model = MonitorModel()
     let status = fixtureStatus(process: UUID())
-    drawing.model.apply(MonitorReading(generation: 1, status: status, snapshot: nil, error: nil, receivedAt: .now))
-    let selected = try #require(drawing.model.selected?.node)
+    model.apply(MonitorReading(generation: 1, status: status, snapshot: nil, error: nil, receivedAt: .now))
+    let selected = try #require(model.selected?.node)
     let replacement = NodeIdentity(
       id: selected.id, name: selected.name,
       endpoint: ActorEndpoint(host: selected.endpoint.host, port: selected.endpoint.port, node: UUID()), build: nil)
-    drawing.model.manualPing = ManualPing(
+    model.manualPing = ManualPing(
       target: selected, outcome: .success(PingResult(node: replacement, milliseconds: 12.34)))
-    let text = try render(drawing, size: TerminalSize(columns: 140, rows: 42))
+    let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
     #expect(text.contains("P ping"))
     #expect(text.contains("PONG studio 127.0.0.1:7332: 12.34 ms (different process replied)"))
     #expect(text.contains("Update daemon to enable probe telemetry."))
-    #expect(drawing.model.status?.members.first?.node.endpoint == selected.endpoint)
+    #expect(model.status?.members.first?.node.endpoint == selected.endpoint)
   }
 
   @Test func ratesUseDaemonTimeAndResetAfterRestart() {
@@ -104,11 +104,11 @@ struct MonitorTests {
     TerminalSize(columns: 60, rows: 22), TerminalSize(columns: 80, rows: 24), TerminalSize(columns: 140, rows: 42)
   ])
   func rendersMembershipAndBuildsAtSupportedSizes(size: TerminalSize) throws {
-    let drawing = MonitorDrawing()
-    drawing.model.apply(
+    var model = MonitorModel()
+    model.apply(
       reading(status: fixtureStatus(process: UUID()), uptime: 12, inbound: 6, outbound: 9, generation: 1))
-    drawing.model.move(2)
-    let text = try render(drawing, size: size)
+    model.move(2)
+    let text = try render(model, size: size)
     #expect(text.contains("INDRA / CLUSTER MONITOR"))
     #expect(text.contains("LIVE"))
     #expect(text.contains("tower"))
@@ -116,15 +116,67 @@ struct MonitorTests {
     #expect(text.contains("dirty"))
     #expect(text.contains("RECENT ACTIVITY"))
     #expect(text.contains("Q quit"))
-    drawing.model.showDetails = true
-    let details = try render(drawing, size: size)
+    model.showDetails = true
+    let details = try render(model, size: size)
     #expect(details.contains("SELECTED PEER"))
     #expect(details.contains("Build:"))
   }
 
   @Test func smallTerminalShowsResizeInstructions() throws {
-    let text = try render(MonitorDrawing(), size: TerminalSize(columns: 40, rows: 12))
+    let text = try render(MonitorModel(), size: TerminalSize(columns: 40, rows: 12))
     #expect(text.contains("Resize to at least 60"))
+    #expect(text.contains("Q quit"))
+  }
+
+  @Test func maximumViewportKeepsScrolledSelectionAndActivityWithinTheLayoutBudget() throws {
+    let original = fixtureStatus(process: UUID())
+    let peers = (0..<256).map { index in
+      Member(
+        node: NodeIdentity(
+          id: UUID(), name: "peer-\(index)",
+          endpoint: ActorEndpoint(host: "127.0.0.1", port: 10_000 + index, node: UUID()), build: .current),
+        state: .alive)
+    }
+    let status = NodeStatus(
+      node: original.node, cluster: original.cluster, members: peers,
+      seeds: [], configurationError: "Test configuration error", discoveryErrors: [:])
+    let events = (0..<128).map { index in
+      ProbeEvent(
+        id: UInt64(index), uptimeSeconds: 1, direction: .inbound, kind: .ack,
+        peer: PeerAddress(host: "127.0.0.1", port: 7332), target: nil, sequenceNumber: UInt32(index),
+        gossipMembers: 3, roundTripMilliseconds: 1, error: nil)
+    }
+    let changes = peers.suffix(2).map {
+      MembershipChange(uptimeSeconds: 1, node: $0.node, previous: .suspect, current: .alive)
+    }
+    let snapshot = MonitorSnapshot(
+      status: status, uptimeSeconds: 10, protocolPeriod: 1, localHealthMultiplier: 0,
+      probeIntervalMilliseconds: 3000, requestTimeoutMilliseconds: 2000,
+      outbound: ProbeTotals(), inbound: ProbeTotals(), inFlight: 0, events: events, changes: changes)
+    var model = MonitorModel()
+    model.apply(MonitorReading(generation: 1, status: status, snapshot: snapshot, error: nil, receivedAt: .now))
+    model.move(255)
+    model.manualPing = ManualPing(target: peers[255].node, outcome: .pending)
+    let text = try render(model, size: MonitorScreen.configuration.maximumSize)
+    #expect(text.contains("peer-255"))
+    #expect(!text.contains("peer-0 "))
+    #expect(text.contains("SELECTED PEER"))
+    #expect(text.contains("PING peer-255"))
+    #expect(text.contains("Test configuration error"))
+    #expect(text.contains("gossip=3"))
+    #expect(text.contains("Q quit"))
+  }
+
+  @Test func longDaemonErrorsAreClippedWithoutRejectingTheDSLLayout() throws {
+    var model = MonitorModel()
+    model.apply(reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, generation: 1))
+    model.apply(
+      MonitorReading(
+        generation: 2, status: nil, snapshot: nil,
+        error: String(repeating: "e\u{301}", count: 5000), receivedAt: .now))
+    let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
+    #expect(text.contains("DISCONNECTED"))
+    #expect(text.contains("STALE VIEW:"))
     #expect(text.contains("Q quit"))
   }
 }
@@ -137,9 +189,9 @@ private func waitForPing(_ pings: MonitorPings) async throws {
   }
 }
 
-private func render(_ drawing: MonitorDrawing, size: TerminalSize) throws -> String {
-  var surface = try Surface(maximumSize: size, layoutBudget: LayoutBudget(nodeCapacity: 32, maximumBlockVisits: 128))
-  try surface.render(size: size, render: { frame in drawing.paint(in: &frame) })
+private func render(_ model: MonitorModel, size: TerminalSize) throws -> String {
+  var surface = try Surface(maximumSize: size, layoutBudget: MonitorScreen.configuration.layoutBudget)
+  try surface.render(size: size, content: { MonitorView(model: model, size: size) })
   var text = ""
   for y in 0..<size.rows {
     for x in 0..<size.columns {
