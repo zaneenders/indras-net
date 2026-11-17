@@ -9,7 +9,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1)))
 struct MembershipCachingTests {
   @Test(arguments: [false, true])
-  func pingsAndDiscoveryReuseLookupAndRefreshReplacedActors(replaceService: Bool) async throws {
+  func pingsReuseLookupAndRefreshReplacedActors(replaceService: Bool) async throws {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let endpoint = ActorEndpoint(
       host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
@@ -23,11 +23,11 @@ struct MembershipCachingTests {
         #expect(first.node == peer)
         #expect(try await runtime.ping(peer.name).node == peer)
         #expect(try await runtime.ping(peer.id.uuidString).node == peer)
-        await runtime.discover()
+        _ = try await runtime.ping(peer.name)
         let counts = try await server.value
         #expect(counts.lookups == (replaceService ? 2 : 1))
         #expect(counts.calls == (replaceService ? 5 : 4))
-        #expect(await runtime.status().members.first?.state == .reachable)
+        #expect(await runtime.status().members.first?.state == .alive)
       }
     } catch {
       server.cancel()
@@ -57,7 +57,7 @@ struct MembershipCachingTests {
           let members = await client.status().members
           #expect(members.count == 1)
           #expect(members.first?.node == current)
-          #expect(members.first?.state == .reachable)
+          #expect(members.first?.state == .alive)
         }
       }
     }
@@ -95,7 +95,13 @@ private func serveMembership(listener: Listener, peer: NodeIdentity, exchanges: 
             try await output.write(WireMessage.reply(invocation.requestID, .systemError(.unknownActor)).frame())
             continue
           }
-          let response = MembershipExchange(version: 1, cluster: "cache-tests", node: peer, peers: [])
+          let request = try JSONDecoder().decode(MembershipRequest.self, from: #require(invocation.arguments.first))
+          let response = MembershipReply(
+            version: 1, cluster: "cache-tests", node: peer,
+            response: .ack(
+              target: peer, incarnation: 0,
+              payload: [GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)],
+              sequenceNumber: request.probe.sequenceNumber))
           try await output.write(
             WireMessage.reply(invocation.requestID, .value(try JSONEncoder().encode(response))).frame())
           completed += 1
@@ -115,8 +121,8 @@ private func withTestRuntime(
 ) async throws {
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
-    callTimeout: .milliseconds(configuration.requestTimeoutMilliseconds),
-    connectTimeout: .milliseconds(Int64(configuration.requestTimeoutMilliseconds)))
+    callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
+    connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
   let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
   do {
     try await runtime.start()

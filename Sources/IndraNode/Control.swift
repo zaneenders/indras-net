@@ -56,8 +56,8 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
   defer { withExtendedLifetime(lease) {} }
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
-    callTimeout: .milliseconds(configuration.requestTimeoutMilliseconds),
-    connectTimeout: .milliseconds(Int64(configuration.requestTimeoutMilliseconds)))
+    callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
+    connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
   let runtime = NodeRuntime(configuration: configuration, configurationPath: configurationPath, system: system)
   do {
     try await runtime.start()
@@ -68,7 +68,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
     onReady(await runtime.status())
     do {
       try await withThrowingTaskGroup(of: Void.self) { tasks in
-        tasks.addTask { try await runtime.runDiscovery() }
+        tasks.addTask { try await runtime.runMembership() }
         tasks.addTask {
           while !Task.isCancelled {
             try? await runtime.reload()

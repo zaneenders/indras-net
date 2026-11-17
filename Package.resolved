@@ -1,5 +1,5 @@
 {
-  "originHash" : "98e9232d8c4dbe3370b47226874cd54e5ed921e0c0cb9cf5095df6ccffda9a71",
+  "originHash" : "4983ea76099ec95bc6ef2db938eeb87f298bb46680b924905adfa0251221b7e0",
   "pins" : [
     {
       "identity" : "swift-argument-parser",
@@ -29,6 +29,15 @@
       }
     },
     {
+      "identity" : "swift-cluster-membership",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-cluster-membership.git",
+      "state" : {
+        "revision" : "0793910f7686d62627f57f3450592b770ddc4987",
+        "version" : "0.4.0"
+      }
+    },
+    {
       "identity" : "swift-collections",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections.git",
@@ -44,6 +53,15 @@
       "state" : {
         "revision" : "e3da04078777e6a1b72ce19981fbd6539b0847d8",
         "version" : "1.17.0"
+      }
+    },
+    {
+      "identity" : "swift-metrics",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-metrics",
+      "state" : {
+        "revision" : "2c13e7385089ea705ee3009ea6cbe41db843930e",
+        "version" : "2.13.0"
       }
     },
     {

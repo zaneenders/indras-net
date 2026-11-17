@@ -26,13 +26,16 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.105.0"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
     .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.13.0"),
-    .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0")
+    .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
+    .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0")
   ],
   targets: [
     .target(
       name: "IndraNode",
       dependencies: [
         "Networking", "TCPActorSystem",
+        .product(name: "SWIM", package: "swift-cluster-membership"),
+        .product(name: "ClusterMembership", package: "swift-cluster-membership"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "SystemPackage", package: "swift-system"),
         .product(name: "UnixSignals", package: "swift-service-lifecycle")

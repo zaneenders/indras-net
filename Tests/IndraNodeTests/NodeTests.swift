@@ -8,11 +8,12 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct NodeTests {
-  @Test func unavailableSeedRetriesAndRestartKeepsStableNodeIdentity() async throws {
+  @Test(arguments: ["127.0.0.1", "localhost"])
+  func unavailableSeedRetriesAndRestartKeepsStableNodeIdentity(seedHost: String) async throws {
     let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
     let port = try #require(reservation.channel.localAddress?.port)
     try await reservation.channel.close()
-    let address = PeerAddress(host: "127.0.0.1", port: port)
+    let address = PeerAddress(host: seedHost, port: port)
     let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: [address]))
     do {
       try await eventually { try await first.status().discoveryErrors[address.description] != nil }
@@ -21,7 +22,7 @@ struct NodeTests {
       let second = try await TestDaemon.start(configuration: configuration)
       do {
         try await eventually {
-          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .reachable
+          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .alive
         }
         try await second.stop()
         try await eventually {
@@ -33,7 +34,7 @@ struct NodeTests {
           #expect(replacement.identity.endpoint.node != second.identity.endpoint.node)
           try await eventually {
             let member = try await first.status().members.first { $0.node.id == replacement.identity.id }
-            return member?.state == .reachable && member?.node.endpoint == replacement.identity.endpoint
+            return member?.state == .alive && member?.node.endpoint == replacement.identity.endpoint
           }
           #expect(try await first.status().members.count == 1)
           try await replacement.stop()
@@ -58,7 +59,7 @@ struct NodeTests {
       var configuration = makeConfiguration(name: "same", seeds: [first.address])
       let second = try await TestDaemon.start(configuration: configuration)
       do {
-        try await eventually { try await first.status().members.first?.state == .reachable }
+        try await eventually { try await first.status().members.first?.state == .alive }
         await #expect(throws: IndraError.self) {
           try await NodeControl.request(.ping("same"), socket: first.socket)
         }
@@ -90,7 +91,7 @@ struct NodeTests {
     }
   }
 
-  @Test func referralsStayUnknownUntilDirectContactAndInvalidExchangesAreAtomic() async throws {
+  @Test func gossipMembershipIsSeparateFromDirectReachabilityAndInvalidMessagesAreAtomic() async throws {
     let configuration = makeConfiguration(name: "first", seeds: [])
     let system = try await TCPActorSystem(
       host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(1), connectTimeout: .seconds(1))
@@ -99,14 +100,27 @@ struct NodeTests {
       let peer = NodeIdentity(
         id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()))
       _ = try await runtime.receive(
-        MembershipExchange(version: 1, cluster: configuration.cluster, node: peer, peers: []))
-      #expect(await runtime.status().members.first?.state == .unknown)
+        MembershipRequest(
+          version: 1, cluster: configuration.cluster, node: peer,
+          probe: .ping(
+            sequenceNumber: 1,
+            payload: [
+              GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)
+            ])))
+      #expect(await runtime.status().members.first?.state == .alive)
+      #expect(await runtime.status().members.first?.reachability == .unknown)
       #expect(await runtime.status().members.first?.lastSeen == nil)
       let invalid = NodeIdentity(
         id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()))
       await #expect(throws: IndraError.self) {
         try await runtime.receive(
-          MembershipExchange(version: 1, cluster: configuration.cluster, node: peer, peers: [invalid]))
+          MembershipRequest(
+            version: 1, cluster: configuration.cluster, node: peer,
+            probe: .ping(
+              sequenceNumber: 2,
+              payload: [
+                GossipMember(node: invalid, status: .alive(0), protocolPeriod: 0)
+              ])))
       }
       #expect(await runtime.status().members.count == 1)
       await runtime.shutdown()
@@ -128,7 +142,7 @@ struct NodeTests {
           for daemon in [first, second, third] {
             try await eventually {
               let status = try await daemon.status()
-              return status.members.filter { $0.state == .reachable }.count == 2
+              return status.members.filter { $0.state == .alive }.count == 2
             }
           }
           guard case .pong(let ping) = try await NodeControl.request(.ping("third"), socket: first.socket) else {
@@ -252,7 +266,7 @@ struct NodeTests {
         try configuration.save(path: first.config, overwrite: true)
         _ = try await NodeControl.request(.reload, socket: first.socket)
         try await eventually {
-          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .reachable
+          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .alive
         }
         try await second.stop()
       } catch {

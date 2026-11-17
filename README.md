@@ -11,7 +11,7 @@ swift run indra daemon
 swift run indra init --name beta --listen-host 0.0.0.0 --advertised-host 192.168.1.11 --seed 192.168.1.10:7331
 # Run that machine's daemon in another terminal or under launchd/systemd.
 swift run indra daemon
-# List local and discovered nodes.
+# List SWIM members and direct TCP reachability.
 swift run indra nodes
 # Ping by node name, UUID, or host:port.
 swift run indra ping beta

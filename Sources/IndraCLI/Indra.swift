@@ -77,7 +77,7 @@ struct Status: AsyncParsableCommand {
 
 struct Nodes: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    abstract: "List known nodes and their directly observed reachability.")
+    abstract: "List SWIM members and their directly observed TCP reachability.")
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
@@ -88,12 +88,13 @@ struct Nodes: AsyncParsableCommand {
       try printJSON(status)
       return
     }
-    print("ID  NAME  ADDRESS  STATE")
-    print("\(status.node.id)  \(status.node.name)  \(status.node.endpoint.host):\(status.node.endpoint.port)  local")
+    print("ID  NAME  ADDRESS  MEMBERSHIP  TCP")
+    print(
+      "\(status.node.id)  \(status.node.name)  \(status.node.endpoint.host):\(status.node.endpoint.port)  local  local")
     for member in status.members {
       let node = member.node
       let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
-      print("\(node.id)  \(node.name)  \(address)  \(member.state.rawValue)")
+      print("\(node.id)  \(node.name)  \(address)  \(member.state.rawValue)  \(member.reachability.rawValue)")
     }
   }
 }

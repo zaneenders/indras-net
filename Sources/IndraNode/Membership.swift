@@ -1,5 +1,6 @@
-import Distributed
+import ClusterMembership
 public import Foundation
+import SWIM
 public import TCPActorSystem
 
 public struct NodeIdentity: Codable, Hashable, Sendable {
@@ -16,9 +17,11 @@ public struct NodeIdentity: Codable, Hashable, Sendable {
 }
 
 public struct Member: Codable, Sendable {
-  public enum State: String, Codable, Sendable { case unknown, reachable, unreachable }
+  public enum State: String, Codable, Sendable { case alive, suspect, unreachable, dead }
+  public enum Reachability: String, Codable, Sendable { case unknown, reachable, unreachable }
   public let node: NodeIdentity
   public var state: State
+  public var reachability: Reachability
   public var lastSeen: Double?
   public var error: String?
 }
@@ -37,54 +40,78 @@ public struct PingResult: Codable, Sendable {
   public let milliseconds: Double
 }
 
-struct MembershipExchange: Codable, Sendable {
-  let version: Int
-  let cluster: String
-  let node: NodeIdentity
-  let peers: [NodeIdentity]
+private enum MembershipWork: Sendable {
+  case bootstrap(PeerAddress)
+  case ping(ClusterMembership.Node, SWIM.GossipPayload, Duration, UInt32)
+  case indirect(SWIM.Instance.SendPingRequestDirective)
 }
 
-distributed actor MembershipService {
-  typealias ActorSystem = TCPActorSystem
-  static let serviceName = "indra.membership.v1"
-  private let runtime: NodeRuntime
-
-  init(actorSystem: TCPActorSystem, runtime: NodeRuntime) {
-    self.actorSystem = actorSystem
-    self.runtime = runtime
-  }
-
-  distributed func exchange(_ message: MembershipExchange) async throws -> MembershipExchange {
-    try await runtime.receive(message)
-  }
+private struct Observation: Sendable {
+  var reachability: Member.Reachability
+  var lastSeen: Double?
+  var error: String?
 }
 
 public actor NodeRuntime {
   public let system: TCPActorSystem
   private let configurationPath: String
   private var configuration: NodeConfiguration
-  private var members: [UUID: Member] = [:]
+  private var swim: SWIM.Instance
+  private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
+  private var observations: [ClusterMembership.Node: Observation] = [:]
   private var membershipServices: [PeerAddress: MembershipService] = [:]
-  private var hints: Set<PeerAddress> = []
   private var configurationError: String?
   private var discoveryErrors: [String: String] = [:]
+  private let work: AsyncStream<MembershipWork>
+  private let pendingWork: AsyncStream<MembershipWork>.Continuation
+  private var bootstrapping: Set<PeerAddress> = []
+  private var seedOffset = 0
   private var stopped = false
-  private var discovering = false
-  private var discoveryRequested = false
-  private var discoverySleep: Task<Void, any Error>?
+  private var membershipRequested = false
+  private var membershipSleep: Task<Void, any Error>?
 
   public init(configuration: NodeConfiguration, configurationPath: String, system: TCPActorSystem) {
     self.configuration = configuration
     self.configurationPath = configurationPath
     self.system = system
+    var settings = SWIM.Settings()
+    settings.probeInterval = .milliseconds(configuration.probeIntervalMilliseconds)
+    settings.pingTimeout = .milliseconds(configuration.requestTimeoutMilliseconds)
+    // Membership is informational: unreachable peers can recover after a partition.
+    settings.unreachability = .enabled
+    let node = NodeIdentity(id: configuration.id, name: configuration.name, endpoint: system.endpoint)
+    self.swim = SWIM.Instance(settings: settings, myself: node.swimNode)
+    (work, pendingWork) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
   }
 
   public func start() throws {
     try system.publish(MembershipService(actorSystem: system, runtime: self), as: MembershipService.serviceName)
   }
 
+  static func transportTimeoutMilliseconds(configuration: NodeConfiguration) -> Int64 {
+    Int64(configuration.requestTimeoutMilliseconds) * Int64(1 + SWIM.Settings().lifeguard.maxLocalHealthMultiplier)
+  }
+
   public func status() -> NodeStatus {
-    NodeStatus(
+    var members: [UUID: Member] = [:]
+    for member in swim.members where member.node != identity.swimNode {
+      guard let node = identities[member.node] else { continue }
+      let observation = observations[member.node]
+      let state: Member.State
+      switch member.status {
+      case .alive: state = .alive
+      case .suspect: state = .suspect
+      case .unreachable: state = .unreachable
+      case .dead: state = .dead
+      }
+      if let current = members[node.id], state == .dead || (current.lastSeen ?? 0) > (observation?.lastSeen ?? 0) {
+        continue
+      }
+      members[node.id] = Member(
+        node: node, state: state, reachability: observation?.reachability ?? .unknown,
+        lastSeen: observation?.lastSeen, error: observation?.error)
+    }
+    return NodeStatus(
       node: identity, cluster: configuration.cluster,
       members: members.values.sorted { $0.node.id.uuidString < $1.node.id.uuidString },
       seeds: configuration.seeds, configurationError: configurationError, discoveryErrors: discoveryErrors)
@@ -96,7 +123,11 @@ public actor NodeRuntime {
       guard configuration.canReload(updated) else {
         throw IndraError("Identity, cluster, listen/advertised address, port, and timeout changes require a restart")
       }
-      apply(updated)
+      if updated != configuration {
+        configuration = updated
+        membershipRequested = true
+        membershipSleep?.cancel()
+      }
       configurationError = nil
     } catch {
       configurationError = String(describing: error)
@@ -111,13 +142,13 @@ public actor NodeRuntime {
       var updated = configuration
       updated.seeds.append(address)
       try updated.save(path: configurationPath, overwrite: true)
-      apply(updated)
+      try reload()
     }
     return try await contact(address)
   }
 
   public func ping(_ target: String) async throws -> PingResult {
-    let matches = ([identity] + members.values.map(\.node)).filter {
+    let matches = ([identity] + status().members.map(\.node)).filter {
       $0.id.uuidString.lowercased() == target.lowercased() || $0.name == target
     }
     if matches.count > 1 { throw IndraError("Ambiguous node name; use its UUID or host:port") }
@@ -130,156 +161,361 @@ public actor NodeRuntime {
     return try await contact(PeerAddress(target))
   }
 
-  public func discover() async {
-    guard !stopped, !discovering else { return }
-    discovering = true
-    defer { discovering = false }
-    let targets = Set(configuration.seeds).union(hints).union(members.values.map { $0.node.address })
-      .subtracting([identity.address])
-    // Bound concurrent probes so unavailable peers cannot serialize the whole sweep.
-    await withTaskGroup(of: Void.self) { tasks in
-      var pending = targets.makeIterator()
-      for _ in 0..<8 {
-        if let address = pending.next() { tasks.addTask { _ = try? await self.contact(address) } }
-      }
-      while await tasks.next() != nil {
-        if Task.isCancelled {
-          tasks.cancelAll()
-          break
+  public func runMembership() async throws {
+    try await withThrowingDiscardingTaskGroup { tasks in
+      tasks.addTask {
+        while !Task.isCancelled {
+          let delay = await self.tick()
+          try await self.waitForTick(delay)
         }
-        if let address = pending.next() { tasks.addTask { _ = try? await self.contact(address) } }
       }
-    }
-  }
-
-  public func runDiscovery() async throws {
-    while !stopped {
-      try Task.checkCancellation()
-      discoveryRequested = false
-      await discover()
-      guard !stopped else { return }
-      if discoveryRequested { continue }
-      let interval = configuration.probeIntervalMilliseconds
-      let sleep = Task { try await Task.sleep(for: .milliseconds(interval)) }
-      discoverySleep = sleep
-      await withTaskCancellationHandler {
-        _ = try? await sleep.value
-      } onCancel: {
-        sleep.cancel()
+      for await item in work {
+        try Task.checkCancellation()
+        tasks.addTask { await self.perform(item) }
       }
-      discoverySleep = nil
+      tasks.cancelAll()
     }
   }
 
   public func shutdown() async {
     stopped = true
-    discoverySleep?.cancel()
+    pendingWork.finish()
+    membershipSleep?.cancel()
     membershipServices.removeAll()
     await system.shutdown()
   }
 
-  func receive(_ message: MembershipExchange) throws -> MembershipExchange {
-    guard !stopped else { throw IndraError("Node is stopping") }
-    try validate(message)
-    learn(message.node)
-    for peer in message.peers { learn(peer) }
-    return exchange(excluding: message.node.endpoint)
+  func receive(_ message: MembershipRequest) async throws -> MembershipReply {
+    try validate(
+      version: message.version, cluster: message.cluster, sender: message.node, payload: message.probe.payload)
+    if case .pingRequest(let target, _, _) = message.probe {
+      try target.validate()
+      guard target.id != identity.id || target.endpoint == identity.endpoint else {
+        throw IndraError("Indirect probe targets a previous local process")
+      }
+    }
+    learn(sender: message.node, payload: message.probe.payload)
+    let response: MembershipResponse
+    switch message.probe {
+    case .ping(let sequenceNumber, let payload):
+      let directives = swim.onPing(
+        pingOrigin: message.node.swimNode,
+        payload: gossip(payload), sequenceNumber: sequenceNumber)
+      guard
+        let ack = try directives.compactMap({ directive -> MembershipResponse? in
+          if case .sendAck(_, let target, let incarnation, let payload, let sequenceNumber) = directive {
+            return .ack(
+              target: try identity(for: target), incarnation: incarnation,
+              payload: try wire(payload), sequenceNumber: sequenceNumber)
+          }
+          return nil
+        }).first
+      else { throw IndraError("SWIM did not acknowledge ping") }
+      response = ack
+    case .pingRequest(let target, let sequenceNumber, let payload):
+      identities[target.swimNode] = target
+      let directives = swim.onPingRequest(
+        target: target.swimNode, pingRequestOrigin: message.node.swimNode,
+        payload: gossip(payload), sequenceNumber: sequenceNumber)
+      var forwarded: MembershipResponse?
+      for directive in directives {
+        if case .sendPing(let node, let payload, let origin, let originSequence, let timeout, let number) = directive {
+          let result = await probe(node, payload: payload, timeout: timeout, sequenceNumber: number)
+          guard !stopped, !Task.isCancelled else { throw CancellationError() }
+          for reply in swim.onPingResponse(
+            response: result, pingRequestOrigin: origin,
+            pingRequestSequenceNumber: originSequence)
+          {
+            switch reply {
+            case .sendAck(_, let number, let node, let incarnation, let payload):
+              forwarded = .ack(
+                target: try identity(for: node), incarnation: incarnation,
+                payload: try wire(payload), sequenceNumber: number)
+            case .sendNack(_, let number, let node):
+              forwarded = .nack(target: try identity(for: node), sequenceNumber: number)
+            case .gossipProcessed: break
+            case .sendPingRequests(let directive): pendingWork.yield(.indirect(directive))
+            }
+          }
+        }
+      }
+      response = forwarded ?? .nack(target: target, sequenceNumber: sequenceNumber)
+    }
+    return MembershipReply(version: 1, cluster: configuration.cluster, node: identity, response: response)
   }
 
   private var identity: NodeIdentity {
     NodeIdentity(id: configuration.id, name: configuration.name, endpoint: system.endpoint)
   }
 
-  private func apply(_ updated: NodeConfiguration) {
-    guard configuration != updated else { return }
-    configuration = updated
-    discoveryRequested = true
-    discoverySleep?.cancel()
+  private func identity(for node: ClusterMembership.Node) throws -> NodeIdentity {
+    if node == identity.swimNode { return identity }
+    guard let identity = identities[node] else { throw IndraError("Missing SWIM peer identity") }
+    return identity
   }
 
-  private func exchange(excluding endpoint: ActorEndpoint) -> MembershipExchange {
-    let address = PeerAddress(host: endpoint.host, port: endpoint.port)
-    return MembershipExchange(
-      version: 1, cluster: configuration.cluster, node: identity,
-      peers: members.values.filter { $0.state == .reachable && $0.node.address != address }.map(\.node))
-  }
-
-  private func validate(_ message: MembershipExchange) throws {
-    guard message.version == 1, message.cluster == configuration.cluster else {
-      throw IndraError("Peer uses a different cluster or protocol version")
-    }
-    guard message.peers.count <= 256 else { throw IndraError("Too many peers in membership exchange") }
-    for node in [message.node] + message.peers {
-      try node.validate()
-      if node.id == identity.id, node.endpoint != identity.endpoint {
-        throw IndraError("Duplicate node ID; generate a separate configuration for each node")
+  private func tick() -> Duration {
+    guard !stopped else { return .zero }
+    // Retry bootstrap addresses; SWIM selects the established peers to probe.
+    let seeds = configuration.seeds
+    for offset in 0..<min(8, seeds.count) {
+      let address = seeds[(seedOffset + offset) % seeds.count]
+      let cachedEndpoint = membershipServices[address]?.id.endpoint
+      let known = swim.members.contains {
+        let sameAddress = $0.node.host == address.host && $0.node.port == address.port
+        let samePeer = cachedEndpoint != nil && identities[$0.node]?.endpoint == cachedEndpoint
+        return (sameAddress || samePeer) && ($0.status.isAlive || $0.status.isSuspect)
+      }
+      if address != identity.address, !known, bootstrapping.insert(address).inserted {
+        pendingWork.yield(.bootstrap(address))
       }
     }
+    if !seeds.isEmpty { seedOffset = (seedOffset + min(8, seeds.count)) % seeds.count }
+    var nextDelay = Duration.milliseconds(configuration.probeIntervalMilliseconds)
+    for directive in swim.onPeriodicPingTick() {
+      switch directive {
+      case .sendPing(let target, let payload, let timeout, let sequenceNumber):
+        pendingWork.yield(.ping(target, payload, timeout, sequenceNumber))
+      case .scheduleNextTick(let delay):
+        nextDelay =
+          delay * (Duration.milliseconds(configuration.probeIntervalMilliseconds) / swim.settings.probeInterval)
+      case .membershipChanged: break
+      }
+    }
+    return nextDelay
   }
 
-  private func learn(_ node: NodeIdentity) {
-    guard node.id != identity.id else { return }
-    if let current = members[node.id] {
-      if current.node.endpoint != node.endpoint, hints.count < 256 { hints.insert(node.address) }
-    } else if members.count < 256 {
-      members[node.id] = Member(node: node, state: .unknown, lastSeen: nil, error: nil)
+  private func waitForTick(_ delay: Duration) async throws {
+    if membershipRequested {
+      membershipRequested = false
+      return
     }
+    let sleep = Task { try await Task.sleep(for: delay) }
+    membershipSleep = sleep
+    await withTaskCancellationHandler {
+      _ = try? await sleep.value
+    } onCancel: {
+      sleep.cancel()
+    }
+    membershipSleep = nil
+    try Task.checkCancellation()
+  }
+
+  private func perform(_ item: MembershipWork) async {
+    guard !stopped, !Task.isCancelled else { return }
+    switch item {
+    case .bootstrap(let address):
+      defer { bootstrapping.remove(address) }
+      _ = try? await contact(address)
+    case .ping(let target, let payload, let timeout, let sequenceNumber):
+      let response = await probe(target, payload: payload, timeout: timeout, sequenceNumber: sequenceNumber)
+      guard !stopped, !Task.isCancelled else { return }
+      for directive in swim.onPingResponse(response: response, pingRequestOrigin: nil, pingRequestSequenceNumber: nil) {
+        if case .sendPingRequests(let directive) = directive { pendingWork.yield(.indirect(directive)) }
+      }
+    case .indirect(let directive): await probeIndirectly(directive)
+    }
+  }
+
+  private func probe(
+    _ target: ClusterMembership.Node, payload: SWIM.GossipPayload,
+    timeout: Duration, sequenceNumber: UInt32
+  ) async -> SWIM.PingResponse {
+    do {
+      let reply = try await request(
+        .ping(sequenceNumber: sequenceNumber, payload: wire(payload)),
+        address: PeerAddress(host: target.host, port: target.port), timeout: timeout)
+      return reply.response.swimResponse(excludingStaleIncarnationsOf: identity)
+    } catch {
+      return .timeout(target: target, pingRequestOrigin: nil, timeout: timeout, sequenceNumber: sequenceNumber)
+    }
+  }
+
+  private func probeIndirectly(_ directive: SWIM.Instance.SendPingRequestDirective) async {
+    guard let target = try? identity(for: directive.target) else { return }
+    let response = await withTaskGroup(of: SWIM.PingResponse.self) { tasks in
+      for detail in directive.requestDetails {
+        tasks.addTask { await self.indirectRequest(detail, target: target, timeout: directive.timeout) }
+      }
+      var firstAck: SWIM.PingResponse?
+      while let response = await tasks.next() {
+        if case .ack = response, firstAck == nil {
+          firstAck = response
+          // Apply the first ack immediately; allow the other probes to finish for Lifeguard accounting.
+          self.acceptIndirect(response, target: directive.target)
+        }
+      }
+      return firstAck
+    }
+    if response == nil, !stopped, !Task.isCancelled {
+      acceptIndirect(
+        .timeout(
+          target: directive.target, pingRequestOrigin: nil,
+          timeout: directive.timeout, sequenceNumber: 0), target: directive.target)
+    }
+  }
+
+  private func indirectRequest(
+    _ detail: SWIM.Instance.SendPingRequestDirective.PingRequestDetail,
+    target: NodeIdentity, timeout: Duration
+  ) async -> SWIM.PingResponse {
+    let response: SWIM.PingResponse
+    do {
+      let reply = try await request(
+        .pingRequest(
+          target: target, sequenceNumber: detail.sequenceNumber,
+          payload: wire(detail.payload)),
+        address: PeerAddress(
+          host: detail.peerToPingRequestThrough.host,
+          port: detail.peerToPingRequestThrough.port), timeout: timeout)
+      response = reply.response.swimResponse(excludingStaleIncarnationsOf: identity)
+    } catch {
+      response = .timeout(
+        target: target.swimNode, pingRequestOrigin: identity.swimNode,
+        timeout: timeout, sequenceNumber: detail.sequenceNumber)
+    }
+    if !stopped, !Task.isCancelled { _ = swim.onEveryPingRequestResponse(response, pinged: target.swimNode) }
+    return response
+  }
+
+  private func acceptIndirect(_ response: SWIM.PingResponse, target: ClusterMembership.Node) {
+    guard !stopped, !Task.isCancelled else { return }
+    _ = swim.onPingRequestResponse(response, pinged: target)
   }
 
   private func contact(_ address: PeerAddress) async throws -> PingResult {
+    let start = ContinuousClock.now
+    let sequenceNumber = swim.nextSequenceNumber()
+    let payload = try wire(swim.makeGossipPayload(to: nil))
+    let reply = try await request(
+      .ping(sequenceNumber: sequenceNumber, payload: payload), address: address,
+      timeout: .milliseconds(configuration.requestTimeoutMilliseconds))
+    guard case .ack = reply.response else { throw IndraError("Expected SWIM acknowledgement") }
+    _ = swim.onPingResponse(
+      response: reply.response.swimResponse(excludingStaleIncarnationsOf: identity), pingRequestOrigin: nil,
+      pingRequestSequenceNumber: nil)
+    let elapsed = start.duration(to: .now).components
+    return PingResult(
+      node: reply.node,
+      milliseconds: Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+  }
+
+  private func request(_ probe: MembershipProbe, address: PeerAddress, timeout: Duration) async throws
+    -> MembershipReply
+  {
     guard !stopped else { throw IndraError("Node is stopping") }
-    let clock = ContinuousClock()
-    let start = clock.now
     do {
-      let (remote, response) = try await exchangeMembership(with: address)
-      guard !stopped else { throw CancellationError() }
-      try validate(response)
-      guard response.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
-      for id in Array(members.keys) where id != response.node.id && members[id]?.node.address == response.node.address {
-        members[id]?.state = .unreachable
-        members[id]?.error = "Address now belongs to a different node"
+      let message = MembershipRequest(version: 1, cluster: configuration.cluster, node: identity, probe: probe)
+      let reply = try await withMembershipDeadline(timeout: timeout) {
+        try await self.exchange(message, address: address)
       }
-      if response.node.id != identity.id {
-        guard members[response.node.id] != nil || members.count < 256 else { throw IndraError("Peer registry is full") }
-        members[response.node.id] = Member(
-          node: response.node, state: .reachable, lastSeen: Date().timeIntervalSince1970, error: nil)
+      try Task.checkCancellation()
+      try validate(version: reply.version, cluster: reply.cluster, sender: reply.node, payload: reply.response.payload)
+      try reply.response.target.validate()
+      guard reply.response.sequenceNumber == probe.sequenceNumber else { throw IndraError("SWIM sequence mismatch") }
+      switch probe {
+      case .ping:
+        guard case .ack = reply.response, reply.response.target == reply.node else {
+          throw IndraError("Invalid direct SWIM acknowledgement")
+        }
+      case .pingRequest(let target, _, _):
+        guard reply.response.target.id == target.id, reply.response.target.endpoint == target.endpoint else {
+          throw IndraError("Invalid indirect SWIM acknowledgement")
+        }
       }
-      for node in response.peers { learn(node) }
-      if membershipServices[address] != nil || membershipServices.count < 256 {
-        membershipServices[address] = remote
-      }
-      hints.remove(address)
+      learn(sender: reply.node, payload: reply.response.payload)
+      observations[reply.node.swimNode] = Observation(
+        reachability: .reachable,
+        lastSeen: Date().timeIntervalSince1970, error: nil)
       discoveryErrors[address.description] = nil
-      let elapsed = start.duration(to: clock.now).components
-      return PingResult(
-        node: response.node, milliseconds: Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+      return reply
     } catch {
-      if !Task.isCancelled && !stopped {
+      if !Task.isCancelled, !stopped {
         let message = String(describing: error)
         if discoveryErrors.count < 512 || discoveryErrors[address.description] != nil {
           discoveryErrors[address.description] = message
         }
-        for id in Array(members.keys) where members[id]?.node.address == address {
-          members[id]?.state = .unreachable
-          members[id]?.error = message
+        for (node, identity) in identities where identity.address == address {
+          observations[node] = Observation(
+            reachability: .unreachable, lastSeen: observations[node]?.lastSeen, error: message)
         }
       }
       throw error
     }
   }
 
-  private func exchangeMembership(with address: PeerAddress) async throws -> (MembershipService, MembershipExchange) {
+  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws -> MembershipReply {
     if let remote = membershipServices[address] {
       do {
-        return (remote, try await remote.exchange(exchange(excluding: remote.id.endpoint)))
+        let reply = try await remote.probe(message)
+        guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
+        return reply
       } catch let error as RPCError where error == .disconnected || error == .unknownActor {
         if membershipServices[address]?.id == remote.id { membershipServices[address] = nil }
       }
     }
     try Task.checkCancellation()
-    guard !stopped else { throw IndraError("Node is stopping") }
     let remote = try await system.service(
-      named: MembershipService.serviceName, host: address.host, port: address.port, as: MembershipService.self)
-    return (remote, try await remote.exchange(exchange(excluding: remote.id.endpoint)))
+      named: MembershipService.serviceName, host: address.host,
+      port: address.port, as: MembershipService.self)
+    let reply = try await remote.probe(message)
+    guard reply.node.endpoint == remote.id.endpoint else { throw IndraError("Peer endpoint mismatch") }
+    if membershipServices.count < 256 || membershipServices[address] != nil { membershipServices[address] = remote }
+    return reply
+  }
+
+  private func validate(version: Int, cluster: String, sender: NodeIdentity, payload: [GossipMember]) throws {
+    guard !stopped else { throw IndraError("Node is stopping") }
+    guard version == 1, cluster == configuration.cluster else {
+      throw IndraError("Peer uses a different cluster or protocol version")
+    }
+    try sender.validate()
+    guard sender.id != identity.id || sender.endpoint == identity.endpoint else {
+      throw IndraError("Duplicate node ID; generate a separate configuration for each node")
+    }
+    guard payload.count <= 64 else { throw IndraError("Too many members in SWIM gossip") }
+    for member in payload {
+      try member.node.validate()
+      try member.status.validate()
+    }
+  }
+
+  private func learn(sender: NodeIdentity, payload: [GossipMember]) {
+    for member in payload where member.node.id != identity.id {
+      identities[member.node.swimNode] = member.node
+    }
+    identities[sender.swimNode] = sender
+  }
+
+  private func gossip(_ payload: [GossipMember]) -> SWIM.GossipPayload {
+    .membership(payload.filter { $0.node.id != identity.id || $0.node.endpoint == identity.endpoint }.map(\.member))
+  }
+
+  private func wire(_ payload: SWIM.GossipPayload) throws -> [GossipMember] {
+    var members: [SWIM.Member]
+    switch payload {
+    case .none: members = []
+    case .membership(let payload): members = payload
+    }
+    members.removeAll { $0.node == identity.swimNode }
+    members.append(swim.member)
+    return try members.map {
+      GossipMember(node: try identity(for: $0.node), status: GossipStatus($0.status), protocolPeriod: $0.protocolPeriod)
+    }
+  }
+}
+
+private func withMembershipDeadline<Value: Sendable>(
+  timeout: Duration, operation: @escaping @Sendable () async throws -> Value
+) async throws -> Value {
+  try await withThrowingTaskGroup(of: Value.self) { tasks in
+    tasks.addTask { try await operation() }
+    tasks.addTask {
+      try await Task.sleep(for: timeout)
+      throw IndraError("SWIM probe timed out")
+    }
+    defer { tasks.cancelAll() }
+    guard let result = try await tasks.next() else { throw CancellationError() }
+    return result
   }
 }
