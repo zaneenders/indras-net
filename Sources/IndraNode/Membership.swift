@@ -70,6 +70,8 @@ public actor NodeRuntime {
   private var discoveryErrors: [String: String] = [:]
   private var stopped = false
   private var discovering = false
+  private var discoveryRequested = false
+  private var discoverySleep: Task<Void, any Error>?
 
   public init(configuration: NodeConfiguration, configurationPath: String, system: TCPActorSystem) {
     self.configuration = configuration
@@ -94,7 +96,7 @@ public actor NodeRuntime {
       guard configuration.canReload(updated) else {
         throw IndraError("Identity, cluster, listen/advertised address, port, and timeout changes require a restart")
       }
-      configuration = updated
+      apply(updated)
       configurationError = nil
     } catch {
       configurationError = String(describing: error)
@@ -109,7 +111,7 @@ public actor NodeRuntime {
       var updated = configuration
       updated.seeds.append(address)
       try updated.save(path: configurationPath, overwrite: true)
-      configuration = updated
+      apply(updated)
     }
     return try await contact(address)
   }
@@ -151,14 +153,27 @@ public actor NodeRuntime {
   }
 
   public func runDiscovery() async throws {
-    while !Task.isCancelled {
+    while !stopped {
+      try Task.checkCancellation()
+      discoveryRequested = false
       await discover()
-      try await Task.sleep(for: .milliseconds(configuration.probeIntervalMilliseconds))
+      guard !stopped else { return }
+      if discoveryRequested { continue }
+      let interval = configuration.probeIntervalMilliseconds
+      let sleep = Task { try await Task.sleep(for: .milliseconds(interval)) }
+      discoverySleep = sleep
+      await withTaskCancellationHandler {
+        _ = try? await sleep.value
+      } onCancel: {
+        sleep.cancel()
+      }
+      discoverySleep = nil
     }
   }
 
   public func shutdown() async {
     stopped = true
+    discoverySleep?.cancel()
     membershipServices.removeAll()
     await system.shutdown()
   }
@@ -173,6 +188,13 @@ public actor NodeRuntime {
 
   private var identity: NodeIdentity {
     NodeIdentity(id: configuration.id, name: configuration.name, endpoint: system.endpoint)
+  }
+
+  private func apply(_ updated: NodeConfiguration) {
+    guard configuration != updated else { return }
+    configuration = updated
+    discoveryRequested = true
+    discoverySleep?.cancel()
   }
 
   private func exchange(excluding endpoint: ActorEndpoint) -> MembershipExchange {

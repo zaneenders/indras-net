@@ -1,10 +1,10 @@
-import Configuration
 import Foundation
 import NIOCore
 import Networking
 import Synchronization
 import SystemPackage
 import TCPActorSystem
+import UnixSignals
 
 #if canImport(Darwin)
 import Darwin
@@ -52,9 +52,6 @@ public enum NodeControl: Sendable {
 
 public func runNode(configurationPath: String, socket: String, onReady: @Sendable (NodeStatus) -> Void) async throws {
   let configuration = try NodeConfiguration.load(path: configurationPath)
-  let provider = try await ReloadingFileProvider<JSONSnapshot>(
-    snapshotType: JSONSnapshot.self, parsingOptions: .default, filePath: FilePath(configurationPath),
-    allowMissing: false, pollInterval: .seconds(1))
   let lease = try SocketLease(path: socket)
   defer { withExtendedLifetime(lease) {} }
   let system = try await TCPActorSystem(
@@ -67,15 +64,19 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
     defer { try? FileManager.default.removeItem(atPath: socket) }
     let connections = ControlConnections()
+    let reloadSignals = await UnixSignalsSequence(trapping: [.sighup])
     onReady(await runtime.status())
     do {
       try await withThrowingTaskGroup(of: Void.self) { tasks in
         tasks.addTask { try await runtime.runDiscovery() }
-        tasks.addTask { try await provider.run() }
         tasks.addTask {
-          try await provider.watchSnapshot { updates in
-            for await _ in updates { try? await runtime.reload() }
+          while !Task.isCancelled {
+            try? await runtime.reload()
+            try await Task.sleep(for: .seconds(1))
           }
+        }
+        tasks.addTask {
+          for await _ in reloadSignals { try? await runtime.reload() }
         }
         tasks.addTask {
           try await withTaskCancellationHandler {

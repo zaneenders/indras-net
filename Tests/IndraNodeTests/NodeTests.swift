@@ -199,6 +199,73 @@ struct NodeTests {
     }
   }
 
+  @Test(arguments: [false, true])
+  func automaticReloadReportsMalformedAndMissingFiles(removeFile: Bool) async throws {
+    let configuration = makeConfiguration(name: "first", seeds: [])
+    let daemon = try await TestDaemon.start(configuration: configuration)
+    do {
+      // Let the startup reload finish before testing failures in subsequent polling.
+      try await Task.sleep(for: .milliseconds(100))
+      if removeFile {
+        try FileManager.default.removeItem(atPath: daemon.config)
+      } else {
+        try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: daemon.config), options: .atomic)
+      }
+      try await eventually { try await daemon.status().configurationError != nil }
+      #expect(try await daemon.status().node == daemon.identity)
+      var restored = configuration
+      restored.name = "restored"
+      try restored.save(path: daemon.config, overwrite: true)
+      try await eventually {
+        let status = try await daemon.status()
+        return status.configurationError == nil && status.node.name == "restored"
+      }
+      #expect(try await daemon.status().node.endpoint == daemon.identity.endpoint)
+      try await daemon.stop()
+    } catch {
+      try? await daemon.stop()
+      throw error
+    }
+  }
+
+  @Test(arguments: [false, true])
+  func reloadWakesDiscoveryBeforePreviousIntervalExpires(changeInterval: Bool) async throws {
+    let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
+    let port = try #require(reservation.channel.localAddress?.port)
+    try await reservation.channel.close()
+    let address = PeerAddress(host: "127.0.0.1", port: port)
+    var configuration = makeConfiguration(name: "first", seeds: [address])
+    configuration.probeIntervalMilliseconds = 60_000
+    let first = try await TestDaemon.start(configuration: configuration)
+    do {
+      try await eventually { try await first.status().discoveryErrors[address.description] != nil }
+      var peerConfiguration = makeConfiguration(name: "second", seeds: [])
+      peerConfiguration.port = changeInterval ? port : 0
+      peerConfiguration.probeIntervalMilliseconds = 60_000
+      let second = try await TestDaemon.start(configuration: peerConfiguration)
+      do {
+        if changeInterval {
+          configuration.probeIntervalMilliseconds = 100
+        } else {
+          configuration.seeds = [second.address]
+        }
+        try configuration.save(path: first.config, overwrite: true)
+        _ = try await NodeControl.request(.reload, socket: first.socket)
+        try await eventually {
+          try await first.status().members.first { $0.node.id == second.identity.id }?.state == .reachable
+        }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
   @Test func joinPersistsSeedsAndWrongClustersAreRejected() async throws {
     let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
     do {
