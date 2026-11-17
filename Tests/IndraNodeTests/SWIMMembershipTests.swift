@@ -74,11 +74,11 @@ struct SWIMMembershipTests {
       let previous = NodeIdentity(
         id: current.id, name: current.name,
         endpoint: ActorEndpoint(
-          host: current.endpoint.host, port: current.endpoint.port, node: UUID()))
+          host: current.endpoint.host, port: current.endpoint.port, node: UUID()), build: nil)
       let peer = NodeIdentity(
         id: UUID(), name: "peer",
         endpoint: ActorEndpoint(
-          host: "127.0.0.1", port: 7332, node: UUID()))
+          host: "127.0.0.1", port: 7332, node: UUID()), build: nil)
       let response = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: peer,
@@ -107,13 +107,13 @@ struct SWIMMembershipTests {
     let target = NodeIdentity(
       id: UUID(), name: "offline",
       endpoint: ActorEndpoint(
-        host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port), node: UUID()))
+        host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port), node: UUID()), build: nil)
     try await reservation.channel.close()
     try await withSWIMRuntime(configuration: makeConfiguration(name: "intermediary", seeds: [])) { runtime in
       let origin = NodeIdentity(
         id: UUID(), name: "origin",
         endpoint: ActorEndpoint(
-          host: "127.0.0.1", port: 7332, node: UUID()))
+          host: "127.0.0.1", port: 7332, node: UUID()), build: nil)
       let reply = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: origin,
@@ -207,7 +207,7 @@ private func withProbeTarget(body: @Sendable (NodeIdentity, ProbeHistory) async 
   let target = NodeIdentity(
     id: UUID(), name: "target",
     endpoint: ActorEndpoint(
-      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID()))
+      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID()), build: nil)
   let probes = ProbeHistory()
   let server = Task { try await serveProbeTarget(listener: listener, target: target, history: probes) }
   do {
@@ -283,7 +283,8 @@ private func withSWIMRuntime(
     port: configuration.port,
     callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
     connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
-  let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
+  let runtime = NodeRuntime(
+    configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
   do {
     try await runtime.start()
     try await body(runtime)

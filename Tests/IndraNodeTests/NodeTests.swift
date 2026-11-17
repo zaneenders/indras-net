@@ -95,10 +95,12 @@ struct NodeTests {
     let configuration = makeConfiguration(name: "first", seeds: [])
     let system = try await TCPActorSystem(
       host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0, callTimeout: .seconds(1), connectTimeout: .seconds(1))
-    let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
+    let runtime = NodeRuntime(
+      configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
     do {
       let peer = NodeIdentity(
-        id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()))
+        id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()), build: nil
+      )
       _ = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: configuration.cluster, node: peer,
@@ -109,7 +111,7 @@ struct NodeTests {
             ])))
       #expect(await runtime.status().members.first?.state == .alive)
       let invalid = NodeIdentity(
-        id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()))
+        id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()), build: nil)
       await #expect(throws: IndraError.self) {
         try await runtime.receive(
           MembershipRequest(
@@ -213,6 +215,38 @@ struct NodeTests {
         #expect(try await first.status().node.name == "renamed")
         try updated.save(path: first.config, overwrite: true)
         try await eventually { try await first.status().configurationError == nil }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func addedSeedsAreContactedWhileAlreadyConnected() async throws {
+    let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
+    do {
+      let second = try await TestDaemon.start(configuration: makeConfiguration(name: "second", seeds: [first.address]))
+      do {
+        try await eventually { try await first.status().members.first?.state == .alive }
+        let third = try await TestDaemon.start(configuration: makeConfiguration(name: "third", seeds: []))
+        do {
+          var configuration = try NodeConfiguration.load(path: first.config)
+          configuration.seeds = [third.address]
+          try configuration.save(path: first.config, overwrite: true)
+          _ = try await NodeControl.request(.reload, socket: first.socket)
+          try await eventually {
+            try await first.status().members.contains { $0.node.id == third.identity.id && $0.state == .alive }
+          }
+          try await third.stop()
+        } catch {
+          try? await third.stop()
+          throw error
+        }
         try await second.stop()
       } catch {
         try? await second.stop()

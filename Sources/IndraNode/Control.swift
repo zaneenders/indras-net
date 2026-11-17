@@ -16,6 +16,7 @@ import Glibc
 
 public enum ControlRequest: Codable, Sendable {
   case status
+  case monitor
   case services
   case ping(String)
   case join(PeerAddress)
@@ -24,6 +25,7 @@ public enum ControlRequest: Codable, Sendable {
 
 public enum ControlReply: Codable, Sendable {
   case status(NodeStatus)
+  case monitor(MonitorSnapshot)
   case services([DiscoveredService])
   case pong(PingResult)
   case failure(String)
@@ -60,7 +62,9 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
     callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
     connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
-  let runtime = NodeRuntime(configuration: configuration, configurationPath: configurationPath, system: system)
+  let runtime = NodeRuntime(
+    configuration: configuration, configurationPath: configurationPath,
+    peerHistoryPath: configurationPath + ".peers.json", system: system)
   do {
     try await runtime.start()
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
@@ -126,6 +130,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
 private func handle(_ request: ControlRequest, runtime: NodeRuntime) async throws -> ControlReply {
   switch request {
   case .status: return .status(await runtime.status())
+  case .monitor: return .monitor(await runtime.monitor())
   case .services: return .services(await runtime.receptionist.services())
   case .ping(let target): return .pong(try await runtime.ping(target))
   case .join(let address): return .pong(try await runtime.join(address))

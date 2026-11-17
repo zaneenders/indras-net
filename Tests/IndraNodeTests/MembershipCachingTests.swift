@@ -13,7 +13,7 @@ struct MembershipCachingTests {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let endpoint = ActorEndpoint(
       host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
-    let peer = NodeIdentity(id: UUID(), name: "peer", endpoint: endpoint)
+    let peer = NodeIdentity(id: UUID(), name: "peer", endpoint: endpoint, build: nil)
     let server = Task {
       try await serveMembership(listener: listener, peer: peer, exchanges: 4, replaceService: replaceService)
     }
@@ -123,7 +123,8 @@ private func withTestRuntime(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
     callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
     connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
-  let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
+  let runtime = NodeRuntime(
+    configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
   do {
     try await runtime.start()
     try await body(runtime)

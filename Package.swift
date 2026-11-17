@@ -28,7 +28,9 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
     .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.13.0"),
     .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
-    .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0")
+    .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0"),
+    .package(url: "https://github.com/apple/swift-collections.git", from: "1.7.6"),
+    .package(url: "ssh://git@github.com/zaneenders/slate.git", revision: "e9d88f19f19eb167bd232e6bbfd5e14c7792682a")
   ],
   targets: [
     .target(
@@ -39,19 +41,32 @@ let package = Package(
         .product(name: "ClusterMembership", package: "swift-cluster-membership"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "SystemPackage", package: "swift-system"),
+        .product(name: "DequeModule", package: "swift-collections"),
         .product(name: "UnixSignals", package: "swift-service-lifecycle")
       ],
-      swiftSettings: sharedSwiftSettings
+      swiftSettings: sharedSwiftSettings,
+      plugins: [.plugin(name: "GitBuildPlugin")]
     ),
     .executableTarget(
       name: "IndraCLI",
       dependencies: [
-        "IndraNode", "TCPActorSystem",
+        "IndraNode", "IndraMonitor", "TCPActorSystem",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "UnixSignals", package: "swift-service-lifecycle")
       ],
       swiftSettings: sharedSwiftSettings
     ),
+    .target(
+      name: "IndraMonitor",
+      dependencies: ["IndraNode", "TCPActorSystem", .product(name: "Slate", package: "slate")],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .testTarget(
+      name: "IndraMonitorTests",
+      dependencies: ["IndraMonitor", "IndraNode", "TCPActorSystem", .product(name: "Slate", package: "slate")],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .plugin(name: "GitBuildPlugin", capability: .buildTool()),
     .testTarget(
       name: "IndraNodeTests",
       dependencies: ["IndraNode", "TCPActorSystem", "Networking", .product(name: "NIOCore", package: "swift-nio")],

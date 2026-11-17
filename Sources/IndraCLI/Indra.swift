@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import IndraMonitor
 import IndraNode
 import TCPActorSystem
 import UnixSignals
@@ -8,8 +9,10 @@ import UnixSignals
 struct Indra: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "indra", abstract: "Discover and communicate with Indra nodes.",
+    version: BuildIdentity.current.summary,
     subcommands: [
-      Initialize.self, Daemon.self, Status.self, Nodes.self, Services.self, Ping.self, Join.self, Reload.self
+      Initialize.self, Daemon.self, Status.self, Nodes.self, Monitor.self, Services.self, Ping.self, Join.self,
+      Reload.self
     ])
 }
 
@@ -90,13 +93,30 @@ struct Nodes: AsyncParsableCommand {
       try printJSON(status)
       return
     }
-    print("ID  NAME  ADDRESS  MEMBERSHIP")
+    print("ID  NAME  ADDRESS  MEMBERSHIP  BUILD")
     print(
-      "\(status.node.id)  \(status.node.name)  \(status.node.endpoint.host):\(status.node.endpoint.port)  local")
+      "\(status.node.id)  \(status.node.name)  \(status.node.endpoint.host):\(status.node.endpoint.port)  local  \(status.node.build?.summary ?? "unknown")"
+    )
     for member in status.members {
       let node = member.node
       let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
-      print("\(node.id)  \(node.name)  \(address)  \(member.state.rawValue)")
+      print("\(node.id)  \(node.name)  \(address)  \(member.state.rawValue)  \(node.build?.summary ?? "unknown")")
+    }
+  }
+}
+
+struct Monitor: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(abstract: "Monitor live SWIM membership and probe traffic.")
+  @OptionGroup var options: LocalOptions
+
+  func run() async throws {
+    if options.json {
+      guard case .monitor(let snapshot) = try await NodeControl.request(.monitor, socket: options.socket) else {
+        throw IndraError("Unexpected daemon response")
+      }
+      try printJSON(snapshot)
+    } else {
+      try await runMonitor(socket: options.socket)
     }
   }
 }
@@ -169,6 +189,7 @@ private func printStatus(_ status: NodeStatus, json: Bool) throws {
     return
   }
   print("\(status.node.name) (\(status.node.id)) cluster=\(status.cluster)")
+  print("Build: \(status.node.build?.summary ?? "unknown")")
   print("Address: \(PeerAddress(host: status.node.endpoint.host, port: status.node.endpoint.port))")
   print("Peers: \(status.members.count); seeds: \(status.seeds.map(\.description).joined(separator: ", "))")
   if let error = status.configurationError { print("Configuration: \(error)") }

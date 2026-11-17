@@ -204,7 +204,8 @@ private struct ServiceTestNode: Sendable {
     let system = try await TCPActorSystem(
       host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
       callTimeout: .seconds(2), connectTimeout: .seconds(1))
-    let runtime = NodeRuntime(configuration: configuration, configurationPath: "/unused", system: system)
+    let runtime = NodeRuntime(
+      configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
     do {
       try await runtime.start()
       var configuration = configuration

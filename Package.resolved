@@ -1,6 +1,14 @@
 {
-  "originHash" : "4983ea76099ec95bc6ef2db938eeb87f298bb46680b924905adfa0251221b7e0",
+  "originHash" : "ee2cce87dc9f73091f87d397879d7aa66b3cb4d9025ef5417dd6726e65437ad7",
   "pins" : [
+    {
+      "identity" : "slate",
+      "kind" : "remoteSourceControl",
+      "location" : "ssh://git@github.com/zaneenders/slate.git",
+      "state" : {
+        "revision" : "e9d88f19f19eb167bd232e6bbfd5e14c7792682a"
+      }
+    },
     {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
@@ -89,6 +97,14 @@
       "state" : {
         "revision" : "640e5755b5826f4437eaeedd366fd776737db62c",
         "version" : "1.9.0"
+      }
+    },
+    {
+      "identity" : "swift-zlib",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zaneenders/swift-zlib.git",
+      "state" : {
+        "revision" : "d2790e2e0bdac0d48dd622a8b97b8c20f8807c1d"
       }
     }
   ],
