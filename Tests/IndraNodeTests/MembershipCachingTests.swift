@@ -10,12 +10,82 @@ import Testing
 struct MembershipCachingTests {
   @Test func actorSystemRejectsASecondSetOfBootstrapActors() async throws {
     let configuration = cacheConfiguration(name: "client", port: 0)
-    try await withTestRuntime(configuration: configuration) { runtime in
+    try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { runtime in
       let system = await runtime.system
       let duplicate = NodeRuntime(
         configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
       await #expect(throws: RPCError.invalidConfiguration) { try await duplicate.start() }
       #expect(await runtime.receptionist.services().count == 2)
+    }
+  }
+
+  @Test func joinsAndBackgroundDiscoveryShareOneProbe() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("config.json").path
+    var configuration = cacheConfiguration(name: "client", port: 0)
+    configuration.requestTimeoutMilliseconds = 5000
+    try configuration.save(path: path, overwrite: false)
+    let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
+    let endpoint = ActorEndpoint(
+      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
+    let peer = NodeIdentity(id: UUID(), name: "seed", endpoint: endpoint, build: nil)
+    let (started, start) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    let (released, release) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    defer {
+      start.finish()
+      release.finish()
+    }
+    let server = Task {
+      try await serveMembership(
+        listener: listener, peer: peer, exchanges: 1, includeGossip: true,
+        beforeReply: { _ in
+          start.yield(())
+          for await _ in released { break }
+          try Task.checkCancellation()
+        })
+    }
+    do {
+      try await withTestRuntime(configuration: configuration, configurationPath: path) { runtime in
+        let membership = Task { try await runtime.runMembership() }
+        defer { membership.cancel() }
+        let first = Task { try await runtime.join(peer.address) }
+        defer { first.cancel() }
+        var arrivals = started.makeAsyncIterator()
+        _ = try #require(await arrivals.next())
+        var saved = try NodeConfiguration.load(path: path)
+        #expect(saved.seeds == [peer.address])
+        saved.name = "second-join"
+        try saved.save(path: path, overwrite: true)
+        let second = Task { try await runtime.join(peer.address) }
+        defer { second.cancel() }
+        let period = await runtime.monitor().protocolPeriod
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while true {
+          let monitor = await runtime.monitor()
+          if monitor.status.node.name == saved.name, monitor.protocolPeriod > period { break }
+          guard ContinuousClock.now < deadline else { throw IndraError("Second join or tick did not run") }
+          try await Task.sleep(for: .milliseconds(10))
+        }
+        try await runtime.reload()
+        first.cancel()
+        await #expect(throws: CancellationError.self) { try await first.value }
+        let pending = await runtime.monitor()
+        #expect(pending.outbound.ping == 1)
+        #expect(pending.inFlight == 1)
+        release.yield(())
+        #expect(try await second.value.node == peer)
+        #expect(try NodeConfiguration.load(path: path).seeds == [peer.address])
+        try await server.value
+        membership.cancel()
+        do { try await membership.value } catch is CancellationError {}
+      }
+    } catch {
+      release.finish()
+      server.cancel()
+      try? await listener.channel.close()
+      _ = try? await server.value
+      throw error
     }
   }
 
@@ -30,7 +100,9 @@ struct MembershipCachingTests {
         listener: listener, peer: peer, exchanges: 4, includeGossip: !viaAlias, beforeReply: { _ in })
     }
     do {
-      try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { runtime in
+      try await withTestRuntime(
+        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+      ) { runtime in
         let address = PeerAddress(host: viaAlias ? "localhost" : endpoint.host, port: endpoint.port)
         let first = try await runtime.ping(address.description)
         #expect(first.node == peer)
@@ -56,15 +128,16 @@ struct MembershipCachingTests {
   }
 
   @Test func firstPingAfterPeerRestartLearnsTheNewEndpoint() async throws {
-    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
+    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused")
+    { client in
       let configuration = cacheConfiguration(name: "peer", port: 0)
-      try await withTestRuntime(configuration: configuration) { original in
+      try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { original in
         let identity = await original.status().node
         #expect(try await client.ping("127.0.0.1:\(identity.endpoint.port)").node == identity)
         await original.shutdown()
         var updated = configuration
         updated.port = identity.endpoint.port
-        try await withTestRuntime(configuration: updated) { replacement in
+        try await withTestRuntime(configuration: updated, configurationPath: "/unused") { replacement in
           let current = await replacement.status().node
           #expect(current.id == identity.id)
           #expect(current.endpoint != identity.endpoint)
@@ -83,8 +156,10 @@ struct MembershipCachingTests {
 
   @Test(arguments: [false, true])
   func staleGossipCannotReplaceVerifiedProcess(knowPrevious: Bool) async throws {
-    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
-      try await withTestRuntime(configuration: cacheConfiguration(name: "peer", port: 0)) { peer in
+    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused")
+    { client in
+      try await withTestRuntime(configuration: cacheConfiguration(name: "peer", port: 0), configurationPath: "/unused")
+      { peer in
         let current = await peer.status().node
         let previous = NodeIdentity(
           id: current.id, name: current.name,
@@ -162,7 +237,9 @@ struct MembershipCachingTests {
         listener: replacementListener, peer: replacement, exchanges: 2, includeGossip: true, beforeReply: { _ in })
     }
     do {
-      try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
+      try await withTestRuntime(
+        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+      ) { client in
         if knowPrevious { _ = try await client.ping(original.address.description) }
         let delayed = Task { try await client.ping(original.address.description) }
         defer { delayed.cancel() }
@@ -232,14 +309,14 @@ private func serveMembership(
 }
 
 private func withTestRuntime(
-  configuration: NodeConfiguration, _ body: @Sendable (NodeRuntime) async throws -> Void
+  configuration: NodeConfiguration, configurationPath: String, _ body: @Sendable (NodeRuntime) async throws -> Void
 ) async throws {
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
     callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
     connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
   let runtime = NodeRuntime(
-    configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
+    configuration: configuration, configurationPath: configurationPath, peerHistoryPath: nil, system: system)
   do {
     try await runtime.start()
     try await body(runtime)

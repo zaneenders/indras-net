@@ -39,7 +39,6 @@ public struct PingResult: Codable, Sendable {
 }
 
 private enum MembershipWork: Sendable {
-  case bootstrap(PeerAddress)
   case refreshServices
   case ping(ClusterMembership.Node, SWIM.GossipPayload, Duration, UInt32)
   case indirect(SWIM.Instance.SendPingRequestDirective)
@@ -48,6 +47,13 @@ private enum MembershipWork: Sendable {
 private struct BootstrapRetry: Sendable {
   let delay: Duration
   let nextAttempt: ContinuousClock.Instant
+}
+
+private struct Bootstrap: Sendable {
+  var task: Task<Void, Never>?
+  var retry: BootstrapRetry?
+  var retryWhileConnected: Bool
+  var waiters: [UUID: CheckedContinuation<PingResult, any Error>]
 }
 
 public actor NodeRuntime {
@@ -67,8 +73,7 @@ public actor NodeRuntime {
   private var discoveryErrors: [String: String] = [:]
   private let work: AsyncStream<MembershipWork>
   private let pendingWork: AsyncStream<MembershipWork>.Continuation
-  private var bootstrapping: Set<PeerAddress> = []
-  private var bootstrapRetries: [PeerAddress: BootstrapRetry] = [:]
+  private var bootstraps: [PeerAddress: Bootstrap] = [:]
   private var bootstrapOffset = 0
   private var stopped = false
   private var serviceMembershipChanged = false
@@ -138,39 +143,53 @@ public actor NodeRuntime {
   }
 
   public func reload() async throws {
+    try reloadConfiguration(addingSeed: nil)
+    await updateServices()
+  }
+
+  private func reloadConfiguration(addingSeed seed: PeerAddress?) throws {
+    guard !stopped else { throw IndraError("Node is stopping") }
+    var updated: NodeConfiguration
     do {
-      let updated = try NodeConfiguration.load(path: configurationPath)
+      updated = try NodeConfiguration.load(path: configurationPath)
       guard configuration.canReload(updated) else {
         throw IndraError(
           "Identity, cluster, listen/advertised address, port, and SWIM timing changes require a restart")
       }
-      if updated != configuration {
-        let addedSeeds = updated.seeds.filter { !configuration.seeds.contains($0) }
-        if updated.name != configuration.name { serviceMembershipChanged = true }
-        configuration = updated
-        bootstrapRetries.removeAll(keepingCapacity: true)
-        for address in addedSeeds where address != identity.address {
-          if bootstrapping.insert(address).inserted { pendingWork.yield(.bootstrap(address)) }
-        }
-      }
-      configurationError = nil
-      await updateServices()
     } catch {
       configurationError = String(describing: error)
       throw error
+    }
+    configurationError = nil
+    if let seed, !updated.seeds.contains(seed) {
+      updated.seeds.append(seed)
+      try updated.save(path: configurationPath, overwrite: true)
+    }
+    guard updated != configuration else { return }
+    let addedSeeds = updated.seeds.filter { !configuration.seeds.contains($0) }
+    if updated.name != configuration.name { serviceMembershipChanged = true }
+    configuration = updated
+    for address in addedSeeds where address != identity.address {
+      startBootstrap(address, waiting: nil)
     }
   }
 
   public func join(_ address: PeerAddress) async throws -> PingResult {
     try address.validate()
-    try await reload()
-    if !configuration.seeds.contains(address) {
-      var updated = configuration
-      updated.seeds.append(address)
-      try updated.save(path: configurationPath, overwrite: true)
-      try await reload()
+    let waiter = UUID()
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        do {
+          try Task.checkCancellation()
+          try reloadConfiguration(addingSeed: address)
+          startBootstrap(address, waiting: (waiter, continuation))
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    } onCancel: {
+      Task { await self.cancelJoin(waiter, address: address) }
     }
-    return try await contact(address)
   }
 
   public func ping(_ target: String) async throws -> PingResult {
@@ -188,25 +207,35 @@ public actor NodeRuntime {
   }
 
   public func runMembership() async throws {
-    try await withThrowingDiscardingTaskGroup { tasks in
-      tasks.addTask {
-        while !Task.isCancelled {
-          let delay = await self.tick()
-          try await Task.sleep(for: delay)
+    let result: Result<Void, any Error>
+    do {
+      try await withThrowingDiscardingTaskGroup { tasks in
+        tasks.addTask {
+          while !Task.isCancelled {
+            let delay = await self.tick()
+            try await Task.sleep(for: delay)
+          }
         }
+        for await item in work {
+          try Task.checkCancellation()
+          tasks.addTask { await self.perform(item) }
+        }
+        tasks.cancelAll()
       }
-      for await item in work {
-        try Task.checkCancellation()
-        tasks.addTask { await self.perform(item) }
-      }
-      tasks.cancelAll()
+      result = .success(())
+    } catch {
+      result = .failure(error)
     }
+    await cancelBootstraps(keepingJoins: true)
+    try result.get()
   }
 
   public func shutdown() async {
     stopped = true
-    savePeerHistory(force: true)
     pendingWork.finish()
+    await cancelBootstraps(keepingJoins: false)
+    bootstraps.removeAll()
+    savePeerHistory(force: true)
     await receptionist.shutdown()
     await system.shutdown()
   }
@@ -337,18 +366,72 @@ public actor NodeRuntime {
     }
   }
 
+  private func startBootstrap(
+    _ address: PeerAddress, waiting: (id: UUID, continuation: CheckedContinuation<PingResult, any Error>)?
+  ) {
+    var bootstrap =
+      bootstraps[address]
+      ?? Bootstrap(task: nil, retry: nil, retryWhileConnected: false, waiters: [:])
+    if let waiting {
+      bootstrap.retryWhileConnected = true
+      bootstrap.waiters[waiting.id] = waiting.continuation
+    }
+    if bootstrap.task == nil {
+      bootstrap.task = Task { await self.performBootstrap(address) }
+    }
+    bootstraps[address] = bootstrap
+  }
+
+  private func performBootstrap(_ address: PeerAddress) async {
+    let result: Result<PingResult, any Error>
+    do {
+      try Task.checkCancellation()
+      let reply = try await contact(address)
+      try Task.checkCancellation()
+      result = .success(reply)
+    } catch {
+      await updateServices()
+      result = .failure(error)
+    }
+    guard var bootstrap = bootstraps.removeValue(forKey: address) else { return }
+    let waiters = bootstrap.waiters
+    if case .failure = result, !stopped, !Task.isCancelled {
+      let previous = bootstrap.retry?.delay ?? .milliseconds(configuration.probeIntervalMilliseconds)
+      let delay = min(previous * 2, .seconds(60))
+      bootstrap.retry = BootstrapRetry(delay: delay, nextAttempt: .now.advanced(by: delay))
+      bootstrap.task = nil
+      bootstrap.waiters.removeAll()
+      bootstraps[address] = bootstrap
+    }
+    for waiter in waiters.values { waiter.resume(with: result) }
+  }
+
+  private func cancelJoin(_ waiter: UUID, address: PeerAddress) {
+    bootstraps[address]?.waiters.removeValue(forKey: waiter)?.resume(throwing: CancellationError())
+  }
+
+  private func cancelBootstraps(keepingJoins: Bool) async {
+    let tasks = bootstraps.values.compactMap { bootstrap in
+      keepingJoins && !bootstrap.waiters.isEmpty ? nil : bootstrap.task
+    }
+    for task in tasks { task.cancel() }
+    for task in tasks { await task.value }
+  }
+
   private func tick() async -> Duration {
     guard !stopped else { return .zero }
-    // Revalidate remembered addresses; configured seeds are a fallback when disconnected.
+    // Retry remembered peers and pending joins even while connected.
     let connected = swim.members.contains {
       $0.node != swim.swimNode && isReachable($0.status)
     }
     var addresses = peerHistory.addresses
-    let configuredAddresses = Set(addresses + configuration.seeds)
-    bootstrapRetries = bootstrapRetries.filter { configuredAddresses.contains($0.key) }
-    if !connected {
-      let remembered = Set(addresses)
-      addresses += configuration.seeds.filter { !remembered.contains($0) }
+    let remembered = Set(addresses)
+    let configuredAddresses = remembered.union(configuration.seeds)
+    bootstraps = bootstraps.filter { address, bootstrap in
+      bootstrap.task != nil || (bootstrap.retry != nil && configuredAddresses.contains(address))
+    }
+    addresses += configuration.seeds.filter {
+      !remembered.contains($0) && (!connected || bootstraps[$0]?.retryWhileConnected == true)
     }
     for offset in 0..<min(8, addresses.count) {
       let address = addresses[(bootstrapOffset + offset) % addresses.count]
@@ -356,9 +439,10 @@ public actor NodeRuntime {
         let sameAddress = $0.node.host == address.host && $0.node.port == address.port
         return sameAddress && isReachable($0.status)
       }
-      let ready = bootstrapRetries[address].map { $0.nextAttempt <= .now } ?? true
-      if address != identity.address, !known, ready, bootstrapping.insert(address).inserted {
-        pendingWork.yield(.bootstrap(address))
+      let bootstrap = bootstraps[address]
+      let ready = bootstrap?.retry.map { $0.nextAttempt <= .now } ?? true
+      if address != identity.address, !known, ready, bootstrap?.task == nil {
+        startBootstrap(address, waiting: nil)
       }
     }
     if !addresses.isEmpty { bootstrapOffset = (bootstrapOffset + min(8, addresses.count)) % addresses.count }
@@ -379,16 +463,6 @@ public actor NodeRuntime {
   private func perform(_ item: MembershipWork) async {
     guard !stopped, !Task.isCancelled else { return }
     switch item {
-    case .bootstrap(let address):
-      defer { bootstrapping.remove(address) }
-      do {
-        _ = try await contact(address)
-      } catch {
-        guard !stopped, !Task.isCancelled else { return }
-        let previous = bootstrapRetries[address]?.delay ?? .milliseconds(configuration.probeIntervalMilliseconds)
-        let delay = min(previous * 2, .seconds(60))
-        bootstrapRetries[address] = BootstrapRetry(delay: delay, nextAttempt: .now.advanced(by: delay))
-      }
     case .refreshServices:
       repeat {
         serviceRefreshRequested = false
@@ -560,7 +634,7 @@ public actor NodeRuntime {
       }
       learn(sender: reply.node, payload: reply.response.payload)
       if case .ack = reply.response { rememberAlive(reply.response.target) }
-      bootstrapRetries[address] = nil
+      bootstraps[address]?.retry = nil
       discoveryErrors[address.description] = nil
       record(
         reply.response, direction: .inbound, peer: address,

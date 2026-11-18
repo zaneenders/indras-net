@@ -370,6 +370,49 @@ struct NodeTests {
     }
   }
 
+  @Test func offlineJoinStaysSavedAndRetriesWhileConnected() async throws {
+    let existing = try await TestDaemon.start(configuration: makeConfiguration(name: "existing", seeds: []))
+    do {
+      let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: [existing.address]))
+      do {
+        try await eventually {
+          try await first.status().members.contains { $0.node.id == existing.identity.id && $0.state == .alive }
+        }
+        let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
+        let address = PeerAddress(host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port))
+        try await reservation.channel.close()
+        await #expect(throws: IndraError.self) {
+          try await NodeControl.request(.join(address), socket: first.socket, timeout: .seconds(3))
+        }
+        #expect(try NodeConfiguration.load(path: first.config).seeds == [existing.address, address])
+        #expect(try await first.status().discoveryErrors[address.description] != nil)
+        var configuration = makeConfiguration(name: "returning", seeds: [])
+        configuration.port = address.port
+        let returning = try await TestDaemon.start(configuration: configuration)
+        do {
+          try await eventually {
+            let status = try await first.status()
+            return [existing.identity.id, returning.identity.id].allSatisfy { id in
+              status.members.contains { $0.node.id == id && $0.state == .alive }
+            } && status.discoveryErrors[address.description] == nil
+          }
+          try await returning.stop()
+        } catch {
+          try? await returning.stop()
+          throw error
+        }
+        try await first.stop()
+      } catch {
+        try? await first.stop()
+        throw error
+      }
+      try await existing.stop()
+    } catch {
+      try? await existing.stop()
+      throw error
+    }
+  }
+
   @Test func duplicateDaemonCannotRemoveLiveSocketAndIdleClientsDoNotBlockShutdown() async throws {
     let daemon = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []))
     do {
