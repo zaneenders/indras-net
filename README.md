@@ -3,6 +3,8 @@
 ```sh
 # Run tests.
 swift test
+# Run tests and report source coverage.
+./Scripts/test-coverage.swift
 # Create this node's config at $XDG_CONFIG_HOME/indra/config.json or ~/.config/indra/config.json.
 swift run indra init --name alpha --listen-host 0.0.0.0 --advertised-host 192.168.1.10
 # Run the foreground daemon.

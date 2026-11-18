@@ -30,6 +30,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
     .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0"),
     .package(url: "https://github.com/apple/swift-collections.git", from: "1.7.6"),
+    .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.2"),
     .package(url: "ssh://git@github.com/zaneenders/slate.git", revision: "3ea077821bbdd1bbb51e0cc10430302421be6e6c")
   ],
   targets: [
@@ -68,7 +69,12 @@ let package = Package(
     .plugin(name: "GitBuildPlugin", capability: .buildTool()),
     .testTarget(
       name: "IndraNodeTests",
-      dependencies: ["IndraNode", "TCPActorSystem", "Networking", .product(name: "NIOCore", package: "swift-nio")],
+      dependencies: [
+        "IndraNode", "TCPActorSystem", "Networking",
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "Subprocess", package: "swift-subprocess"),
+        .product(name: "SystemPackage", package: "swift-system")
+      ],
       swiftSettings: sharedSwiftSettings
     ),
     .target(

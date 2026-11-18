@@ -253,9 +253,14 @@ actor RPCTransport {
 
   private func sendRequest(_ message: WireMessage, requestID: UUID, sessionID: UUID) async throws {
     guard pending[requestID] != nil else { return }
-    guard let writer = sessions[sessionID]?.writer else { throw RPCError.disconnected }
+    guard let session = sessions[sessionID], let writer = session.writer else { throw RPCError.disconnected }
     pending[requestID]?.sessionID = sessionID
-    try await writer.write(message.frame())
+    do {
+      try await writer.write(message.frame())
+    } catch ChannelError.ioOnClosedChannel, is NIOAsyncWriterError {
+      try? await session.connection.channel.close()
+      throw RPCError.disconnected
+    }
   }
 
   private func closed(_ id: UUID) async {
