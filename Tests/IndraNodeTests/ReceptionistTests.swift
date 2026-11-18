@@ -116,13 +116,25 @@ struct ReceptionistTests {
       let key = ServiceKey<ReceptionistWorker>("snapshot-workers")
       let registration = ServiceRegistration(
         key: key.name, actorType: String(reflecting: ReceptionistWorker.self), address: worker.id)
+      func gossip(_ status: GossipStatus, sequenceNumber: UInt32) async throws {
+        _ = try await client.runtime.receive(
+          MembershipRequest(
+            version: 1, cluster: "test", node: peer,
+            probe: .ping(
+              sequenceNumber: sequenceNumber,
+              payload: [GossipMember(node: peer, status: status, protocolPeriod: 0)])))
+      }
       // Stop background refresh so manually ordered snapshots remain deterministic.
       for node in nodes { node.task.cancel() }
       for node in nodes { _ = try? await node.task.value }
-      _ = await receptionist.update(node: local, members: [Member(node: peer, state: .alive)])
+      try await gossip(.alive(1), sequenceNumber: 1)
       let initial = ServiceSnapshot(version: 1, cluster: "test", node: peer, revision: 1, registrations: [registration])
       try await receptionist.accept(initial, from: peer)
       #expect(try await receptionist.lookup(key).map(\.id) == [worker.id])
+      let renamed = NodeIdentity(id: peer.id, name: "renamed", endpoint: peer.endpoint, build: peer.build)
+      _ = try await client.runtime.receive(
+        MembershipRequest(version: 1, cluster: "test", node: renamed, probe: .ping(sequenceNumber: 2, payload: [])))
+      #expect(await receptionist.services().first { $0.registration == registration }?.node == renamed)
       let foreign = ServiceRegistration(
         key: key.name, actorType: registration.actorType,
         address: ActorAddress(endpoint: client.system.endpoint, id: UUID()))
@@ -146,14 +158,16 @@ struct ReceptionistTests {
       try await receptionist.accept(
         ServiceSnapshot(version: 1, cluster: "test", node: peer, revision: 3, registrations: [registration]), from: peer
       )
-      _ = await receptionist.update(node: local, members: [Member(node: peer, state: .unreachable)])
+      try await gossip(.unreachable(2), sequenceNumber: 3)
+      #expect(!(await receptionist.update(node: local, reachable: [peer.endpoint: peer], membershipRevision: 1)))
       #expect(try await receptionist.lookup(key).isEmpty)
       try await receptionist.accept(initial, from: peer)
       #expect(try await receptionist.lookup(key).isEmpty)
-      _ = await receptionist.update(node: local, members: [Member(node: peer, state: .alive)])
+      try await gossip(.alive(3), sequenceNumber: 4)
       await receptionist.refresh()
       // Recovery must obtain the owner's current snapshot, which has no worker registrations.
       #expect(try await receptionist.lookup(key).isEmpty)
+      #expect(await receptionist.services().contains { $0.node == peer })
       let remote = try ReceptionistService.resolve(
         id: ActorAddress(endpoint: peer.endpoint, id: ReceptionistService.fixedID), using: client.system)
       await #expect(throws: RemoteActorError.self) { try await remote.snapshot(version: 1, cluster: "foreign") }

@@ -27,13 +27,20 @@ struct MembershipCachingTests {
     let peer = NodeIdentity(id: UUID(), name: "peer", endpoint: endpoint, build: nil)
     let server = Task {
       try await serveMembership(
-        listener: listener, peer: peer, exchanges: 4, beforeReply: { _ in })
+        listener: listener, peer: peer, exchanges: 4, includeGossip: !viaAlias, beforeReply: { _ in })
     }
     do {
       try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { runtime in
         let address = PeerAddress(host: viaAlias ? "localhost" : endpoint.host, port: endpoint.port)
         let first = try await runtime.ping(address.description)
         #expect(first.node == peer)
+        let registration = ServiceRegistration(
+          key: MembershipService.serviceName, actorType: String(reflecting: MembershipService.self),
+          address: ActorAddress(endpoint: peer.endpoint, id: MembershipService.fixedID))
+        try await runtime.receptionist.accept(
+          ServiceSnapshot(version: 1, cluster: "cache-tests", node: peer, revision: 1, registrations: [registration]),
+          from: peer)
+        #expect(await runtime.receptionist.services().contains { $0.registration == registration })
         #expect(try await runtime.ping(address.description).node == peer)
         #expect(try await runtime.ping(peer.name).node == peer)
         #expect(try await runtime.ping(peer.id.uuidString).node == peer)
@@ -141,7 +148,7 @@ struct MembershipCachingTests {
     }
     let originalServer = Task {
       try await serveMembership(
-        listener: originalListener, peer: original, exchanges: knowPrevious ? 2 : 1,
+        listener: originalListener, peer: original, exchanges: knowPrevious ? 2 : 1, includeGossip: true,
         beforeReply: { completed in
           if completed == (knowPrevious ? 1 : 0) {
             start.yield(())
@@ -152,7 +159,7 @@ struct MembershipCachingTests {
     }
     let replacementServer = Task {
       try await serveMembership(
-        listener: replacementListener, peer: replacement, exchanges: 2, beforeReply: { _ in })
+        listener: replacementListener, peer: replacement, exchanges: 2, includeGossip: true, beforeReply: { _ in })
     }
     do {
       try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0)) { client in
@@ -187,7 +194,7 @@ struct MembershipCachingTests {
 }
 
 private func serveMembership(
-  listener: Listener, peer: NodeIdentity, exchanges: Int,
+  listener: Listener, peer: NodeIdentity, exchanges: Int, includeGossip: Bool,
   beforeReply: @Sendable (Int) async throws -> Void
 ) async throws {
   try await listener.executeThenClose { connections in
@@ -209,7 +216,7 @@ private func serveMembership(
             version: 1, cluster: "cache-tests", node: peer,
             response: .ack(
               target: peer, incarnation: 0,
-              payload: [GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)],
+              payload: includeGossip ? [GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)] : [],
               sequenceNumber: request.probe.sequenceNumber))
           try await output.write(
             WireMessage.reply(invocation.requestID, .value(try JSONEncoder().encode(response))).frame())

@@ -117,9 +117,7 @@ struct SWIMMembershipTests {
       let reply = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: origin,
-          probe: .pingRequest(
-            target: target, sequenceNumber: 42,
-            payload: [GossipMember(node: origin, status: .alive(0), protocolPeriod: 0)])))
+          probe: .pingRequest(target: target, sequenceNumber: 42, payload: [])))
       guard case .nack(let node, let sequenceNumber) = reply.response else {
         Issue.record("Expected a negative acknowledgement")
         return
@@ -127,6 +125,13 @@ struct SWIMMembershipTests {
       #expect(node == target)
       #expect(sequenceNumber == 42)
       #expect(await runtime.status().members.first { $0.node == target }?.state == .alive)
+      let registration = ServiceRegistration(
+        key: MembershipService.serviceName, actorType: String(reflecting: MembershipService.self),
+        address: ActorAddress(endpoint: target.endpoint, id: MembershipService.fixedID))
+      try await runtime.receptionist.accept(
+        ServiceSnapshot(version: 1, cluster: "test", node: target, revision: 1, registrations: [registration]),
+        from: target)
+      #expect(await runtime.receptionist.services().contains { $0.registration == registration })
     }
   }
 

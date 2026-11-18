@@ -71,6 +71,8 @@ public actor NodeRuntime {
   private var bootstrapRetries: [PeerAddress: BootstrapRetry] = [:]
   private var bootstrapOffset = 0
   private var stopped = false
+  private var serviceMembershipChanged = false
+  private var serviceMembershipRevision: UInt64 = 0
   private var refreshingServices = false
   private var serviceRefreshRequested = false
   private var telemetry = MembershipTelemetry(capacity: 128)
@@ -112,7 +114,7 @@ public actor NodeRuntime {
 
   public func status() -> NodeStatus {
     var members: [Member] = []
-    for member in swim.members where member.node != identity.swimNode {
+    for member in swim.members where member.node != swim.swimNode {
       guard let node = identities[member.node] else { continue }
       members.append(Member(node: node, state: Member.State(member.status)))
     }
@@ -144,6 +146,7 @@ public actor NodeRuntime {
       }
       if updated != configuration {
         let addedSeeds = updated.seeds.filter { !configuration.seeds.contains($0) }
+        if updated.name != configuration.name { serviceMembershipChanged = true }
         configuration = updated
         bootstrapRetries.removeAll(keepingCapacity: true)
         for address in addedSeeds where address != identity.address {
@@ -242,9 +245,13 @@ public actor NodeRuntime {
       response = ack
     case .pingRequest(let target, let sequenceNumber, let payload):
       remember(target)
+      let targetNode = target.swimNode
+      let previousStatus = swim.status(of: targetNode)
       let directives = swim.onPingRequest(
-        target: target.swimNode, pingRequestOrigin: message.node.swimNode,
+        target: targetNode, pingRequestOrigin: message.node.swimNode,
         payload: gossip(payload), sequenceNumber: sequenceNumber)
+      // SWIM can add the target without reporting it in a directive.
+      noteReachabilityChange(targetNode, previous: previousStatus, current: swim.status(of: targetNode))
       var forwarded: MembershipResponse?
       for directive in directives {
         if case .gossipProcessed(let gossip) = directive { record(gossip) }
@@ -282,14 +289,23 @@ public actor NodeRuntime {
   }
 
   private func identity(for node: ClusterMembership.Node) throws -> NodeIdentity {
-    if node == identity.swimNode { return identity }
+    if node == swim.swimNode { return identity }
     guard let identity = identities[node] else { throw IndraError("Missing SWIM peer identity") }
     return identity
   }
 
   private func updateServices() async {
     savePeerHistory(force: false)
-    if await receptionist.update(node: identity, members: status().members) { requestServiceRefresh() }
+    guard serviceMembershipChanged, !stopped else { return }
+    serviceMembershipChanged = false
+    serviceMembershipRevision += 1
+    var reachable: [ActorEndpoint: NodeIdentity] = [:]
+    for member in swim.members where member.node != swim.swimNode && isReachable(member.status) {
+      if let peer = identities[member.node] { reachable[peer.endpoint] = peer }
+    }
+    if await receptionist.update(node: identity, reachable: reachable, membershipRevision: serviceMembershipRevision) {
+      requestServiceRefresh()
+    }
   }
 
   private func rememberAlive(_ node: NodeIdentity) {
@@ -325,7 +341,7 @@ public actor NodeRuntime {
     guard !stopped else { return .zero }
     // Revalidate remembered addresses; configured seeds are a fallback when disconnected.
     let connected = swim.members.contains {
-      $0.node != identity.swimNode && ($0.status.isAlive || $0.status.isSuspect)
+      $0.node != swim.swimNode && isReachable($0.status)
     }
     var addresses = peerHistory.addresses
     let configuredAddresses = Set(addresses + configuration.seeds)
@@ -338,7 +354,7 @@ public actor NodeRuntime {
       let address = addresses[(bootstrapOffset + offset) % addresses.count]
       let known = swim.members.contains {
         let sameAddress = $0.node.host == address.host && $0.node.port == address.port
-        return sameAddress && ($0.status.isAlive || $0.status.isSuspect)
+        return sameAddress && isReachable($0.status)
       }
       let ready = bootstrapRetries[address].map { $0.nextAttempt <= .now } ?? true
       if address != identity.address, !known, ready, bootstrapping.insert(address).inserted {
@@ -465,15 +481,17 @@ public actor NodeRuntime {
 
   private func acceptIndirect(_ response: SWIM.PingResponse, target: ClusterMembership.Node) async {
     guard !stopped, !Task.isCancelled, isCurrent(target), let response = currentResponse(response) else { return }
-    let previous = swim.status(of: target).map(Member.State.init)
+    let previous = swim.status(of: target)
     for directive in swim.onPingRequestResponse(response, pinged: target) {
       if case .gossipProcessed(.applied(let change)) = directive, let change, change.member.node != target {
         record(change)
       }
     }
     // The target can appear in both gossip and response directives; record its resulting change once.
-    if let current = swim.status(of: target), let node = identities[target] {
-      telemetry.recordChange(node: node, previous: previous, current: Member.State(current))
+    let current = swim.status(of: target)
+    noteReachabilityChange(target, previous: previous, current: current)
+    if let current, let node = identities[target] {
+      telemetry.recordChange(node: node, previous: previous.map(Member.State.init), current: Member.State(current))
     }
     await updateServices()
   }
@@ -601,6 +619,7 @@ public actor NodeRuntime {
 
   private func record(_ change: SWIM.MemberStatusChangedEvent) {
     guard let node = try? identity(for: change.member.node) else { return }
+    noteReachabilityChange(change.member.node, previous: change.previousStatus, current: change.status)
     if case .alive = change.status { rememberAlive(node) }
     telemetry.recordChange(
       node: node, previous: change.previousStatus.map(Member.State.init),
@@ -643,9 +662,24 @@ public actor NodeRuntime {
 
   private func remember(_ node: NodeIdentity) {
     // Older peers omit build metadata when forwarding gossip about newer peers.
-    let build = node.build ?? identities[node.swimNode]?.build
-    identities[node.swimNode] = NodeIdentity(
-      id: node.id, name: node.name, endpoint: node.endpoint, build: build)
+    let key = node.swimNode
+    let previous = identities[key]
+    let identity = NodeIdentity(
+      id: node.id, name: node.name, endpoint: node.endpoint, build: node.build ?? previous?.build)
+    guard previous != identity else { return }
+    identities[key] = identity
+    if key != swim.swimNode, isReachable(swim.status(of: key)) { serviceMembershipChanged = true }
+  }
+
+  private func noteReachabilityChange(
+    _ node: ClusterMembership.Node, previous: SWIM.Status?, current: SWIM.Status?
+  ) {
+    if node != swim.swimNode, isReachable(previous) != isReachable(current) { serviceMembershipChanged = true }
+  }
+
+  private func isReachable(_ status: SWIM.Status?) -> Bool {
+    guard let status else { return false }
+    return status.isAlive || status.isSuspect
   }
 
   private func gossip(_ payload: [GossipMember]) -> SWIM.GossipPayload {
@@ -675,8 +709,16 @@ public actor NodeRuntime {
     response: SWIM.PingResponse, pingRequestOrigin: ClusterMembership.Node?, pingRequestSequenceNumber: UInt32?
   ) -> [SWIM.Instance.PingResponseDirective] {
     guard let response = currentResponse(response) else { return [] }
-    return swim.onPingResponse(
+    let target: ClusterMembership.Node
+    switch response {
+    case .ack(let node, _, _, _), .nack(let node, _), .timeout(let node, _, _, _): target = node
+    }
+    let previous = swim.status(of: target)
+    let directives = swim.onPingResponse(
       response: response, pingRequestOrigin: pingRequestOrigin, pingRequestSequenceNumber: pingRequestSequenceNumber)
+    // An acknowledgement can change reachability without listing the target in gossip.
+    noteReachabilityChange(target, previous: previous, current: swim.status(of: target))
+    return directives
   }
 
   private func wire(_ payload: SWIM.GossipPayload) throws -> [GossipMember] {

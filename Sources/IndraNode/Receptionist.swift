@@ -35,6 +35,7 @@ public actor Receptionist {
   private var node: NodeIdentity
   private var stopped = false
   private var revision: UInt64 = 0
+  private var membershipRevision: UInt64 = 0
   private var local: [ServiceRegistration: any DistributedActor] = [:]
   private var peers: [ActorEndpoint: ServicePeer] = [:]
   private var watchers: [UUID: ServiceWatcher] = [:]
@@ -117,13 +118,11 @@ public actor Receptionist {
     }
   }
 
-  func update(node: NodeIdentity, members: [Member]) -> Bool {
-    guard !stopped else { return false }
+  func update(node: NodeIdentity, reachable: [ActorEndpoint: NodeIdentity], membershipRevision: UInt64) -> Bool {
+    guard !stopped, membershipRevision > self.membershipRevision else { return false }
+    self.membershipRevision = membershipRevision
     self.node = node
-    let reachable = Dictionary(
-      members.filter { $0.state == .alive || $0.state == .suspect }.map { ($0.node.endpoint, $0.node) },
-      uniquingKeysWith: { first, _ in first })
-    let endpointsChanged = Set(peers.keys) != Set(reachable.keys)
+    let endpointsChanged = reachable.count != peers.count || reachable.keys.contains { peers[$0] == nil }
     guard endpointsChanged || reachable.contains(where: { peers[$0.key]?.identity != $0.value }) else { return false }
     peers = reachable.mapValues { identity in
       var peer = peers[identity.endpoint] ?? ServicePeer(identity: identity, generation: UUID(), snapshot: nil)
