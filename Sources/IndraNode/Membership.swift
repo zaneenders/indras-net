@@ -199,11 +199,11 @@ public actor NodeRuntime {
     if matches.count > 1 { throw IndraError("Ambiguous node name; use its UUID or host:port") }
     if let match = matches.first {
       if match.id == identity.id { return PingResult(node: identity, milliseconds: 0) }
-      let result = try await contact(match.address)
+      let result = try await contact(match.address, retryOnDisconnect: true)
       guard result.node.id == match.id else { throw IndraError("Address now belongs to a different node") }
       return result
     }
-    return try await contact(PeerAddress(target))
+    return try await contact(PeerAddress(target), retryOnDisconnect: true)
   }
 
   public func runMembership() async throws {
@@ -386,7 +386,7 @@ public actor NodeRuntime {
     let result: Result<PingResult, any Error>
     do {
       try Task.checkCancellation()
-      let reply = try await contact(address)
+      let reply = try await contact(address, retryOnDisconnect: false)
       try Task.checkCancellation()
       result = .success(reply)
     } catch {
@@ -495,7 +495,8 @@ public actor NodeRuntime {
     do {
       let reply = try await request(
         .ping(sequenceNumber: sequenceNumber, payload: wire(payload)),
-        address: PeerAddress(host: target.host, port: target.port), timeout: timeout)
+        address: PeerAddress(host: target.host, port: target.port), deadline: .now.advanced(by: timeout),
+        reuseConnection: true)
       return reply.response.swimResponse(excludingStaleIncarnationsOf: identity)
     } catch {
       return .timeout(
@@ -539,7 +540,7 @@ public actor NodeRuntime {
           payload: wire(detail.payload)),
         address: PeerAddress(
           host: detail.peerToPingRequestThrough.host,
-          port: detail.peerToPingRequestThrough.port), timeout: timeout)
+          port: detail.peerToPingRequestThrough.port), deadline: .now.advanced(by: timeout), reuseConnection: true)
       response = reply.response.swimResponse(excludingStaleIncarnationsOf: identity)
     } catch {
       response = .timeout(
@@ -570,13 +571,15 @@ public actor NodeRuntime {
     await updateServices()
   }
 
-  private func contact(_ address: PeerAddress) async throws -> PingResult {
+  private func contact(_ address: PeerAddress, retryOnDisconnect: Bool) async throws -> PingResult {
     let start = ContinuousClock.now
-    let sequenceNumber = swim.nextSequenceNumber()
-    let payload = try wire(swim.makeGossipPayload(to: nil))
-    let reply = try await request(
-      .ping(sequenceNumber: sequenceNumber, payload: payload), address: address,
-      timeout: .milliseconds(configuration.requestTimeoutMilliseconds))
+    let deadline = start.advanced(by: .milliseconds(configuration.requestTimeoutMilliseconds))
+    let reply: MembershipReply
+    do {
+      reply = try await requestPing(address, deadline: deadline, reuseConnection: true)
+    } catch RPCError.disconnected where retryOnDisconnect {
+      reply = try await requestPing(address, deadline: deadline, reuseConnection: false)
+    }
     guard case .ack = reply.response else { throw IndraError("Expected SWIM acknowledgement") }
     for directive in onPingResponse(
       response: reply.response.swimResponse(excludingStaleIncarnationsOf: identity), pingRequestOrigin: nil,
@@ -591,11 +594,24 @@ public actor NodeRuntime {
       milliseconds: Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
   }
 
-  private func request(_ probe: MembershipProbe, address: PeerAddress, timeout: Duration) async throws
-    -> MembershipReply
+  private func requestPing(_ address: PeerAddress, deadline: ContinuousClock.Instant, reuseConnection: Bool)
+    async throws -> MembershipReply
   {
+    let sequenceNumber = swim.nextSequenceNumber()
+    let payload = try wire(swim.makeGossipPayload(to: nil))
+    return try await request(
+      .ping(sequenceNumber: sequenceNumber, payload: payload), address: address, deadline: deadline,
+      reuseConnection: reuseConnection)
+  }
+
+  private func request(
+    _ probe: MembershipProbe, address: PeerAddress, deadline: ContinuousClock.Instant, reuseConnection: Bool
+  ) async throws -> MembershipReply {
     guard !stopped else { throw IndraError("Node is stopping") }
+    try Task.checkCancellation()
     let started = ContinuousClock.now
+    let timeoutError = IndraError("SWIM probe timed out")
+    guard started < deadline else { throw timeoutError }
     record(probe, direction: .outbound, peer: address)
     telemetry.inFlight += 1
     defer { telemetry.inFlight -= 1 }
@@ -603,8 +619,8 @@ public actor NodeRuntime {
     var peerAddress = address
     do {
       let message = MembershipRequest(version: 1, cluster: configuration.cluster, node: identity, probe: probe)
-      let reply = try await withDeadline(timeout: timeout, timeoutError: IndraError("SWIM probe timed out")) {
-        try await self.exchange(message, address: address)
+      let reply = try await withDeadline(deadline: deadline, timeoutError: timeoutError) {
+        try await self.exchange(message, address: address, reuseConnection: reuseConnection)
       }
       peerAddress = reply.node.address
       try Task.checkCancellation()
@@ -700,8 +716,11 @@ public actor NodeRuntime {
       current: Member.State(change.status))
   }
 
-  private func exchange(_ message: MembershipRequest, address: PeerAddress) async throws -> MembershipReply {
-    let endpoint = try await system.peerEndpoint(host: address.host, port: address.port)
+  private func exchange(_ message: MembershipRequest, address: PeerAddress, reuseConnection: Bool) async throws
+    -> MembershipReply
+  {
+    let endpoint = try await system.peerEndpoint(
+      host: address.host, port: address.port, reuseConnection: reuseConnection)
     try Task.checkCancellation()
     let remote = try MembershipService.resolve(
       id: ActorAddress(endpoint: endpoint, id: MembershipService.fixedID), using: system)

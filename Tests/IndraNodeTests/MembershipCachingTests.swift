@@ -154,6 +154,109 @@ struct MembershipCachingTests {
     }
   }
 
+  @Test func diagnosticPingRetriesTheDisconnectAndDiscoversReplacementServices() async throws {
+    let configuration = cacheConfiguration(name: "peer", port: 0)
+    try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { replacement in
+      let current = await replacement.status().node
+      let original = NodeIdentity(
+        id: current.id, name: current.name,
+        endpoint: ActorEndpoint(host: current.endpoint.host, port: current.endpoint.port, node: UUID()), build: nil)
+      let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
+      let alias = PeerAddress(host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port))
+      let server = Task {
+        try await serveMembership(
+          listener: listener, peer: original, exchanges: 2, includeGossip: true,
+          beforeReply: { completed in
+            if completed == 1 { throw RPCError.disconnected }
+          })
+      }
+      do {
+        try await withTestRuntime(
+          configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+        ) { client in
+          #expect(try await client.ping(alias.description).node == original)
+          let registration = ServiceRegistration(
+            key: MembershipService.serviceName, actorType: String(reflecting: MembershipService.self),
+            address: ActorAddress(endpoint: original.endpoint, id: MembershipService.fixedID))
+          let receptionist = client.receptionist
+          try await receptionist.accept(
+            ServiceSnapshot(
+              version: 1, cluster: "cache-tests", node: original, revision: 1, registrations: [registration]),
+            from: original)
+          #expect(await receptionist.services().contains { $0.node == original })
+
+          #expect(try await client.ping(original.name).node == current)
+          await #expect(throws: RPCError.disconnected) { try await server.value }
+          let events = await client.monitor().events.filter { $0.peer == current.address }
+          #expect(events.map(\.kind) == [.ping, .failure, .ping, .ack])
+          #expect(events.first?.sequenceNumber != events.last?.sequenceNumber)
+          let members = await client.status().members
+          #expect(members.count == 1)
+          #expect(members.first?.node == current)
+          #expect(members.first?.state == .alive)
+          await receptionist.refresh()
+          let remoteServices = await receptionist.services().filter { $0.node.id == current.id }
+          #expect(remoteServices.count == 2)
+          #expect(remoteServices.allSatisfy { $0.registration.address.endpoint == current.endpoint })
+        }
+      } catch {
+        server.cancel()
+        try? await listener.channel.close()
+        _ = try? await server.value
+        throw error
+      }
+    }
+  }
+
+  @Test func diagnosticPingRetryUsesTheOriginalDeadline() async throws {
+    let oldListener = try await TCP.listen(host: "127.0.0.1", port: 0)
+    let newListener = try await TCP.listen(host: "127.0.0.1", port: 0)
+    defer {
+      oldListener.channel.close(promise: nil)
+      newListener.channel.close(promise: nil)
+    }
+    let alias = PeerAddress(host: "127.0.0.1", port: try #require(oldListener.channel.localAddress?.port))
+    let port = try #require(newListener.channel.localAddress?.port)
+    let id = UUID()
+    let original = NodeIdentity(
+      id: id, name: "peer", endpoint: ActorEndpoint(host: alias.host, port: port, node: UUID()), build: nil)
+    let replacement = NodeIdentity(
+      id: id, name: original.name, endpoint: ActorEndpoint(host: alias.host, port: port, node: UUID()), build: nil)
+    let oldServer = Task {
+      try await serveMembership(
+        listener: oldListener, peer: original, exchanges: 2, includeGossip: true,
+        beforeReply: { completed in
+          if completed == 1 {
+            try await Task.sleep(for: .milliseconds(650))
+            throw RPCError.disconnected
+          }
+        })
+    }
+    let newServer = Task {
+      try await serveMembership(
+        listener: newListener, peer: replacement, exchanges: 1, includeGossip: true,
+        beforeReply: { _ in try await Task.sleep(for: .milliseconds(650)) })
+    }
+    defer {
+      oldServer.cancel()
+      newServer.cancel()
+    }
+    try await withTestRuntime(
+      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+    ) { client in
+      #expect(try await client.ping(alias.description).node == original)
+      do {
+        _ = try await client.ping(original.name)
+        Issue.record("Expected the original ping deadline to expire")
+      } catch let error as IndraError {
+        #expect(error.description == "SWIM probe timed out")
+      }
+      let events = await client.monitor().events.filter { $0.peer == original.address }
+      #expect(events.map(\.kind) == [.ping, .failure, .ping, .failure])
+      #expect(await client.status().members.first?.node == original)
+    }
+  }
+
   @Test(arguments: [false, true])
   func staleGossipCannotReplaceVerifiedProcess(knowPrevious: Bool) async throws {
     try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused")

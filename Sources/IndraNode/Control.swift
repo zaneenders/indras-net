@@ -34,7 +34,9 @@ public enum NodeControl: Sendable {
   {
     guard timeout > .zero else { throw IndraError("Control request timeout must be positive") }
     try validateSocketPath(socket)
-    return try await withDeadline(timeout: timeout, timeoutError: IndraError("Control request timed out")) {
+    return try await withDeadline(
+      deadline: .now.advanced(by: timeout), timeoutError: IndraError("Control request timed out")
+    ) {
       let connection: Connection
       do {
         connection = try await TCP.connect(unixDomainSocketPath: socket, connectTimeout: .seconds(2))
@@ -102,7 +104,9 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
 }
 
 func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) async throws {
-  try await withDeadline(timeout: .seconds(65), timeoutError: IndraError("Control request timed out")) {
+  try await withDeadline(
+    deadline: .now.advanced(by: .seconds(65)), timeoutError: IndraError("Control request timed out")
+  ) {
     try await withTaskCancellationHandler {
       try await connection.executeThenClose { input, _ in
         var iterator = input.makeAsyncIterator()
@@ -144,12 +148,12 @@ private func decode<Value: Decodable>(_ frame: Frame, opcode: UInt32, as type: V
 }
 
 func withDeadline<Value: Sendable>(
-  timeout: Duration, timeoutError: any Error, operation: @escaping @Sendable () async throws -> Value
+  deadline: ContinuousClock.Instant, timeoutError: any Error, operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
   try await withThrowingTaskGroup(of: Value.self) { tasks in
     tasks.addTask { try await operation() }
     tasks.addTask {
-      try await Task.sleep(for: timeout)
+      try await Task.sleep(until: deadline, clock: .continuous)
       throw timeoutError
     }
     defer { tasks.cancelAll() }

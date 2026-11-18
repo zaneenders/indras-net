@@ -37,8 +37,8 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
     await transport.start(system: self)
   }
 
-  package func peerEndpoint(host: String, port: Int) async throws -> ActorEndpoint {
-    try await transport.peerEndpoint(host: host, port: port, system: self)
+  package func peerEndpoint(host: String, port: Int, reuseConnection: Bool) async throws -> ActorEndpoint {
+    try await transport.peerEndpoint(host: host, port: port, reuseConnection: reuseConnection, system: self)
   }
 
   package func reserveFixedActorIDs(_ ids: Set<UUID>) throws {

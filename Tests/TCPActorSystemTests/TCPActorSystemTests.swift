@@ -13,7 +13,7 @@ struct TCPActorSystemTests {
       server, client in
       try server.reserveFixedActorIDs([ReservedCounter.fixedID])
       let counter = ReservedCounter(actorSystem: server)
-      let endpoint = try await client.peerEndpoint(host: "localhost", port: server.endpoint.port)
+      let endpoint = try await client.peerEndpoint(host: "localhost", port: server.endpoint.port, reuseConnection: true)
       #expect(endpoint == server.endpoint)
       let remote = try ReservedCounter.resolve(
         id: ActorAddress(endpoint: endpoint, id: ReservedCounter.fixedID), using: client)
@@ -34,7 +34,9 @@ struct TCPActorSystemTests {
         try await outbound.write(WireMessage.hello(version: WireMessage.version + 1, endpoint: client.endpoint).frame())
         #expect(try await frames.next() == nil)
       }
-      #expect(try await client.peerEndpoint(host: server.endpoint.host, port: server.endpoint.port) == server.endpoint)
+      #expect(
+        try await client.peerEndpoint(host: server.endpoint.host, port: server.endpoint.port, reuseConnection: true)
+          == server.endpoint)
     }
   }
 
@@ -260,7 +262,7 @@ struct TCPActorSystemTests {
     do {
       let call = Task {
         if discoveringEndpoint {
-          _ = try await client.peerEndpoint(host: endpoint.host, port: endpoint.port)
+          _ = try await client.peerEndpoint(host: endpoint.host, port: endpoint.port, reuseConnection: true)
         } else {
           _ = try await remote.value()
         }

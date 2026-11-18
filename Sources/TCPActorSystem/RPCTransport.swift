@@ -36,31 +36,36 @@ actor RPCTransport {
     let result = try await request(id: invocation.requestID) {
       let endpoint = invocation.actorID.endpoint
       let sessionID = try await self.session(
-        host: endpoint.host, port: endpoint.port, expected: endpoint, system: system)
+        host: endpoint.host, port: endpoint.port, expected: endpoint, reuseConnection: true, system: system)
       try await self.sendRequest(.call(invocation), requestID: invocation.requestID, sessionID: sessionID)
     }
     guard case .reply(let reply) = result else { throw RPCError.invalidMessage }
     return reply
   }
 
-  func peerEndpoint(host: String, port: Int, system: TCPActorSystem) async throws -> ActorEndpoint {
+  func peerEndpoint(host: String, port: Int, reuseConnection: Bool, system: TCPActorSystem) async throws
+    -> ActorEndpoint
+  {
     try Task.checkCancellation()
     guard !stopped else { throw RPCError.shutDown }
-    let destination = DialDestination(host: host, port: port, node: nil)
-    if let session = sessionAtAddress(destination), let endpoint = session.value.endpoint { return endpoint }
+    if reuseConnection, let session = sessionAtAddress(host: host, port: port), let endpoint = session.value.endpoint {
+      return endpoint
+    }
 
     let requestID = UUID()
     let result = try await request(id: requestID) {
-      try await self.discoverEndpoint(host: host, port: port, requestID: requestID, system: system)
+      try await self.discoverEndpoint(
+        host: host, port: port, reuseConnection: reuseConnection, requestID: requestID, system: system)
     }
     guard case .endpoint(let endpoint) = result else { throw RPCError.invalidMessage }
     return endpoint
   }
 
   private func discoverEndpoint(
-    host: String, port: Int, requestID: UUID, system: TCPActorSystem
+    host: String, port: Int, reuseConnection: Bool, requestID: UUID, system: TCPActorSystem
   ) async throws {
-    let sessionID = try await session(host: host, port: port, expected: nil, system: system)
+    let sessionID = try await session(
+      host: host, port: port, expected: nil, reuseConnection: reuseConnection, system: system)
     guard let endpoint = sessions[sessionID]?.endpoint else { throw RPCError.disconnected }
     complete(requestID, result: .success(.endpoint(endpoint)))
   }
@@ -139,14 +144,18 @@ actor RPCTransport {
     install(connection, destination: nil, expected: nil, ready: nil, system: system)
   }
 
-  private func session(host: String, port: Int, expected: ActorEndpoint?, system: TCPActorSystem) async throws -> UUID {
+  private func session(
+    host: String, port: Int, expected: ActorEndpoint?, reuseConnection: Bool, system: TCPActorSystem
+  ) async throws -> UUID {
     guard !stopped else { throw RPCError.shutDown }
     guard !host.isEmpty, (1...65535).contains(port) else { throw RPCError.invalidMessage }
-    let destination = DialDestination(host: host, port: port, node: expected?.node)
-    if let expected {
-      if let id = routes[expected], sessions[id]?.connection.channel.isActive == true { return id }
-    } else if let entry = sessionAtAddress(destination) {
-      return entry.key
+    let destination = DialDestination(host: host, port: port, node: expected?.node, reuseConnection: reuseConnection)
+    if reuseConnection {
+      if let expected {
+        if let id = routes[expected], sessions[id]?.connection.channel.isActive == true { return id }
+      } else if let entry = sessionAtAddress(host: host, port: port) {
+        return entry.key
+      }
     }
     if let dial = dials[destination] { return try await dial.value }
     let task = Task {
@@ -164,11 +173,11 @@ actor RPCTransport {
     return try await task.value
   }
 
-  private func sessionAtAddress(_ destination: DialDestination) -> (key: UUID, value: Session)? {
+  private func sessionAtAddress(host: String, port: Int) -> (key: UUID, value: Session)? {
     sessions.first { _, session in
       guard let endpoint = session.endpoint, session.connection.channel.isActive else { return false }
-      return session.destination == destination
-        || (endpoint.host == destination.host && endpoint.port == destination.port)
+      return (session.destination?.host == host && session.destination?.port == port)
+        || (endpoint.host == host && endpoint.port == port)
     }
   }
 
@@ -290,6 +299,7 @@ private struct DialDestination: Hashable {
   let host: String
   let port: Int
   let node: UUID?
+  let reuseConnection: Bool
 }
 
 private struct Session {
