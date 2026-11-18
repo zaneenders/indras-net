@@ -121,7 +121,7 @@ private func withControlRuntime(_ body: @Sendable (NodeRuntime) async throws -> 
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: [])
     try await body(runtime)
     await runtime.shutdown()
   } catch {

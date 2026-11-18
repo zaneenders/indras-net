@@ -21,6 +21,8 @@ swift run indra monitor
 swift run indra --version
 # List available services and their hosting nodes; add --json for actor addresses.
 swift run indra services
+# Check daemon uptime and config filesystem free space. Add --json for raw values.
+swift run indra health
 # Ping by node name, UUID, or host:port.
 swift run indra ping beta
 # Persist another seed and register with it.

@@ -50,10 +50,15 @@ let package = Package(
     .executableTarget(
       name: "IndraCLI",
       dependencies: [
-        "IndraNode", "IndraMonitor", "TCPActorSystem",
+        "IndraNode", "IndraHealth", "IndraMonitor", "TCPActorSystem",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "UnixSignals", package: "swift-service-lifecycle")
       ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .target(
+      name: "IndraHealth",
+      dependencies: ["IndraNode", "TCPActorSystem"],
       swiftSettings: sharedSwiftSettings
     ),
     .target(
@@ -70,7 +75,7 @@ let package = Package(
     .testTarget(
       name: "IndraNodeTests",
       dependencies: [
-        "IndraNode", "TCPActorSystem", "Networking",
+        "IndraNode", "IndraHealth", "TCPActorSystem", "Networking",
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "Subprocess", package: "swift-subprocess"),
         .product(name: "SystemPackage", package: "swift-system")

@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import IndraHealth
 import IndraMonitor
 import IndraNode
 import TCPActorSystem
@@ -11,7 +12,8 @@ struct Indra: AsyncParsableCommand {
     commandName: "indra", abstract: "Discover and communicate with Indra nodes.",
     version: BuildIdentity.current.summary,
     subcommands: [
-      Initialize.self, Daemon.self, Status.self, Nodes.self, Monitor.self, Services.self, Ping.self, Join.self,
+      Initialize.self, Daemon.self, Status.self, Nodes.self, Monitor.self, Services.self, Health.self, Ping.self,
+      Join.self,
       Reload.self
     ])
 }
@@ -52,7 +54,7 @@ struct Daemon: AsyncParsableCommand {
     do {
       try await withThrowingTaskGroup(of: Void.self) { tasks in
         tasks.addTask {
-          try await runNode(configurationPath: config, socket: socket) { status in
+          try await runNode(configurationPath: config, socket: socket, services: [HealthService.install]) { status in
             print(
               "indra \(status.node.name) ready at \(status.node.endpoint.host):\(status.node.endpoint.port); control: \(socket)"
             )
@@ -150,6 +152,39 @@ struct Services: AsyncParsableCommand {
       let address = PeerAddress(host: endpoint.host, port: endpoint.port)
       print(
         "\(registration.key)  \(registration.actorType)  \(service.node.name)  \(address)  \(registration.address.id)")
+    }
+  }
+}
+
+struct Health: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    abstract: "Check daemon uptime and free disk space across the cluster.")
+  @OptionGroup var options: LocalOptions
+
+  func run() async throws {
+    let reports = try await NodeControl.query(
+      HealthService.key.name, returning: HealthMetrics.self, socket: options.socket, timeout: .seconds(65))
+    if options.json {
+      try printJSON(reports)
+      return
+    }
+    print("NAME  ADDRESS  HEALTH")
+    for report in reports {
+      let node = report.node
+      let address = PeerAddress(host: node.endpoint.host, port: node.endpoint.port)
+      let summary: String
+      switch report.outcome {
+      case .responded(let metrics):
+        let uptime = Duration.seconds(metrics.uptimeSeconds).formatted(
+          .units(allowed: [.days, .hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 2))
+        let space = metrics.freeDiskBytes.formatted(.byteCount(style: .file))
+        summary = "\(uptime) up, \(space) free"
+      case .timedOut: summary = "Timed out"
+      case .unreachable: summary = "Unreachable"
+      case .unavailable: summary = "No health service advertised"
+      case .failed(let message): summary = "Failed (\(message))"
+      }
+      print("\(node.name)  \(address)  \(summary)")
     }
   }
 }

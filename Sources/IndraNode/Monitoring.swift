@@ -58,7 +58,7 @@ public struct MonitorSnapshot: Codable, Sendable {
 }
 
 struct MembershipTelemetry: Sendable {
-  private let started = ContinuousClock.now
+  let started = ContinuousClock.now
   private let capacity: Int
   private var nextID: UInt64 = 0
   private(set) var outbound = ProbeTotals()

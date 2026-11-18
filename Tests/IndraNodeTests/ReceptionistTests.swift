@@ -8,6 +8,44 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct ReceptionistTests {
+  @Test func startupRegistersQueriesForOtherReportTypes() async throws {
+    let configuration = makeConfiguration(name: "query-node", seeds: [])
+    let system = try await TCPActorSystem(
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0,
+      callTimeout: .seconds(2), connectTimeout: .seconds(1))
+    let runtime = NodeRuntime(
+      configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
+    let receptionist = runtime.receptionist
+    let key = ServiceKey<ReceptionistWorker>("test.report")
+    let sample: @Sendable (ReceptionistWorker, String) async throws -> String = { worker, cluster in
+      try await worker.run(cluster)
+    }
+    let install: ServiceInstaller = { context in
+      let worker = ReceptionistWorker(actorSystem: context.actorSystem, name: "worker")
+      try await context.receptionist.registerQuery(worker, with: key, timeout: .seconds(1), sample: sample)
+    }
+    do {
+      try await runtime.start(services: [install])
+      let duplicate = ReceptionistWorker(actorSystem: system, name: "duplicate")
+      await #expect(throws: IndraError.self) {
+        try await receptionist.registerQuery(duplicate, with: key, timeout: .seconds(1), sample: sample)
+      }
+      #expect(try await receptionist.lookup(key).count == 1)
+      let status = await runtime.status()
+      let payload = try await receptionist.query(key.name, status: status)
+      let reports = try JSONDecoder().decode([ServiceReport<String>].self, from: payload)
+      #expect(reports.count == 1)
+      let report = try #require(reports.first)
+      guard case .responded(let value) = report.outcome else { throw IndraError("Expected the worker's report") }
+      #expect(report.node == status.node)
+      #expect(value == "worker: test")
+      await runtime.shutdown()
+    } catch {
+      await runtime.shutdown()
+      throw error
+    }
+  }
+
   @Test func typedKeysWatchRegistrationAndWithdrawal() async throws {
     try await withServiceNodes { nodes in
       let node = nodes[0]
@@ -220,7 +258,7 @@ private struct ServiceTestNode: Sendable {
     let runtime = NodeRuntime(
       configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
     do {
-      try await runtime.start()
+      try await runtime.start(services: [])
       var configuration = configuration
       configuration.port = system.endpoint.port
       return Self(

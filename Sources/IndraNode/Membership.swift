@@ -101,7 +101,7 @@ public actor NodeRuntime {
     (work, pendingWork) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
   }
 
-  public func start() async throws {
+  public func start(services: [ServiceInstaller]) async throws {
     if let peerHistoryPath {
       do {
         peerHistory = try PeerHistory.load(
@@ -111,6 +111,13 @@ public actor NodeRuntime {
       }
     }
     try await receptionist.start(runtime: self)
+    let context = ServiceContext(
+      actorSystem: system, receptionist: receptionist, cluster: configuration.cluster,
+      configurationPath: configurationPath, started: telemetry.started)
+    for install in services {
+      try Task.checkCancellation()
+      try await install(context)
+    }
   }
 
   static func transportTimeoutMilliseconds(configuration: NodeConfiguration) -> Int64 {

@@ -16,6 +16,7 @@ public enum ControlRequest: Codable, Sendable {
   case status
   case monitor
   case services
+  case queryService(String)
   case ping(String)
   case join(PeerAddress)
   case reload
@@ -29,9 +30,36 @@ public enum ControlReply: Codable, Sendable {
   case failure(String)
 }
 
+private let controlTarget: UInt32 = 0x494E_4452
+
+private enum ControlOpcode: UInt32 {
+  case request = 1
+  case reply = 2
+  case serviceReport = 3
+}
+
 public enum NodeControl: Sendable {
   public static func request(_ request: ControlRequest, socket: String, timeout: Duration) async throws -> ControlReply
   {
+    try await exchange(request, socket: socket, timeout: timeout, decodeReply: decodeControlReply)
+  }
+
+  public static func query<Value: Codable & Sendable>(
+    _ service: String, returning _: Value.Type, socket: String, timeout: Duration
+  ) async throws -> [ServiceReport<Value>] {
+    try await exchange(.queryService(service), socket: socket, timeout: timeout) { frame in
+      if frame.opcode == ControlOpcode.reply.rawValue {
+        _ = try decodeControlReply(frame)
+        throw IndraError("Unexpected daemon response")
+      }
+      return try decode(frame, opcode: .serviceReport, as: [ServiceReport<Value>].self)
+    }
+  }
+
+  private static func exchange<Value: Sendable>(
+    _ request: ControlRequest, socket: String, timeout: Duration,
+    decodeReply: @escaping @Sendable (Frame) throws -> Value
+  ) async throws -> Value {
     guard timeout > .zero else { throw IndraError("Control request timeout must be positive") }
     try validateSocketPath(socket)
     return try await withDeadline(
@@ -45,13 +73,11 @@ public enum NodeControl: Sendable {
       }
       return try await withTaskCancellationHandler {
         try await connection.executeThenClose { input, output in
-          try await output.write(encode(request, opcode: 1))
+          try await output.write(encode(request, opcode: .request))
           output.finish()
           var iterator = input.makeAsyncIterator()
           guard let frame = try await iterator.next() else { throw IndraError("Daemon disconnected") }
-          let reply = try decode(frame, opcode: 2, as: ControlReply.self)
-          if case .failure(let message) = reply { throw IndraError(message) }
-          return reply
+          return try decodeReply(frame)
         }
       } onCancel: {
         connection.channel.close(promise: nil)
@@ -60,7 +86,9 @@ public enum NodeControl: Sendable {
   }
 }
 
-public func runNode(configurationPath: String, socket: String, onReady: @Sendable (NodeStatus) -> Void) async throws {
+public func runNode(
+  configurationPath: String, socket: String, services: [ServiceInstaller], onReady: @Sendable (NodeStatus) -> Void
+) async throws {
   let configuration = try NodeConfiguration.load(path: configurationPath)
   let lease = try SocketLease(path: socket)
   defer { withExtendedLifetime(lease) {} }
@@ -72,7 +100,7 @@ public func runNode(configurationPath: String, socket: String, onReady: @Sendabl
     configuration: configuration, configurationPath: configurationPath,
     peerHistoryPath: configurationPath + ".peers.json", system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: services)
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
     defer { try? FileManager.default.removeItem(atPath: socket) }
     onReady(await runtime.status())
@@ -111,13 +139,15 @@ func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) asyn
       try await connection.executeThenClose { input, _ in
         var iterator = input.makeAsyncIterator()
         guard let frame = try await iterator.next() else { return }
-        let reply: ControlReply
+        let reply: Frame
         do {
-          let request = try decode(frame, opcode: 1, as: ControlRequest.self)
+          let request = try decode(frame, opcode: .request, as: ControlRequest.self)
           reply = try await handle(request, runtime: runtime)
-        } catch { reply = .failure(String(describing: error)) }
+        } catch {
+          reply = try encode(ControlReply.failure(String(describing: error)), opcode: .reply)
+        }
         // Async writer completion only enqueues data; await the socket write before closing.
-        try await connection.channel.writeAndFlush(encode(reply, opcode: 2)).get()
+        try await connection.channel.writeAndFlush(reply).get()
       }
     } onCancel: {
       connection.channel.close(promise: nil)
@@ -125,26 +155,44 @@ func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) asyn
   }
 }
 
-private func handle(_ request: ControlRequest, runtime: NodeRuntime) async throws -> ControlReply {
+private func handle(_ request: ControlRequest, runtime: NodeRuntime) async throws -> Frame {
+  let reply: ControlReply
   switch request {
-  case .status: return .status(await runtime.status())
-  case .monitor: return .monitor(await runtime.monitor())
-  case .services: return .services(await runtime.receptionist.services())
-  case .ping(let target): return .pong(try await runtime.ping(target))
-  case .join(let address): return .pong(try await runtime.join(address))
+  case .status: reply = .status(await runtime.status())
+  case .monitor: reply = .monitor(await runtime.monitor())
+  case .services: reply = .services(await runtime.receptionist.services())
+  case .queryService(let name):
+    let status = await runtime.status()
+    let payload = try await runtime.receptionist.query(name, status: status)
+    return controlFrame(opcode: .serviceReport, payload: payload)
+  case .ping(let target): reply = .pong(try await runtime.ping(target))
+  case .join(let address): reply = .pong(try await runtime.join(address))
   case .reload:
     try await runtime.reload()
-    return .status(await runtime.status())
+    reply = .status(await runtime.status())
   }
+  return try encode(reply, opcode: .reply)
 }
 
-private func encode<Value: Encodable>(_ value: Value, opcode: UInt32) throws -> Frame {
-  Frame(target: 0x494E_4452, opcode: opcode, payload: ByteBuffer(bytes: try JSONEncoder().encode(value)))
+private func controlFrame(opcode: ControlOpcode, payload: Data) -> Frame {
+  Frame(target: controlTarget, opcode: opcode.rawValue, payload: ByteBuffer(bytes: payload))
 }
 
-private func decode<Value: Decodable>(_ frame: Frame, opcode: UInt32, as type: Value.Type) throws -> Value {
-  guard frame.target == 0x494E_4452, frame.opcode == opcode else { throw IndraError("Invalid control message") }
+private func encode<Value: Encodable>(_ value: Value, opcode: ControlOpcode) throws -> Frame {
+  controlFrame(opcode: opcode, payload: try JSONEncoder().encode(value))
+}
+
+private func decode<Value: Decodable>(_ frame: Frame, opcode: ControlOpcode, as type: Value.Type) throws -> Value {
+  guard frame.target == controlTarget, frame.opcode == opcode.rawValue else {
+    throw IndraError("Invalid control message")
+  }
   return try JSONDecoder().decode(type, from: Data(frame.payload.readableBytesView))
+}
+
+private func decodeControlReply(_ frame: Frame) throws -> ControlReply {
+  let reply = try decode(frame, opcode: .reply, as: ControlReply.self)
+  if case .failure(let message) = reply { throw IndraError(message) }
+  return reply
 }
 
 func withDeadline<Value: Sendable>(

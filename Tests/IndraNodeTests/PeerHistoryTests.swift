@@ -173,7 +173,7 @@ private func withPeerHistoryRuntime(
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: "/unused", peerHistoryPath: historyPath, system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: [])
   } catch {
     await runtime.shutdown()
     throw error

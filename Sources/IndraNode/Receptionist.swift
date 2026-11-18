@@ -39,6 +39,7 @@ public actor Receptionist {
   private var local: [ServiceRegistration: any DistributedActor] = [:]
   private var peers: [ActorEndpoint: ServicePeer] = [:]
   private var watchers: [UUID: ServiceWatcher] = [:]
+  private var queries: [String: @Sendable (isolated Receptionist, NodeStatus) async throws -> Data] = [:]
 
   init(system: TCPActorSystem, cluster: String, node: NodeIdentity) {
     self.system = system
@@ -56,6 +57,12 @@ public actor Receptionist {
     try register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
   }
 
+  func query(_ name: String, status: NodeStatus) async throws -> Data {
+    guard !stopped else { throw IndraError("Receptionist is stopping") }
+    guard let run = queries[name] else { throw IndraError("Unknown service query \(name)") }
+    return try await run(self, status)
+  }
+
   public func register<Act>(_ actor: Act, with key: ServiceKey<Act>) throws {
     guard !stopped else { throw IndraError("Receptionist is stopping") }
     let registration = ServiceRegistration(key: key.name, actorType: String(reflecting: Act.self), address: actor.id)
@@ -68,6 +75,19 @@ public actor Receptionist {
     local[registration] = actor
     revision += 1
     notifyWatchers()
+  }
+
+  public func registerQuery<Act, Value: Codable & Sendable>(
+    _ actor: Act, with key: ServiceKey<Act>, timeout: Duration,
+    sample: @escaping @Sendable (Act, String) async throws -> Value
+  ) throws {
+    guard queries[key.name] == nil else { throw IndraError("Duplicate service query name \(key.name)") }
+    try register(actor, with: key)
+    queries[key.name] = { receptionist, status in
+      let actors = try receptionist.lookup(key)
+      let reports = try await collectReports(actors: actors, status: status, timeout: timeout, sample: sample)
+      return try JSONEncoder().encode(reports)
+    }
   }
 
   public func unregister<Act>(_ actor: Act, from key: ServiceKey<Act>) {
@@ -183,6 +203,7 @@ public actor Receptionist {
     stopped = true
     local.removeAll()
     peers.removeAll()
+    queries.removeAll()
     for watcher in watchers.values { watcher.finish() }
     watchers.removeAll()
   }

@@ -90,7 +90,7 @@ private func withMonitorRuntime(name: String, body: @Sendable (NodeRuntime) asyn
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: [])
     try await body(runtime)
     await runtime.shutdown()
   } catch {

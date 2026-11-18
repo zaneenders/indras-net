@@ -1,4 +1,5 @@
 import Foundation
+import IndraHealth
 import NIOCore
 import Networking
 import Testing
@@ -10,12 +11,54 @@ import Testing
 struct MembershipCachingTests {
   @Test func actorSystemRejectsASecondSetOfBootstrapActors() async throws {
     let configuration = cacheConfiguration(name: "client", port: 0)
-    try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { runtime in
+    try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { runtime in
       let system = await runtime.system
       let duplicate = NodeRuntime(
         configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
-      await #expect(throws: RPCError.invalidConfiguration) { try await duplicate.start() }
+      await #expect(throws: RPCError.invalidConfiguration) { try await duplicate.start(services: []) }
       #expect(await runtime.receptionist.services().count == 2)
+    }
+  }
+
+  @Test func healthReportsResponsiveTimedOutAndUnavailableNodesTogether() async throws {
+    let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
+    defer { listener.channel.close(promise: nil) }
+    let port = try #require(listener.channel.localAddress?.port)
+    let stalled = NodeIdentity(
+      id: UUID(), name: "stalled", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, node: UUID()), build: nil)
+    let legacy = NodeIdentity(
+      id: UUID(), name: "legacy", endpoint: ActorEndpoint(host: "localhost", port: port, node: UUID()), build: nil)
+    try await withTestRuntime(
+      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused",
+      services: [HealthService.install]
+    ) { runtime in
+      _ = try await runtime.receive(
+        MembershipRequest(
+          version: 1, cluster: "cache-tests", node: stalled,
+          probe: .ping(
+            sequenceNumber: 1,
+            payload: [stalled, legacy].map { GossipMember(node: $0, status: .alive(0), protocolPeriod: 0) })))
+      let registration = ServiceRegistration(
+        key: HealthService.key.name, actorType: String(reflecting: HealthService.self),
+        address: ActorAddress(endpoint: stalled.endpoint, id: UUID()))
+      try await runtime.receptionist.accept(
+        ServiceSnapshot(version: 1, cluster: "cache-tests", node: stalled, revision: 1, registrations: [registration]),
+        from: stalled)
+
+      let status = await runtime.status()
+      let payload = try await runtime.receptionist.query(HealthService.key.name, status: status)
+      let reports = try JSONDecoder().decode([ServiceReport<HealthMetrics>].self, from: payload)
+      #expect(reports.count == 3)
+      guard case .responded(let local)? = reports.first?.outcome else {
+        throw IndraError("Expected a local health report")
+      }
+      #expect(local.freeDiskBytes > 0)
+      guard case .timedOut? = reports.first(where: { $0.node == stalled })?.outcome else {
+        throw IndraError("Expected the stalled health service to time out")
+      }
+      guard case .unavailable? = reports.first(where: { $0.node == legacy })?.outcome else {
+        throw IndraError("Expected the peer without a health service to be listed")
+      }
     }
   }
 
@@ -46,7 +89,7 @@ struct MembershipCachingTests {
         })
     }
     do {
-      try await withTestRuntime(configuration: configuration, configurationPath: path) { runtime in
+      try await withTestRuntime(configuration: configuration, configurationPath: path, services: []) { runtime in
         let membership = Task { try await runtime.runMembership() }
         defer { membership.cancel() }
         let first = Task { try await runtime.join(peer.address) }
@@ -101,7 +144,7 @@ struct MembershipCachingTests {
     }
     do {
       try await withTestRuntime(
-        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
       ) { runtime in
         let address = PeerAddress(host: viaAlias ? "localhost" : endpoint.host, port: endpoint.port)
         let first = try await runtime.ping(address.description)
@@ -128,16 +171,17 @@ struct MembershipCachingTests {
   }
 
   @Test func firstPingAfterPeerRestartLearnsTheNewEndpoint() async throws {
-    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused")
-    { client in
+    try await withTestRuntime(
+      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
+    ) { client in
       let configuration = cacheConfiguration(name: "peer", port: 0)
-      try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { original in
+      try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { original in
         let identity = await original.status().node
         #expect(try await client.ping("127.0.0.1:\(identity.endpoint.port)").node == identity)
         await original.shutdown()
         var updated = configuration
         updated.port = identity.endpoint.port
-        try await withTestRuntime(configuration: updated, configurationPath: "/unused") { replacement in
+        try await withTestRuntime(configuration: updated, configurationPath: "/unused", services: []) { replacement in
           let current = await replacement.status().node
           #expect(current.id == identity.id)
           #expect(current.endpoint != identity.endpoint)
@@ -156,7 +200,7 @@ struct MembershipCachingTests {
 
   @Test func diagnosticPingRetriesTheDisconnectAndDiscoversReplacementServices() async throws {
     let configuration = cacheConfiguration(name: "peer", port: 0)
-    try await withTestRuntime(configuration: configuration, configurationPath: "/unused") { replacement in
+    try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { replacement in
       let current = await replacement.status().node
       let original = NodeIdentity(
         id: current.id, name: current.name,
@@ -172,7 +216,7 @@ struct MembershipCachingTests {
       }
       do {
         try await withTestRuntime(
-          configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+          configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
         ) { client in
           #expect(try await client.ping(alias.description).node == original)
           let registration = ServiceRegistration(
@@ -242,7 +286,7 @@ struct MembershipCachingTests {
       newServer.cancel()
     }
     try await withTestRuntime(
-      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
     ) { client in
       #expect(try await client.ping(alias.description).node == original)
       do {
@@ -259,10 +303,12 @@ struct MembershipCachingTests {
 
   @Test(arguments: [false, true])
   func staleGossipCannotReplaceVerifiedProcess(knowPrevious: Bool) async throws {
-    try await withTestRuntime(configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused")
-    { client in
-      try await withTestRuntime(configuration: cacheConfiguration(name: "peer", port: 0), configurationPath: "/unused")
-      { peer in
+    try await withTestRuntime(
+      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
+    ) { client in
+      try await withTestRuntime(
+        configuration: cacheConfiguration(name: "peer", port: 0), configurationPath: "/unused", services: []
+      ) { peer in
         let current = await peer.status().node
         let previous = NodeIdentity(
           id: current.id, name: current.name,
@@ -341,7 +387,7 @@ struct MembershipCachingTests {
     }
     do {
       try await withTestRuntime(
-        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused"
+        configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
       ) { client in
         if knowPrevious { _ = try await client.ping(original.address.description) }
         let delayed = Task { try await client.ping(original.address.description) }
@@ -412,7 +458,8 @@ private func serveMembership(
 }
 
 private func withTestRuntime(
-  configuration: NodeConfiguration, configurationPath: String, _ body: @Sendable (NodeRuntime) async throws -> Void
+  configuration: NodeConfiguration, configurationPath: String, services: [ServiceInstaller],
+  _ body: @Sendable (NodeRuntime) async throws -> Void
 ) async throws {
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
@@ -421,7 +468,7 @@ private func withTestRuntime(
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: configurationPath, peerHistoryPath: nil, system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: services)
     try await body(runtime)
     await runtime.shutdown()
   } catch {

@@ -286,7 +286,7 @@ private func withSWIMRuntime(
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
   do {
-    try await runtime.start()
+    try await runtime.start(services: [])
     try await body(runtime)
     await runtime.shutdown()
   } catch {
