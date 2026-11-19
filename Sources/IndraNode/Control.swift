@@ -109,6 +109,8 @@ public func runNode(
 ) async throws {
   let configuration = try await NodeConfiguration.load(path: configurationPath)
   try await withSocketLease(at: socket) {
+    let config = try await absolutePath(FilePath(configurationPath))
+    try await StagingJournal(parent: config.removingLastComponent()).recover()
     try await runNode(
       configuration: configuration, configurationPath: configurationPath, socket: socket,
       services: services, onReady: onReady)
@@ -131,9 +133,9 @@ private func runNode(
     try await runtime.start(services: services)
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
     defer {
-      await Task.detached {
+      await withTaskCancellationShield {
         _ = try? await FileSystem.shared.removeItem(at: FilePath(socket), strategy: .sequential, recursively: false)
-      }.value
+      }
     }
     onReady(await runtime.status())
     try await withThrowingTaskGroup(of: Void.self) { tasks in

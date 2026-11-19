@@ -36,6 +36,12 @@ public struct TransferError: Error, CustomStringConvertible, Sendable {
   public init(_ description: String) { self.description = description }
 }
 
+/// A sink published the destination but could not confirm its durability.
+public struct UnconfirmedPublication: Error, CustomStringConvertible, Sendable {
+  public let description: String
+  public init(detail: String) { self.description = "Publication durability unconfirmed: " + detail }
+}
+
 public struct CommitUnconfirmed: Error, CustomStringConvertible, Sendable {
   public let expected: TransferReceipt
   public var description: String { "Commit unconfirmed for transfer \(expected.id)" }
@@ -104,7 +110,7 @@ public actor DataTransfers {
     guard !stopped else { throw RPCError.shutDown }
     // The connection owner must remain cancellable while publication finishes.
     let publication = Task { try await sink.commit() }
-    try await publication.value
+    do { try await publication.value } catch is UnconfirmedPublication { throw CommitUnconfirmed(expected: receipt) }
     if receipts.count == 1024 { receipts.removeFirst() }
     receipts.append(receipt)
   }

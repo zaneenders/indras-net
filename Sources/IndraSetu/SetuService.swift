@@ -34,7 +34,9 @@ package distributed actor SetuService {
 
   package static func installer(directory path: String) -> ServiceInstaller {
     { context in
-      let directory = try await SharedDirectory(path: path)
+      let config = try await absolutePath(FilePath(context.configurationPath))
+      let directory = try await SharedDirectory(
+        path: path, journal: StagingJournal(parent: config.removingLastComponent()))
       let service = SetuService(actorSystem: context.actorSystem, directory: directory, cluster: context.cluster)
       let jobs = FileTransfers(
         directory: directory, system: context.actorSystem, receptionist: context.receptionist, cluster: context.cluster)
@@ -60,8 +62,9 @@ package distributed actor SetuService {
     try check(cluster)
     try FileSink.validate(size: size)
     let path = try directory.path(for: name)
+    let journal = directory.journal
     return try await actorSystem.transfers.offer(to: peer, byteCount: size) {
-      .sink(try await FileSink(path: path))
+      .sink(try await FileSink(path: path, journal: journal))
     }
   }
 

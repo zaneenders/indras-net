@@ -1,8 +1,10 @@
 public import Distributed
 package import Foundation
 import NIOCore
+import NIOPosix
 import Networking
 import Synchronization
+import SystemPackage
 
 package protocol FixedActorID {
   static var fixedID: UUID { get }
@@ -56,6 +58,25 @@ public final class TCPActorSystem: DistributedActorSystem, Sendable {
   package func peerEndpoint(host: String, port: Int, reuseConnection: Bool) async throws -> ActorEndpoint {
     guard !registry.withLock({ $0.shutDown }) else { throw RPCError.shutDown }
     return try await transport.peerEndpoint(host: host, port: port, reuseConnection: reuseConnection)
+  }
+
+  /// A fresh handshake distinguishes a live incumbent from a replacement at the same address.
+  package func isListening(_ endpoint: ActorEndpoint) async throws -> Bool {
+    do {
+      return try await peerEndpoint(host: endpoint.host, port: endpoint.port, reuseConnection: false) == endpoint
+    } catch let error as IOError {
+      if error.errnoCode == Errno.connectionRefused.rawValue { return false }
+      throw RPCError.disconnected
+    } catch let error as NIOConnectionError {
+      if !error.connectionErrors.isEmpty,
+        error.connectionErrors.allSatisfy({
+          ($0.error as? IOError)?.errnoCode == Errno.connectionRefused.rawValue
+        })
+      {
+        return false
+      }
+      throw RPCError.disconnected
+    }
   }
 
   package func reserveFixedActorIDs(_ ids: Set<UUID>) throws {

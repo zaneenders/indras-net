@@ -117,7 +117,7 @@ enum DataWire {
         let limit = Int(min(Int64(blockBytes), ticket.byteCount - offset))
         let bytes = try await source.read(at: offset, maximumBytes: limit)
         guard (1...limit).contains(bytes.readableBytes) else { throw TransferError("Source size changed") }
-        hash.update(data: Data(bytes.readableBytesView))
+        hash.update(bytes: bytes.readableBytesSpan)
         try await write(.bytes, bytes: bytes, connection: connection)
         offset += Int64(bytes.readableBytes)
       }
@@ -148,7 +148,7 @@ enum DataWire {
         guard (1...blockBytes).contains(bytes.readableBytes),
           Int64(bytes.readableBytes) <= ticket.byteCount - offset
         else { throw TransferError("Data exceeds offered size") }
-        hash.update(data: Data(bytes.readableBytesView))
+        hash.update(bytes: bytes.readableBytesSpan)
         try await sink.write(bytes, at: offset)
         offset += Int64(bytes.readableBytes)
       }
@@ -157,7 +157,10 @@ enum DataWire {
       guard try JSONDecoder().decode(TransferReceipt.self, from: Data(finish.readableBytesView)) == receipt else {
         throw TransferError("Transfer integrity check failed")
       }
-      try await transfers.commit(sink, receipt: receipt)
+      do { try await transfers.commit(sink, receipt: receipt) } catch let uncertain as CommitUnconfirmed {
+        committed = true
+        throw uncertain
+      }
       committed = true
       // The receiver has committed even if the sender disconnects before observing the receipt.
       try? await send(.committed, value: receipt, connection: connection)
@@ -190,6 +193,8 @@ enum DataWire {
   private static func reportFailure(
     _ error: any Error, events: TransferEvents, connection: Connection
   ) async -> any Error {
+    // Close without a rejection: a sender waiting for the acknowledgement must report uncertainty.
+    if error is CommitUnconfirmed { return error }
     if let rejection = events.rejection.withLock({ $0 }) { return rejection }
     if !Task.isCancelled {
       let bytes = ByteBuffer(bytes: String(describing: error).utf8.prefix(4096))

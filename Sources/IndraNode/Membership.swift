@@ -68,9 +68,7 @@ public actor NodeRuntime {
   private var configuration: NodeConfiguration
   private var configurationUpdate: Task<Void, any Error>?
   private var swim: SWIM.Instance
-  private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
-  private var verified: [PeerAddress: ActorEndpoint] = [:]
-  private var retired: Set<ActorEndpoint> = []
+  private var peers = PeerDirectory()
   private var configurationError: String?
   private var discoveryErrors: [String: String] = [:]
   private let work: AsyncStream<MembershipWork>
@@ -137,7 +135,7 @@ public actor NodeRuntime {
   public func status() -> NodeStatus {
     var members: [Member] = []
     for member in swim.members where member.node != swim.swimNode {
-      guard let node = identities[member.node] else { continue }
+      guard let node = peers[member.node], peers.accepts(node) else { continue }
       members.append(Member(node: node, state: Member.State(member.status)))
     }
     return NodeStatus(
@@ -235,11 +233,7 @@ public actor NodeRuntime {
   }
 
   public func ping(_ target: String) async throws -> PingResult {
-    let matches = ([identity] + status().members.map(\.node)).filter {
-      $0.id.uuidString.lowercased() == target.lowercased() || $0.name == target
-    }
-    if matches.count > 1 { throw IndraError("Ambiguous node name; use its UUID or host:port") }
-    if let match = matches.first {
+    if let match = try peers.resolve(target, local: identity, isMember: { swim.status(of: $0.swimNode) != nil }) {
       if match.id == identity.id { return PingResult(node: identity, milliseconds: 0) }
       let result = try await contact(match.address, retryOnDisconnect: true)
       guard result.node.id == match.id else { throw IndraError("Address now belongs to a different node") }
@@ -298,14 +292,18 @@ public actor NodeRuntime {
   func receive(_ message: MembershipRequest) async throws -> MembershipReply {
     try validate(
       version: message.version, cluster: message.cluster, sender: message.node, payload: message.probe.payload)
-    guard isCurrent(message.node) else { throw IndraError("Peer process has been replaced") }
+    guard isCurrent(message.node) else {
+      verifyCandidate(message.node)
+      throw IndraError("Verifying replacement peer process")
+    }
     if case .pingRequest(let target, _, _) = message.probe {
       try target.validate()
       guard isCurrent(target) else {
         throw IndraError("Indirect probe targets a previous process")
       }
     }
-    learn(sender: message.node, payload: message.probe.payload)
+    remember(message.node)
+    learn(message.probe.payload, from: message.node)
     record(message.probe, direction: .inbound, peer: message.node.address)
     let response: MembershipResponse
     switch message.probe {
@@ -374,7 +372,7 @@ public actor NodeRuntime {
 
   private func identity(for node: ClusterMembership.Node) throws -> NodeIdentity {
     if node == swim.swimNode { return identity }
-    guard let identity = identities[node] else { throw IndraError("Missing SWIM peer identity") }
+    guard let identity = peers[node] else { throw IndraError("Missing SWIM peer identity") }
     return identity
   }
 
@@ -385,7 +383,7 @@ public actor NodeRuntime {
     serviceMembershipRevision += 1
     var reachable: [ActorEndpoint: NodeIdentity] = [:]
     for member in swim.members where member.node != swim.swimNode && isReachable(member.status) {
-      if let peer = identities[member.node] { reachable[peer.endpoint] = peer }
+      if let peer = peers[member.node], peers.accepts(peer) { reachable[peer.endpoint] = peer }
     }
     if await receptionist.update(node: identity, reachable: reachable, membershipRevision: serviceMembershipRevision) {
       requestServiceRefresh()
@@ -544,7 +542,7 @@ public actor NodeRuntime {
         if case .gossipProcessed(let gossip) = directive { record(gossip) }
         if case .sendPingRequests(let directive) = directive { pendingWork.yield(.indirect(directive)) }
       }
-      if case .timeout = response, let current = swim.status(of: target), let node = identities[target] {
+      if case .timeout = response, let current = swim.status(of: target), let node = peers[target] {
         telemetry.recordChange(node: node, previous: previous, current: Member.State(current))
       }
     case .indirect(let directive): await probeIndirectly(directive)
@@ -629,7 +627,7 @@ public actor NodeRuntime {
     // The target can appear in both gossip and response directives; record its resulting change once.
     let current = swim.status(of: target)
     noteReachabilityChange(target, previous: previous, current: current)
-    if let current, let node = identities[target] {
+    if let current, let node = peers[target] {
       telemetry.recordChange(node: node, previous: previous.map(Member.State.init), current: Member.State(current))
     }
     await updateServices()
@@ -679,7 +677,7 @@ public actor NodeRuntime {
     record(probe, direction: .outbound, peer: address)
     telemetry.inFlight += 1
     defer { telemetry.inFlight -= 1 }
-    let observed = verified
+    let observed = peers.verification
     var peerAddress = address
     do {
       let message = MembershipRequest(version: 1, cluster: configuration.cluster, node: identity, probe: probe)
@@ -701,19 +699,19 @@ public actor NodeRuntime {
           throw IndraError("Invalid indirect SWIM acknowledgement")
         }
       }
-      guard verified[peerAddress] == observed[peerAddress] || verified[peerAddress] == reply.node.endpoint else {
-        throw IndraError("Peer process changed while the request was in flight")
+      let incumbent = peers.incumbent(for: reply.node)
+      if let incumbent, incumbent.address != peerAddress {
+        try await checkIncumbent(incumbent, candidate: reply.node, deadline: deadline)
+        try Task.checkCancellation()
+        guard !stopped else { throw IndraError("Node is stopping") }
       }
-      if verified[peerAddress] != reply.node.endpoint {
-        verified[peerAddress] = reply.node.endpoint
-        for previous in identities.values
-        where previous.address == peerAddress && previous.endpoint != reply.node.endpoint {
-          retired.insert(previous.endpoint)
-          if case .applied(let change) = swim.confirmDead(node: previous.swimNode) { record(change) }
-        }
+      let update = try peers.verify(reply.node, observed: observed, checkedIncumbent: incumbent?.endpoint)
+      if update.identityChanged { noteIdentityChange(reply.node.swimNode) }
+      for previous in update.retired {
+        if case .applied(let change) = swim.confirmDead(node: previous.swimNode) { record(change) }
       }
-      learn(sender: reply.node, payload: reply.response.payload)
-      if case .ack = reply.response { rememberAlive(reply.response.target) }
+      learn(reply.response.payload, from: reply.node)
+      if case .ack = reply.response, isCurrent(reply.response.target) { rememberAlive(reply.response.target) }
       bootstraps[address]?.retry = nil
       discoveryErrors[address.description] = nil
       record(
@@ -721,7 +719,7 @@ public actor NodeRuntime {
         roundTripMilliseconds: started.duration(to: .now).secondsValue * 1000)
       return reply
     } catch {
-      if !Task.isCancelled, !stopped, verified[peerAddress] == observed[peerAddress] {
+      if !Task.isCancelled, !stopped, peers.verification.unchanged(at: peerAddress, since: observed) {
         let message = String(describing: error)
         telemetry.record(
           direction: .outbound, kind: .failure, peer: address, target: nil,
@@ -733,6 +731,30 @@ public actor NodeRuntime {
       }
       throw error
     }
+  }
+
+  private func checkIncumbent(
+    _ incumbent: NodeIdentity, candidate: NodeIdentity, deadline: ContinuousClock.Instant
+  ) async throws {
+    let listening: Bool
+    do {
+      listening = try await withDeadline(deadline: deadline, timeoutError: RPCError.timedOut) { [system] in
+        try await system.isListening(incumbent.endpoint)
+      }
+    } catch let error as RPCError where error == .disconnected || error == .timedOut {
+      // An inconclusive handshake alone cannot displace a reachable peer.
+      guard swim.status(of: incumbent.swimNode)?.isUnreachable == true else { throw error }
+      return
+    }
+    guard !listening else { throw IndraError("Two live processes are using node UUID \(candidate.id)") }
+  }
+
+  private func verifyCandidate(_ peer: NodeIdentity) {
+    guard peer.id != identity.id, !peers.retired.contains(peer.endpoint),
+      bootstraps[peer.address]?.task == nil,
+      bootstraps[peer.address]?.retry.map({ $0.nextAttempt <= .now }) ?? true
+    else { return }
+    startBootstrap(peer.address, waiting: nil)
   }
 
   private func record(_ probe: MembershipProbe, direction: ProbeEvent.Direction, peer: PeerAddress) {
@@ -799,7 +821,7 @@ public actor NodeRuntime {
       throw IndraError("Peer uses a different cluster or protocol version")
     }
     try sender.validate()
-    guard !retired.contains(sender.endpoint) else { throw IndraError("Peer process has been retired") }
+    guard !peers.retired.contains(sender.endpoint) else { throw IndraError("Peer process has been retired") }
     guard sender.id != identity.id || sender.endpoint == identity.endpoint else {
       throw IndraError("Duplicate node ID; generate a separate configuration for each node")
     }
@@ -810,22 +832,24 @@ public actor NodeRuntime {
     }
   }
 
-  private func learn(sender: NodeIdentity, payload: [GossipMember]) {
-    for member in payload where member.node.id != identity.id && isCurrent(member.node) {
-      remember(member.node)
+  private func learn(_ payload: [GossipMember], from sender: NodeIdentity) {
+    for member in payload where member.node.id != identity.id && member.node.id != sender.id {
+      if isCurrent(member.node) {
+        remember(member.node)
+      } else if case .alive = member.status, let incumbent = peers.incumbent(for: member.node),
+        incumbent.address != member.node.address
+      {
+        verifyCandidate(member.node)
+      }
     }
-    remember(sender)
   }
 
   private func remember(_ node: NodeIdentity) {
-    // Older peers omit build metadata when forwarding gossip about newer peers.
-    let key = node.swimNode
-    let previous = identities[key]
-    let identity = NodeIdentity(
-      id: node.id, name: node.name, endpoint: node.endpoint, build: node.build ?? previous?.build)
-    guard previous != identity else { return }
-    identities[key] = identity
-    if key != swim.swimNode, isReachable(swim.status(of: key)) { serviceMembershipChanged = true }
+    if peers.learn(node) { noteIdentityChange(node.swimNode) }
+  }
+
+  private func noteIdentityChange(_ node: ClusterMembership.Node) {
+    if node != swim.swimNode, isReachable(swim.status(of: node)) { serviceMembershipChanged = true }
   }
 
   private func noteReachabilityChange(
@@ -845,12 +869,11 @@ public actor NodeRuntime {
 
   private func isCurrent(_ node: NodeIdentity) -> Bool {
     if node.id == identity.id { return node.endpoint == identity.endpoint }
-    return !retired.contains(node.endpoint)
-      && (verified[node.address] == nil || verified[node.address] == node.endpoint)
+    return peers.accepts(node)
   }
 
   private func isCurrent(_ node: ClusterMembership.Node) -> Bool {
-    node == identity.swimNode || identities[node].map { isCurrent($0) } == true
+    node == identity.swimNode || peers[node].map { isCurrent($0) } == true
   }
 
   private func currentResponse(_ response: SWIM.PingResponse) -> SWIM.PingResponse? {

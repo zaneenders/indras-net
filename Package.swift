@@ -28,7 +28,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-log.git", from: "1.17.0"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.6.0"),
     .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.13.0"),
-    .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
+    .package(url: "https://github.com/apple/swift-system.git", from: "1.7.0"),
     .package(url: "https://github.com/apple/swift-cluster-membership.git", from: "0.4.0"),
     .package(url: "https://github.com/apple/swift-collections.git", from: "1.7.6"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.2"),
@@ -109,6 +109,8 @@ let package = Package(
         "Networking",
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Logging", package: "swift-log"),
+        .product(name: "SystemPackage", package: "swift-system"),
+        .product(name: "NIOPosix", package: "swift-nio"),
         .product(name: "NIOCore", package: "swift-nio")
       ],
       swiftSettings: sharedSwiftSettings

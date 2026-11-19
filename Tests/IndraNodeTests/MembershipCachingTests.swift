@@ -198,6 +198,55 @@ struct MembershipCachingTests {
     }
   }
 
+  @Test func liveProcessesWithTheSameIDReportAConflict() async throws {
+    let configuration = cacheConfiguration(name: "peer", port: 0)
+    try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { first in
+      try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { second in
+        try await withTestRuntime(
+          configuration: cacheConfiguration(name: "observer", port: 0),
+          configurationPath: "/unused", services: []
+        ) { observer in
+          let original = await first.status().node
+          let conflict = await second.status().node
+          #expect(try await observer.ping(original.address.description).node == original)
+          do {
+            _ = try await observer.ping(conflict.address.description)
+            Issue.record("Expected a duplicate UUID conflict")
+          } catch let error as IndraError {
+            #expect(error.description.contains("Two live processes"))
+          }
+          #expect(try await observer.ping(original.id.uuidString).node == original)
+          #expect(await observer.status().members.map(\.node) == [original])
+        }
+      }
+    }
+  }
+
+  @Test func verifiedMoveFencesLateRepliesAndGossipAtTheOldAddress() throws {
+    let id = UUID()
+    let first = NodeIdentity(
+      id: id, name: "peer", endpoint: ActorEndpoint(host: "localhost", port: 7331, systemID: UUID()), build: nil)
+    let second = NodeIdentity(
+      id: id, name: "peer", endpoint: ActorEndpoint(host: "localhost", port: 7332, systemID: UUID()), build: nil)
+    let advertised = NodeIdentity(id: id, name: first.name, endpoint: first.endpoint, build: .current)
+    var directory = PeerDirectory()
+    let learned = directory.learn(advertised)
+    #expect(learned)
+    let verified = try directory.verify(first, observed: directory.verification, checkedIncumbent: nil)
+    #expect(!verified.identityChanged)
+    #expect(directory.incumbent(for: second) == advertised)
+    let beforeMove = directory.verification
+    let move = try directory.verify(second, observed: beforeMove, checkedIncumbent: first.endpoint)
+    #expect(move.retired == [advertised])
+    #expect(move.identityChanged)
+    let restored = directory.learn(first)
+    #expect(!restored)
+    #expect(throws: IndraError.self) {
+      try directory.verify(first, observed: beforeMove, checkedIncumbent: nil)
+    }
+    #expect(directory.accepts(second))
+  }
+
   @Test func diagnosticPingRetriesTheDisconnectAndDiscoversReplacementServices() async throws {
     let configuration = cacheConfiguration(name: "peer", port: 0)
     try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { replacement in

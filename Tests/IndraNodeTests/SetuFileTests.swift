@@ -1,10 +1,11 @@
 import Foundation
-import IndraNode
 import NIOCore
 import Synchronization
 import SystemPackage
+import TCPActorSystem
 import Testing
 
+@testable import IndraNode
 @testable import IndraSetu
 
 #if canImport(Darwin)
@@ -36,10 +37,12 @@ struct SetuFileTests {
 
     let path = link.path + "/../shared/files"
     let resolved = base.appending(path: "nested/shared/files", directoryHint: .isDirectory)
-    await #expect(throws: IndraError.self) { try await SharedDirectory(path: path) }
+    await #expect(throws: IndraError.self) {
+      try await SharedDirectory(path: path, journal: StagingJournal(parent: FilePath(base.path)))
+    }
     #expect(!manager.fileExists(atPath: resolved.path))
-    _ = try await SharedDirectory(path: resolved.path)
-    let directory = try await SharedDirectory(path: path)
+    _ = try await SharedDirectory(path: resolved.path, journal: StagingJournal(parent: FilePath(base.path)))
+    let directory = try await SharedDirectory(path: path, journal: StagingJournal(parent: FilePath(base.path)))
     let fixture = resolved.appending(path: "file", directoryHint: .notDirectory)
     try Data([1]).write(to: fixture, options: [])
     try manager.createSymbolicLink(atPath: directory.root.appending("alias").string, withDestinationPath: "file")
@@ -62,9 +65,9 @@ struct SetuFileTests {
     try manager.createDirectory(at: original, withIntermediateDirectories: true)
     defer { try? manager.removeItem(at: root) }
     let path = FilePath(original.appending(path: "result").path)
-    let first = try await FileSink(path: path)
+    let first = try await FileSink(path: path, journal: StagingJournal(parent: FilePath(root.path)))
     defer { await first.abort() }
-    let second = try await FileSink(path: path)
+    let second = try await FileSink(path: path, journal: StagingJournal(parent: FilePath(root.path)))
     defer { await second.abort() }
     try await first.write(ByteBuffer(string: "first"), at: 0)
     try await second.write(ByteBuffer(string: "second"), at: 0)
@@ -90,6 +93,77 @@ struct SetuFileTests {
     #expect(try winners == [String(contentsOf: moved.appending(path: "result"), encoding: .utf8)])
     #expect(try manager.contentsOfDirectory(atPath: moved.path) == ["result"])
     #expect(try manager.contentsOfDirectory(atPath: original.path).isEmpty)
+  }
+
+  @Test func recoveryReclaimsInterruptedStagesAndPreservesTheActiveWriter() async throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appending(path: UUID().uuidString)
+    let output = root.appending(path: "external")
+    try manager.createDirectory(at: output, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: root) }
+    let rootPath = root.path
+    let journal = StagingJournal(parent: FilePath(rootPath))
+    let live = try await StagedFile(
+      path: FilePath(output.appending(path: "live").path), publication: .replace, journal: journal)
+    defer { await live.abort() }
+    try await live.write(ByteBuffer(string: "live"), at: 0)
+
+    try await #require(processExitsWith: .exitCode(42)) { [rootPath = rootPath as String] in
+      let journal = StagingJournal(parent: FilePath(rootPath))
+      let output = FilePath(rootPath).appending("external")
+      let transfer = try await FileSink(path: output.appending("download"), journal: journal)
+      let named = try await StagedFile(path: output.appending("replace"), publication: .replace, journal: journal)
+      try await transfer.write(ByteBuffer(string: "partial download"), at: 0)
+      try await named.write(ByteBuffer(string: "partial replacement"), at: 0)
+      _exit(42)
+    }
+    try await journal.recover()
+    try await journal.recover()
+    try await live.commit()
+    #expect(try manager.contentsOfDirectory(atPath: output.path) == ["live"])
+    #expect(try String(contentsOf: output.appending(path: "live"), encoding: .utf8) == "live")
+    #expect(try manager.contentsOfDirectory(atPath: root.appending(path: ".indra-staging").path).isEmpty)
+  }
+
+  @Test(arguments: [false, true])
+  func directorySyncFailurePreservesPublicationAndReportsUncertainty(receiverDials: Bool) async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let destination = root.appending(path: "copy")
+    let source = root.appending(path: "original")
+    try Data([7]).write(to: source)
+    let sender = try await TCPActorSystem(
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0,
+      callTimeout: .seconds(2), connectTimeout: .seconds(2))
+    defer { await sender.shutdown() }
+    let receiver = try await TCPActorSystem(
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0,
+      callTimeout: .seconds(2), connectTimeout: .seconds(2))
+    defer { await receiver.shutdown() }
+    let openSource: @Sendable () async throws -> TransferBody = {
+      .source(try await FileSource(path: FilePath(source.path), followLinks: false))
+    }
+    let openSink: @Sendable () async throws -> TransferBody = {
+      var file = try await StagedFile(
+        path: FilePath(destination.path), publication: .createOnly,
+        journal: StagingJournal(parent: FilePath(root.path)))
+      file.synchronizeDirectory = { _ in throw IndraError("Injected directory sync failure") }
+      return .sink(StagedSink(file: file))
+    }
+    let server = receiverDials ? sender : receiver
+    let client = receiverDials ? receiver : sender
+    let ticket = try await server.transfers.offer(
+      to: client.endpoint, byteCount: 1,
+      open: receiverDials ? openSource : openSink)
+    do {
+      _ = try await client.transfers.transfer(ticket, open: receiverDials ? openSink : openSource)
+      Issue.record("Expected an unconfirmed commit")
+    } catch let error as CommitUnconfirmed {
+      #expect(error.expected.id == ticket.id)
+    }
+    #expect(try Data(contentsOf: destination) == Data([7]))
+    #expect(await receiver.transfers.receipt(for: ticket.id) == nil)
   }
 
   @Test func sourceRejectsFIFOWithoutWaitingForAWriter() async throws {
@@ -118,4 +192,11 @@ struct SetuFileTests {
       await source.close()
     }
   }
+}
+
+private struct StagedSink: DataSink {
+  let file: StagedFile
+  func write(_ bytes: ByteBuffer, at offset: Int64) async throws { try await file.write(bytes, at: offset) }
+  func commit() async throws { try await file.commit() }
+  func abort() async { await file.abort() }
 }

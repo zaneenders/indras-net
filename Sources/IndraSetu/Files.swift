@@ -11,8 +11,10 @@ package struct SharedFile: Codable, Sendable {
 
 struct SharedDirectory: Sendable {
   let root: FilePath
+  let journal: StagingJournal
 
-  init(path: String) async throws {
+  init(path: String, journal: StagingJournal) async throws {
+    self.journal = journal
     let root = FilePath(path)
     guard root.isAbsolute else { throw IndraError("Specify an absolute shared directory") }
     try await createPrivateDirectory(at: root)
@@ -74,7 +76,7 @@ struct FileSource: DataSource {
       self.info = info
       self.handle = handle
     } catch {
-      await Task.detached { try? await handle.close() }.value
+      await withTaskCancellationShield { try? await handle.close() }
       throw error
     }
   }
@@ -90,7 +92,7 @@ struct FileSource: DataSource {
     return bytes
   }
 
-  func close() async { await Task.detached { try? await handle.close() }.value }
+  func close() async { await withTaskCancellationShield { try? await handle.close() } }
 }
 
 struct FileSink: DataSink {
@@ -100,11 +102,11 @@ struct FileSink: DataSink {
     guard (0...1_099_511_627_776).contains(size) else { throw IndraError("File exceeds the 1 TiB limit") }
   }
 
-  init(path: FilePath) async throws {
+  init(path: FilePath, journal: StagingJournal) async throws {
     guard try await FileSystem.shared.info(forFileAt: path, infoAboutSymbolicLink: true) == nil else {
       throw IndraError("Destination already exists: \(path)")
     }
-    file = try await StagedFile(path: path, publication: .createOnly)
+    file = try await StagedFile(path: path, publication: .createOnly, journal: journal)
   }
 
   func write(_ bytes: ByteBuffer, at offset: Int64) async throws {

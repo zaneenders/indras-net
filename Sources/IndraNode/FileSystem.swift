@@ -1,15 +1,7 @@
 import Foundation
-package import NIOCore
+import NIOCore
 package import SystemPackage
 import _NIOFileSystem
-
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Musl)
-import Musl
-#else
-import Glibc
-#endif
 
 package func absolutePath(_ path: FilePath) async throws -> FilePath {
   if path.isAbsolute { return path }
@@ -56,90 +48,14 @@ func writeNodeJSON(_ value: some Encodable, to path: String, overwrite: Bool) as
   data.append(10)
 
   try await createPrivateDirectory(at: path.removingLastComponent())
-  let file = try await StagedFile(path: path, publication: overwrite ? .replace : .createOnly)
+  let journal = StagingJournal(parent: path.removingLastComponent())
+  if !overwrite { try await journal.recover() }
+  let file = try await StagedFile(path: path, publication: overwrite ? .replace : .createOnly, journal: journal)
   do {
     try await file.write(ByteBuffer(bytes: data), at: 0)
     try await file.commit()
   } catch {
     await file.abort()
     throw error
-  }
-}
-
-/// One writer owns the staging file until commit succeeds or abort finishes.
-package struct StagedFile: Sendable {
-  package enum Publication: Sendable { case createOnly, replace }
-
-  private let directory: DirectoryFileHandle
-  private let file: WriteFileHandle
-  private let temporary: FilePath
-  private let destination: FilePath
-  private let publication: Publication
-
-  package init(path: FilePath, publication: Publication) async throws {
-    guard let name = path.lastComponent, name.kind == .regular else { throw IndraError("Expected a file path") }
-    let absolute = try await absolutePath(path)
-    let directory = try await FileSystem.shared.openDirectory(
-      atPath: absolute.removingLastComponent(), options: .init(followSymbolicLinks: true, closeOnExec: true))
-    let temporary = FilePath(".indra-" + UUID().uuidString)
-    do {
-      self.file = try await directory.openFile(
-        forWritingAt: temporary,
-        options: .init(
-          existingFile: .none, newFile: .init(permissions: .ownerReadWrite, transactionalCreation: false),
-          followSymbolicLinks: false, closeOnExec: true))
-    } catch {
-      await withTaskCancellationShield { try? await directory.close() }
-      throw error
-    }
-    self.directory = directory
-    self.temporary = temporary
-    self.destination = FilePath(root: nil, components: name)
-    self.publication = publication
-    do {
-      try await file.replacePermissions(.ownerReadWrite)
-    } catch {
-      await abort()
-      throw error
-    }
-  }
-
-  package func write(_ bytes: ByteBuffer, at offset: Int64) async throws {
-    let count = try await file.write(contentsOf: bytes.readableBytesView, toAbsoluteOffset: offset)
-    guard count == bytes.readableBytes else { throw IndraError("Incomplete file write") }
-  }
-
-  package func commit() async throws {
-    try await file.synchronize()
-    try await file.close()
-    try await directory.withUnsafeDescriptor { descriptor in
-      let fd = descriptor.rawValue
-      let result = unsafe temporary.withPlatformString { source in
-        unsafe destination.withPlatformString { target in
-          switch publication {
-          case .createOnly: unsafe linkat(fd, source, fd, target, 0)
-          case .replace: unsafe renameat(fd, source, fd, target)
-          }
-        }
-      }
-      guard result == 0 else { throw Errno(rawValue: errno) }
-    }
-    await cleanUp(removeTemporary: publication == .createOnly)
-  }
-
-  package func abort() async {
-    await withTaskCancellationShield { try? await file.close() }
-    await cleanUp(removeTemporary: true)
-  }
-
-  private func cleanUp(removeTemporary: Bool) async {
-    await withTaskCancellationShield {
-      if removeTemporary {
-        _ = try? await directory.withUnsafeDescriptor { descriptor in
-          unsafe temporary.withPlatformString { unsafe unlinkat(descriptor.rawValue, $0, 0) }
-        }
-      }
-      try? await directory.close()
-    }
   }
 }

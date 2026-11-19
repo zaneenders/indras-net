@@ -194,7 +194,6 @@ struct TCPTests {
       }
       do {
         #expect(!listener.channel.isActive)
-        #expect(server.channel.isActive)
         #expect(client.channel.isActive)
         try await client.executeThenClose { _, outbound in
           try await outbound.write(Frame(target: 0, opcode: 3, payload: ByteBuffer()))

@@ -15,7 +15,8 @@ import SystemPackage
 
 @Suite(.timeLimit(.minutes(1)))
 final class DaemonRestartTests {
-  @Test func serviceDiscoveryRecoversAfterDaemonCrash() async throws {
+  @Test(arguments: [false, true])
+  func serviceDiscoveryRecoversAfterDaemonCrash(changePort: Bool) async throws {
     #if os(macOS)
     let products = Bundle(for: DaemonRestartTests.self).bundleURL.deletingLastPathComponent()
     #else
@@ -34,20 +35,18 @@ final class DaemonRestartTests {
       let cluster = configuration.cluster
       let alpha = try await DaemonProcess(executable: executable, root: root, configuration: configuration)
       try await alpha.run(logName: "daemon.log", stopWith: .terminate) { alphaIdentity in
-        let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
-        let reservedPort = reservation.channel.localAddress?.port
-        try await reservation.channel.close()
         var configuration = makeConfiguration(name: "beta", seeds: [alphaIdentity.address])
         configuration.cluster = cluster
-        configuration.port = try #require(reservedPort)
         let beta = try await DaemonProcess(executable: executable, root: root, configuration: configuration)
 
-        let original = try await beta.run(logName: "before-crash.log", stopWith: .kill) { identity in
+        let (original, nextListener) = try await beta.run(logName: "before-crash.log", stopWith: .kill) { identity in
           try await alpha.waitForServices(from: identity)
           let pong = try await alpha.ping(node: identity.id)
           try #require(pong.node.endpoint == identity.endpoint)
-          return identity
+          let reservation = changePort ? try await TCP.listen(host: "127.0.0.1", port: 0) : nil
+          return (identity, reservation)
         }
+        defer { nextListener?.channel.close(promise: nil) }
 
         let staleSocket = try FileManager.default.attributesOfItem(atPath: beta.socket)
         try #require(staleSocket[.type] as? FileAttributeType == .typeSocket)
@@ -57,9 +56,12 @@ final class DaemonRestartTests {
           services.contains { $0.node.id == alphaIdentity.id } && services.allSatisfy { $0.node.id != original.id }
         }
 
+        configuration.port = nextListener?.channel.localAddress?.port ?? original.endpoint.port
+        try await configuration.save(path: beta.config, overwrite: true)
+        try await nextListener?.channel.close()
         try await beta.run(logName: "after-crash.log", stopWith: .terminate) { replacement in
           try #require(replacement.id == original.id)
-          try #require(replacement.address == original.address)
+          try #require((replacement.address != original.address) == changePort)
           try #require(replacement.endpoint.systemID != original.endpoint.systemID)
           try await alpha.waitForServices(from: replacement)
           let pong = try await alpha.ping(node: replacement.id)

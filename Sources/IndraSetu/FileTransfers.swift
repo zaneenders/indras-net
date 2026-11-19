@@ -101,13 +101,14 @@ actor FileTransfers {
       }
     case .get(let name, let peer, let output):
       let path = try output.map(FilePath.init(_:)) ?? directory.path(for: name)
+      let journal = directory.journal
       return try submit(file: name, peer: peer) { [self] jobID in
         let remote = try await service(peer)
         let ticket = try await remote.fetch(name: name, for: system.endpoint, cluster: cluster)
         guard ticket.endpoint == remote.id.endpoint else { throw RPCError.invalidMessage }
         await record(ticket: ticket, for: jobID)
         try FileSink.validate(size: ticket.byteCount)
-        return try await system.transfers.transfer(ticket) { .sink(try await FileSink(path: path)) }
+        return try await system.transfers.transfer(ticket) { .sink(try await FileSink(path: path, journal: journal)) }
       }
     case .jobs: return .jobs(jobs)
     case .job(let id), .cancel(let id):
