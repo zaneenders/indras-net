@@ -64,7 +64,9 @@ public actor NodeRuntime {
   private var peerHistory: PeerHistory
   private var peerHistoryNeedsSave = false
   private var peerHistorySaveAttempt: ContinuousClock.Instant?
+  private var peerHistorySave: Task<Void, Never>?
   private var configuration: NodeConfiguration
+  private var configurationUpdate: Task<Void, any Error>?
   private var swim: SWIM.Instance
   private var identities: [ClusterMembership.Node: NodeIdentity] = [:]
   private var verified: [PeerAddress: ActorEndpoint] = [:]
@@ -76,6 +78,8 @@ public actor NodeRuntime {
   private var bootstraps: [PeerAddress: Bootstrap] = [:]
   private var bootstrapOffset = 0
   private var stopped = false
+  private var shutdownTask: Task<Void, Never>?
+  private var serviceShutdown: [@Sendable () async -> Void] = []
   private var serviceMembershipChanged = false
   private var serviceMembershipRevision: UInt64 = 0
   private var refreshingServices = false
@@ -104,7 +108,7 @@ public actor NodeRuntime {
   public func start(services: [ServiceInstaller]) async throws {
     if let peerHistoryPath {
       do {
-        peerHistory = try PeerHistory.load(
+        peerHistory = try await PeerHistory.load(
           path: peerHistoryPath, nodeID: configuration.id, cluster: configuration.cluster)
       } catch {
         discoveryErrors["peer-history"] = String(describing: error)
@@ -113,11 +117,17 @@ public actor NodeRuntime {
     try await receptionist.start(runtime: self)
     let context = ServiceContext(
       actorSystem: system, receptionist: receptionist, cluster: configuration.cluster,
-      configurationPath: configurationPath, started: telemetry.started)
+      configurationPath: configurationPath, started: telemetry.started,
+      runtime: self)
     for install in services {
       try Task.checkCancellation()
       try await install(context)
     }
+  }
+
+  func addServiceShutdown(_ action: @escaping @Sendable () async -> Void) throws {
+    guard !stopped else { throw IndraError("Node is stopping") }
+    serviceShutdown.append(action)
   }
 
   static func transportTimeoutMilliseconds(configuration: NodeConfiguration) -> Int64 {
@@ -133,7 +143,9 @@ public actor NodeRuntime {
     return NodeStatus(
       node: identity, cluster: configuration.cluster,
       members: members.sorted {
-        if $0.node.id == $1.node.id { return $0.node.endpoint.node.uuidString < $1.node.endpoint.node.uuidString }
+        if $0.node.id == $1.node.id {
+          return $0.node.endpoint.systemID.uuidString < $1.node.endpoint.systemID.uuidString
+        }
         return $0.node.id.uuidString < $1.node.id.uuidString
       },
       seeds: configuration.seeds, configurationError: configurationError, discoveryErrors: discoveryErrors)
@@ -150,45 +162,68 @@ public actor NodeRuntime {
   }
 
   public func reload() async throws {
-    try reloadConfiguration(addingSeed: nil)
+    try await reloadConfiguration(addingSeed: nil)
     await updateServices()
   }
 
-  private func reloadConfiguration(addingSeed seed: PeerAddress?) throws {
+  private func reloadConfiguration(addingSeed seed: PeerAddress?) async throws {
+    try Task.checkCancellation()
+    guard !stopped else { throw IndraError("Node is stopping") }
+    let previous = configurationUpdate
+    // Serialize reading, updating, and publishing the configuration across suspension points.
+    let update = Task {
+      _ = await previous?.result
+      try Task.checkCancellation()
+      try await applyConfiguration(addingSeed: seed)
+    }
+    configurationUpdate = update
+    try await withTaskCancellationHandler {
+      try await update.value
+    } onCancel: {
+      update.cancel()
+    }
+  }
+
+  private func applyConfiguration(addingSeed seed: PeerAddress?) async throws {
     guard !stopped else { throw IndraError("Node is stopping") }
     var updated: NodeConfiguration
     do {
-      updated = try NodeConfiguration.load(path: configurationPath)
+      updated = try await NodeConfiguration.load(path: configurationPath)
       guard configuration.canReload(updated) else {
         throw IndraError(
           "Identity, cluster, listen/advertised address, port, and SWIM timing changes require a restart")
       }
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
       configurationError = String(describing: error)
       throw error
     }
+    guard !stopped else { throw IndraError("Node is stopping") }
     configurationError = nil
     if let seed, !updated.seeds.contains(seed) {
       updated.seeds.append(seed)
-      try updated.save(path: configurationPath, overwrite: true)
+      try await updated.save(path: configurationPath, overwrite: true)
     }
     guard updated != configuration else { return }
     let addedSeeds = updated.seeds.filter { !configuration.seeds.contains($0) }
     if updated.name != configuration.name { serviceMembershipChanged = true }
     configuration = updated
-    for address in addedSeeds where address != identity.address {
+    guard !stopped else { return }
+    for address in addedSeeds where address != identity.address && address != seed {
       startBootstrap(address, waiting: nil)
     }
   }
 
   public func join(_ address: PeerAddress) async throws -> PingResult {
     try address.validate()
+    try await reloadConfiguration(addingSeed: address)
     let waiter = UUID()
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         do {
           try Task.checkCancellation()
-          try reloadConfiguration(addingSeed: address)
+          guard !stopped else { throw IndraError("Node is stopping") }
           startBootstrap(address, waiting: (waiter, continuation))
         } catch {
           continuation.resume(throwing: error)
@@ -238,11 +273,24 @@ public actor NodeRuntime {
   }
 
   public func shutdown() async {
+    if let shutdownTask {
+      await shutdownTask.value
+      return
+    }
     stopped = true
+    let task = Task { await stopResources() }
+    shutdownTask = task
+    await task.value
+  }
+
+  private func stopResources() async {
     pendingWork.finish()
+    _ = await configurationUpdate?.result
     await cancelBootstraps(keepingJoins: false)
     bootstraps.removeAll()
-    savePeerHistory(force: true)
+    await savePeerHistory(force: true)
+    for action in serviceShutdown.reversed() { await action() }
+    serviceShutdown.removeAll()
     await receptionist.shutdown()
     await system.shutdown()
   }
@@ -331,7 +379,7 @@ public actor NodeRuntime {
   }
 
   private func updateServices() async {
-    savePeerHistory(force: false)
+    await savePeerHistory(force: false)
     guard serviceMembershipChanged, !stopped else { return }
     serviceMembershipChanged = false
     serviceMembershipRevision += 1
@@ -350,18 +398,27 @@ public actor NodeRuntime {
     peerHistoryNeedsSave = true
   }
 
-  private func savePeerHistory(force: Bool) {
-    guard peerHistoryNeedsSave, let peerHistoryPath else { return }
+  private func savePeerHistory(force: Bool) async {
+    if force { await peerHistorySave?.value }
+    guard force || !stopped else { return }
+    guard peerHistorySave == nil, peerHistoryNeedsSave, let peerHistoryPath else { return }
     let now = ContinuousClock.now
     if !force, let peerHistorySaveAttempt, peerHistorySaveAttempt.duration(to: now) < .seconds(5) { return }
     peerHistorySaveAttempt = now
-    do {
-      try peerHistory.save(path: peerHistoryPath)
-      peerHistoryNeedsSave = false
-      discoveryErrors["peer-history"] = nil
-    } catch {
-      discoveryErrors["peer-history"] = String(describing: error)
+    let snapshot = peerHistory
+    peerHistoryNeedsSave = false
+    let save = Task {
+      defer { peerHistorySave = nil }
+      do {
+        try await snapshot.save(path: peerHistoryPath)
+        discoveryErrors["peer-history"] = nil
+      } catch {
+        peerHistoryNeedsSave = true
+        discoveryErrors["peer-history"] = String(describing: error)
+      }
     }
+    peerHistorySave = save
+    await save.value
   }
 
   private func requestServiceRefresh() {

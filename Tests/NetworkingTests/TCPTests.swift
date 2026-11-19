@@ -1,6 +1,7 @@
-import Networking
 import NIOCore
 import NIOPosix
+import Networking
+import Synchronization
 import Testing
 
 @Suite(.timeLimit(.minutes(1)))
@@ -61,6 +62,40 @@ struct TCPTests {
     }
   }
 
+  @Test(arguments: [false, true])
+  func closingDrainsABufferedFrame(halfClose: Bool) async throws {
+    try await withLoopbackPair { server, client in
+      try await client.channel.setSendBuffer(bytes: 4096)
+      try await server.channel.setAutoRead(false)
+      let frame = Frame(target: 1, opcode: 2, payload: ByteBuffer(repeating: 7, count: 2 * 1024 * 1024))
+      let (enqueued, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+      async let send: Void = client.executeThenClose { inbound, outbound in
+        defer { signal.finish() }
+        try await outbound.write(frame)
+        let bufferedBytes = try await client.channel.bufferedWriteBytes()
+        #expect(bufferedBytes > 0)
+        signal.yield(())
+        if halfClose {
+          outbound.finish()
+          var frames = inbound.makeAsyncIterator()
+          let end = try await frames.next()
+          #expect(end == nil)
+        }
+      }
+
+      for await _ in enqueued { break }
+      try await server.channel.setAutoRead(true)
+      try await server.executeThenClose { inbound, _ in
+        var frames = inbound.makeAsyncIterator()
+        let received = try await frames.next()
+        #expect(received == frame)
+        let end = try await frames.next()
+        #expect(end == nil)
+      }
+      try await send
+    }
+  }
+
   @Test func cancellingAnInboundWaitReleasesItsSocket() async throws {
     try await withLoopbackPair { _, client in
       let waiting = Task {
@@ -96,6 +131,25 @@ struct TCPTests {
         }
         try await tasks.waitForAll()
       }
+    }
+  }
+
+  @Test func inputCloseHandlerCanBeRemovedAndRegisteredAfterEOF() async throws {
+    try await withLoopbackPair { server, client in
+      let calls = Mutex(0)
+      try await server.executeThenClose { inbound, _ in
+        try await server.setInputCloseHandler { calls.withLock { $0 += 1 } }
+        try await server.setInputCloseHandler(nil)
+        try await client.channel.close(mode: .output)
+        var frames = inbound.makeAsyncIterator()
+        #expect(try await frames.next() == nil)
+        #expect(server.channel.isActive)
+        #expect(calls.withLock { $0 } == 0)
+
+        try await server.setInputCloseHandler { calls.withLock { $0 += 1 } }
+        #expect(calls.withLock { $0 } == 1)
+      }
+      #expect(calls.withLock { $0 } == 1)
     }
   }
 
@@ -194,6 +248,20 @@ struct TCPTests {
     }
   }
 
+}
+
+extension Channel {
+  fileprivate func setSendBuffer(bytes: Int) async throws {
+    try await setOption(ChannelOptions.socketOption(.so_sndbuf), value: bytes).get()
+  }
+
+  fileprivate func bufferedWriteBytes() async throws -> Int {
+    try await getOption(ChannelOptions.bufferedWritableBytes).get()
+  }
+
+  fileprivate func setAutoRead(_ enabled: Bool) async throws {
+    try await setOption(ChannelOptions.autoRead, value: enabled).get()
+  }
 }
 
 private enum TestFailure: Error {

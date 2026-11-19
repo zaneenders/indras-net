@@ -38,7 +38,7 @@ struct MonitoringTests {
         #expect(decoded.status.node.build == .current)
         let older = NodeIdentity(
           id: UUID(), name: "older",
-          endpoint: ActorEndpoint(host: "127.0.0.1", port: 7333, node: UUID()), build: nil)
+          endpoint: ActorEndpoint(host: "127.0.0.1", port: 7333, systemID: UUID()), build: nil)
         let stripped = NodeIdentity(id: peer.id, name: peer.name, endpoint: peer.endpoint, build: nil)
         _ = try await first.receive(
           MembershipRequest(
@@ -55,7 +55,7 @@ struct MonitoringTests {
     let peer = PeerAddress(host: "127.0.0.1", port: 7331)
     let node = NodeIdentity(
       id: UUID(), name: "peer",
-      endpoint: ActorEndpoint(host: peer.host, port: peer.port, node: UUID()), build: nil)
+      endpoint: ActorEndpoint(host: peer.host, port: peer.port, systemID: UUID()), build: nil)
     for number in 0..<10_000 {
       telemetry.record(
         direction: .outbound, kind: .ping, peer: peer, target: nil,
@@ -71,7 +71,7 @@ struct MonitoringTests {
 
   @Test func buildMetadataIsOptionalForOlderNodesAndValidated() throws {
     let old = NodeIdentity(
-      id: UUID(), name: "old", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7331, node: UUID()), build: nil)
+      id: UUID(), name: "old", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7331, systemID: UUID()), build: nil)
     let data = try JSONEncoder().encode(old)
     #expect(!String(decoding: data, as: UTF8.self).contains("build"))
     #expect(try JSONDecoder().decode(NodeIdentity.self, from: data).build == nil)

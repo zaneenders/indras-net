@@ -23,6 +23,22 @@ swift run indra --version
 swift run indra services
 # Check daemon uptime and config filesystem free space. Add --json for raw values.
 swift run indra health
+# Enable file transfers on the node's existing TCP port.
+swift run indra daemon --setu-directory /absolute/shared
+# Send a file and print its verified receipt.
+swift run indra setu send /absolute/file --peer beta
+# List shared file names on a peer.
+swift run indra setu list --peer beta
+# Fetch a shared file to an unused local path.
+swift run indra setu get filename --peer beta --output /absolute/destination
+# Submit a background transfer.
+swift run indra setu send /absolute/file --peer beta --no-wait --json
+# Inspect recent jobs, wait for completion, or cancel a running transfer.
+swift run indra setu jobs
+swift run indra setu wait JOB_ID
+swift run indra setu cancel JOB_ID
+# Query a recent commit by its transfer ID on the receiving node.
+swift run indra setu receipt TRANSFER_ID --peer beta
 # Ping by node name, UUID, or host:port.
 swift run indra ping beta
 # Persist another seed and register with it.

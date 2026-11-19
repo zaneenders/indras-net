@@ -32,7 +32,7 @@ final class DaemonRestartTests {
       var configuration = makeConfiguration(name: "alpha", seeds: [])
       configuration.cluster = UUID().uuidString
       let cluster = configuration.cluster
-      let alpha = try DaemonProcess(executable: executable, root: root, configuration: configuration)
+      let alpha = try await DaemonProcess(executable: executable, root: root, configuration: configuration)
       try await alpha.run(logName: "daemon.log", stopWith: .terminate) { alphaIdentity in
         let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
         let reservedPort = reservation.channel.localAddress?.port
@@ -40,7 +40,7 @@ final class DaemonRestartTests {
         var configuration = makeConfiguration(name: "beta", seeds: [alphaIdentity.address])
         configuration.cluster = cluster
         configuration.port = try #require(reservedPort)
-        let beta = try DaemonProcess(executable: executable, root: root, configuration: configuration)
+        let beta = try await DaemonProcess(executable: executable, root: root, configuration: configuration)
 
         let original = try await beta.run(logName: "before-crash.log", stopWith: .kill) { identity in
           try await alpha.waitForServices(from: identity)
@@ -60,7 +60,7 @@ final class DaemonRestartTests {
         try await beta.run(logName: "after-crash.log", stopWith: .terminate) { replacement in
           try #require(replacement.id == original.id)
           try #require(replacement.address == original.address)
-          try #require(replacement.endpoint.node != original.endpoint.node)
+          try #require(replacement.endpoint.systemID != original.endpoint.systemID)
           try await alpha.waitForServices(from: replacement)
           let pong = try await alpha.ping(node: replacement.id)
           try #require(pong.node.id == replacement.id)
@@ -82,11 +82,11 @@ private struct DaemonProcess: Sendable {
   var config: String { directory.appending(path: "config.json", directoryHint: .notDirectory).path }
   var socket: String { directory.appending(path: "control.sock", directoryHint: .notDirectory).path }
 
-  init(executable: URL, root: URL, configuration: NodeConfiguration) throws {
+  init(executable: URL, root: URL, configuration: NodeConfiguration) async throws {
     self.executable = executable
     self.directory = root.appending(path: configuration.name, directoryHint: .isDirectory)
     self.id = configuration.id
-    try configuration.save(path: config, overwrite: false)
+    try await configuration.save(path: config, overwrite: false)
   }
 
   func run<Value: Sendable>(

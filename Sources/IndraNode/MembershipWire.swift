@@ -135,7 +135,7 @@ struct GossipAddress: Codable, Sendable {
 extension NodeIdentity {
   var swimNode: ClusterMembership.Node {
     // The actor endpoint changes on every daemon start; the configured UUID stays stable.
-    let uid = endpoint.node.uuidString.prefix(18).filter { $0 != "-" }
+    let uid = endpoint.systemID.uuidString.prefix(18).filter { $0 != "-" }
     return ClusterMembership.Node(
       protocol: "indra", host: endpoint.host, port: endpoint.port,
       uid: UInt64(uid, radix: 16))

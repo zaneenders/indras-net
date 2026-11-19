@@ -74,11 +74,11 @@ struct SWIMMembershipTests {
       let previous = NodeIdentity(
         id: current.id, name: current.name,
         endpoint: ActorEndpoint(
-          host: current.endpoint.host, port: current.endpoint.port, node: UUID()), build: nil)
+          host: current.endpoint.host, port: current.endpoint.port, systemID: UUID()), build: nil)
       let peer = NodeIdentity(
         id: UUID(), name: "peer",
         endpoint: ActorEndpoint(
-          host: "127.0.0.1", port: 7332, node: UUID()), build: nil)
+          host: "127.0.0.1", port: 7332, systemID: UUID()), build: nil)
       let response = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: peer,
@@ -107,13 +107,13 @@ struct SWIMMembershipTests {
     let target = NodeIdentity(
       id: UUID(), name: "offline",
       endpoint: ActorEndpoint(
-        host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port), node: UUID()), build: nil)
+        host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port), systemID: UUID()), build: nil)
     try await reservation.channel.close()
     try await withSWIMRuntime(configuration: makeConfiguration(name: "intermediary", seeds: [])) { runtime in
       let origin = NodeIdentity(
         id: UUID(), name: "origin",
         endpoint: ActorEndpoint(
-          host: "127.0.0.1", port: 7332, node: UUID()), build: nil)
+          host: "127.0.0.1", port: 7332, systemID: UUID()), build: nil)
       let reply = try await runtime.receive(
         MembershipRequest(
           version: 1, cluster: "test", node: origin,
@@ -212,7 +212,7 @@ private func withProbeTarget(body: @Sendable (NodeIdentity, ProbeHistory) async 
   let target = NodeIdentity(
     id: UUID(), name: "target",
     endpoint: ActorEndpoint(
-      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID()), build: nil)
+      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), systemID: UUID()), build: nil)
   let probes = ProbeHistory()
   let server = Task { try await serveProbeTarget(listener: listener, target: target, history: probes) }
   do {
@@ -235,7 +235,8 @@ private func serveProbeTarget(listener: Listener, target: NodeIdentity, history:
         for try await connection in connections {
           clients.addTask {
             try await connection.executeThenClose { input, output in
-              try await output.write(WireMessage.hello(version: WireMessage.version, endpoint: target.endpoint).frame())
+              try await output.write(
+                WireMessage.hello(version: WireMessage.version, endpoint: target.endpoint, capabilities: nil).frame())
               let address = ActorAddress(endpoint: target.endpoint, id: MembershipService.fixedID)
               for try await frame in input {
                 switch try WireMessage(frame: frame) {

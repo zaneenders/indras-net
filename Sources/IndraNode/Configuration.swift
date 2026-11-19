@@ -87,25 +87,15 @@ public struct NodeConfiguration: Codable, Sendable, Equatable {
     for seed in seeds { try seed.validate() }
   }
 
-  public static func load(path: String) throws -> Self {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
-    let configuration = try JSONDecoder().decode(Self.self, from: data)
+  public static func load(path: String) async throws -> Self {
+    let configuration = try await readNodeJSON(Self.self, from: path)
     try configuration.validate()
     return configuration
   }
 
-  public func save(path: String, overwrite: Bool) throws {
+  public func save(path: String, overwrite: Bool) async throws {
     try validate()
-    let url = URL(fileURLWithPath: path)
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    var data = try encoder.encode(self)
-    data.append(10)
-    try data.write(to: url, options: overwrite ? [.atomic] : [.withoutOverwriting])
-    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    try await writeNodeJSON(self, to: path, overwrite: overwrite)
   }
 
   func canReload(_ other: Self) -> Bool {

@@ -8,12 +8,12 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct PeerHistoryTests {
-  @Test func historyKeepsRecentAddressesAndIsScopedToTheNodeAndCluster() throws {
+  @Test func historyKeepsRecentAddressesAndIsScopedToTheNodeAndCluster() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let path = root.appendingPathComponent("peers.json").path
     let owner = UUID()
-    var history = try PeerHistory.load(path: path, nodeID: owner, cluster: "test")
+    var history = try await PeerHistory.load(path: path, nodeID: owner, cluster: "test")
     #expect(history.peers.isEmpty)
     for number in 0..<300 {
       let node = historyIdentity(id: UUID(), port: 10_000 + number)
@@ -34,12 +34,12 @@ struct PeerHistoryTests {
     #expect(!history.peers.contains { $0.id == peer.id })
     #expect(history.peers.first?.id == replacement.id)
 
-    try history.save(path: path)
-    let restored = try PeerHistory.load(path: path, nodeID: owner, cluster: "test")
+    try await history.save(path: path)
+    let restored = try await PeerHistory.load(path: path, nodeID: owner, cluster: "test")
     #expect(restored.addresses == history.addresses)
     #expect(restored.peers.first?.lastSeen == history.peers.first?.lastSeen)
-    #expect(try PeerHistory.load(path: path, nodeID: UUID(), cluster: "test").peers.isEmpty)
-    #expect(try PeerHistory.load(path: path, nodeID: owner, cluster: "other").peers.isEmpty)
+    #expect(try await PeerHistory.load(path: path, nodeID: UUID(), cluster: "test").peers.isEmpty)
+    #expect(try await PeerHistory.load(path: path, nodeID: owner, cluster: "other").peers.isEmpty)
     let permissions = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int
     #expect(permissions == 0o600)
   }
@@ -61,7 +61,7 @@ struct PeerHistoryTests {
             await joining.status().members.filter { $0.state == .alive }.count == 2
           }
         }
-        let saved = try PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
+        let saved = try await PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
         #expect(saved.peers.contains { $0.id == survivorIdentity.id })
         await seed.shutdown()
 
@@ -76,7 +76,7 @@ struct PeerHistoryTests {
             await joining.status().members.contains { $0.node.id == survivorIdentity.id && $0.state == .unreachable }
           }
         }
-        let retained = try PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
+        let retained = try await PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
         #expect(retained.peers.contains { $0.id == survivorIdentity.id })
       }
     }
@@ -100,7 +100,7 @@ struct PeerHistoryTests {
         try await reservation.channel.close()
         var history = PeerHistory(nodeID: configuration.id, cluster: configuration.cluster)
         history.record(historyIdentity(id: UUID(), port: port), at: .now)
-        try history.save(path: path)
+        try await history.save(path: path)
       }
       try await withPeerHistoryRuntime(configuration: configuration, historyPath: path) { joining in
         try await historyEventually {
@@ -109,7 +109,7 @@ struct PeerHistoryTests {
         #expect(await joining.status().members.count == 1)
         try await historyEventually { await joining.status().discoveryErrors["peer-history"] == nil }
       }
-      let saved = try PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
+      let saved = try await PeerHistory.load(path: path, nodeID: configuration.id, cluster: configuration.cluster)
       #expect(saved.peers.contains { $0.id == seedIdentity.id })
     }
   }
@@ -127,7 +127,7 @@ struct PeerHistoryTests {
       let configuration = makeConfiguration(name: "joining", seeds: [obsolete])
       var history = PeerHistory(nodeID: configuration.id, cluster: configuration.cluster)
       history.record(peerIdentity, at: .now)
-      try history.save(path: path)
+      try await history.save(path: path)
       try await withPeerHistoryRuntime(configuration: configuration, historyPath: path) { joining in
         try await historyEventually {
           let status = await joining.status()
@@ -161,7 +161,7 @@ struct PeerHistoryTests {
 
 private func historyIdentity(id: UUID, port: Int) -> NodeIdentity {
   NodeIdentity(
-    id: id, name: "peer", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, node: UUID()), build: nil)
+    id: id, name: "peer", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, systemID: UUID()), build: nil)
 }
 
 private func withPeerHistoryRuntime(

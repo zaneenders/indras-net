@@ -1,5 +1,6 @@
 # Repository rules
 
+- Until the `0.1.0` release, breaking changes are encouraged and backward compatibility is optional.
 - No default arguments in repository code, including tests. Keep every argument
   explicit at call sites; do not hide defaults behind overloads or wrappers.
 - Prefer modern Swift APIs and language features over legacy `NS`-prefixed APIs
@@ -7,6 +8,7 @@
   work. For synchronization, prefer `import Synchronization` and its primitives,
   such as `Mutex`, over `NSLock`.
 - Never use `@unchecked Sendable`; use compiler-checked `Sendable` conformance.
+- Prefer SwiftNIO's `_NIOFileSystem` for asynchronous filesystem operations.
 - Keep documentation to commands and at most one short line explaining each command.
   Leave prose documentation to the user unless explicitly asked to write it.
 - `swift-subprocess`, `swift-collections`, `swift-nio`, `swift-configuration`,

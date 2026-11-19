@@ -39,6 +39,7 @@ public actor Receptionist {
   private var local: [ServiceRegistration: any DistributedActor] = [:]
   private var peers: [ActorEndpoint: ServicePeer] = [:]
   private var watchers: [UUID: ServiceWatcher] = [:]
+  private var commands: [String: @Sendable (Data) async throws -> Data] = [:]
   private var queries: [String: @Sendable (isolated Receptionist, NodeStatus) async throws -> Data] = [:]
 
   init(system: TCPActorSystem, cluster: String, node: NodeIdentity) {
@@ -61,6 +62,24 @@ public actor Receptionist {
     guard !stopped else { throw IndraError("Receptionist is stopping") }
     guard let run = queries[name] else { throw IndraError("Unknown service query \(name)") }
     return try await run(self, status)
+  }
+
+  func command(_ name: String, payload: Data) async throws -> Data {
+    guard !stopped else { throw IndraError("Receptionist is stopping") }
+    guard let run = commands[name] else { throw IndraError("Unknown local service command \(name)") }
+    return try await run(payload)
+  }
+
+  public func registerCommand<Input: Codable & Sendable, Output: Codable & Sendable>(
+    _ name: String, run: @escaping @Sendable (Input) async throws -> Output
+  ) throws {
+    guard !stopped else { throw IndraError("Receptionist is stopping") }
+    guard commands[name] == nil else { throw IndraError("Duplicate local service command \(name)") }
+    commands[name] = { payload in
+      let input = try JSONDecoder().decode(Input.self, from: payload)
+      let output = try await run(input)
+      return try JSONEncoder().encode(output)
+    }
   }
 
   public func register<Act>(_ actor: Act, with key: ServiceKey<Act>) throws {
@@ -204,6 +223,7 @@ public actor Receptionist {
     local.removeAll()
     peers.removeAll()
     queries.removeAll()
+    commands.removeAll()
     for watcher in watchers.values { watcher.finish() }
     watchers.removeAll()
   }

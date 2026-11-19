@@ -1,8 +1,9 @@
-import Foundation
+public import Foundation
 import NIOCore
 import Networking
 import SystemPackage
 import TCPActorSystem
+import _NIOFileSystem
 
 #if canImport(Darwin)
 import Darwin
@@ -17,6 +18,7 @@ public enum ControlRequest: Codable, Sendable {
   case monitor
   case services
   case queryService(String)
+  case serviceCommand(String, Data)
   case ping(String)
   case join(PeerAddress)
   case reload
@@ -36,9 +38,12 @@ private enum ControlOpcode: UInt32 {
   case request = 1
   case reply = 2
   case serviceReport = 3
+  case serviceCommandReply = 4
 }
 
 public enum NodeControl: Sendable {
+  package static let commandTimeout: Duration = .seconds(65)
+
   public static func request(_ request: ControlRequest, socket: String, timeout: Duration) async throws -> ControlReply
   {
     try await exchange(request, socket: socket, timeout: timeout, decodeReply: decodeControlReply)
@@ -53,6 +58,19 @@ public enum NodeControl: Sendable {
         throw IndraError("Unexpected daemon response")
       }
       return try decode(frame, opcode: .serviceReport, as: [ServiceReport<Value>].self)
+    }
+  }
+
+  public static func command<Input: Codable & Sendable, Output: Codable & Sendable>(
+    _ name: String, input: Input, returning _: Output.Type, socket: String, timeout: Duration
+  ) async throws -> Output {
+    let payload = try JSONEncoder().encode(input)
+    return try await exchange(.serviceCommand(name, payload), socket: socket, timeout: timeout) { frame in
+      if frame.opcode == ControlOpcode.reply.rawValue {
+        _ = try decodeControlReply(frame)
+        throw IndraError("Unexpected daemon response")
+      }
+      return try decode(frame, opcode: .serviceCommandReply, as: Output.self)
     }
   }
 
@@ -89,20 +107,34 @@ public enum NodeControl: Sendable {
 public func runNode(
   configurationPath: String, socket: String, services: [ServiceInstaller], onReady: @Sendable (NodeStatus) -> Void
 ) async throws {
-  let configuration = try NodeConfiguration.load(path: configurationPath)
-  let lease = try SocketLease(path: socket)
-  defer { withExtendedLifetime(lease) {} }
+  let configuration = try await NodeConfiguration.load(path: configurationPath)
+  try await withSocketLease(at: socket) {
+    try await runNode(
+      configuration: configuration, configurationPath: configurationPath, socket: socket,
+      services: services, onReady: onReady)
+  }
+}
+
+private func runNode(
+  configuration: NodeConfiguration, configurationPath: String, socket: String, services: [ServiceInstaller],
+  onReady: @Sendable (NodeStatus) -> Void
+) async throws {
+  let transportTimeout = NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)
   let system = try await TCPActorSystem(
     host: configuration.listenHost, advertisedHost: configuration.advertisedHost, port: configuration.port,
-    callTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)),
-    connectTimeout: .milliseconds(NodeRuntime.transportTimeoutMilliseconds(configuration: configuration)))
+    callTimeout: max(NodeControl.commandTimeout, .milliseconds(transportTimeout)),
+    connectTimeout: .milliseconds(transportTimeout))
   let runtime = NodeRuntime(
     configuration: configuration, configurationPath: configurationPath,
     peerHistoryPath: configurationPath + ".peers.json", system: system)
   do {
     try await runtime.start(services: services)
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
-    defer { try? FileManager.default.removeItem(atPath: socket) }
+    defer {
+      await Task.detached {
+        _ = try? await FileSystem.shared.removeItem(at: FilePath(socket), strategy: .sequential, recursively: false)
+      }.value
+    }
     onReady(await runtime.status())
     try await withThrowingTaskGroup(of: Void.self) { tasks in
       tasks.addTask { try await runtime.runMembership() }
@@ -133,7 +165,7 @@ public func runNode(
 
 func serveControlConnection(_ connection: Connection, runtime: NodeRuntime) async throws {
   try await withDeadline(
-    deadline: .now.advanced(by: .seconds(65)), timeoutError: IndraError("Control request timed out")
+    deadline: .now.advanced(by: NodeControl.commandTimeout), timeoutError: IndraError("Control request timed out")
   ) {
     try await withTaskCancellationHandler {
       try await connection.executeThenClose { input, _ in
@@ -165,6 +197,9 @@ private func handle(_ request: ControlRequest, runtime: NodeRuntime) async throw
     let status = await runtime.status()
     let payload = try await runtime.receptionist.query(name, status: status)
     return controlFrame(opcode: .serviceReport, payload: payload)
+  case .serviceCommand(let name, let input):
+    let payload = try await runtime.receptionist.command(name, payload: input)
+    return controlFrame(opcode: .serviceCommandReply, payload: payload)
   case .ping(let target): reply = .pong(try await runtime.ping(target))
   case .join(let address): reply = .pong(try await runtime.join(address))
   case .reload:
@@ -210,44 +245,37 @@ func withDeadline<Value: Sendable>(
   }
 }
 
-private final class SocketLease: Sendable {
-  private let descriptor: SystemPackage.FileDescriptor
+private func withSocketLease(at socket: String, execute: @Sendable () async throws -> Void) async throws {
+  try validateSocketPath(socket)
+  let fileSystem = FileSystem.shared
+  let path = FilePath(socket)
+  let parent = path.removingLastComponent()
+  try await createPrivateDirectory(at: parent)
+  guard let info = try await fileSystem.info(forFileAt: parent, infoAboutSymbolicLink: true),
+    info.type == .directory, info.permissions.rawValue & 0o077 == 0, info.userID.rawValue == geteuid()
+  else { throw IndraError("Control socket directory must belong to this user and have mode 0700") }
 
-  init(path: String) throws {
-    try validateSocketPath(path)
-    let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
-    try FileManager.default.createDirectory(
-      atPath: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    let attributes = try FileManager.default.attributesOfItem(atPath: parent)
-    guard attributes[.type] as? FileAttributeType == .typeDirectory,
-      let permissions = attributes[.posixPermissions] as? Int, permissions & 0o077 == 0,
-      attributes[.ownerAccountID] as? UInt32 == geteuid()
-    else { throw IndraError("Control socket directory must belong to this user and have mode 0700") }
-    let descriptor = try SystemPackage.FileDescriptor.open(
-      FilePath(path + ".lock"), .readWrite, options: [.create, .noFollow, .closeOnExec],
-      permissions: .ownerReadWrite, retryOnInterrupt: true)
-    do {
+  try await fileSystem.withFileHandle(
+    forReadingAndWritingAt: FilePath(socket + ".lock"),
+    options: .init(
+      existingFile: .open, newFile: .init(permissions: .ownerReadWrite, transactionalCreation: false),
+      followSymbolicLinks: false, closeOnExec: true)
+  ) { lease in
+    try await lease.withUnsafeDescriptor { descriptor in
       guard flock(descriptor.rawValue, LOCK_EX | LOCK_NB) == 0 else {
         throw IndraError("Another daemon owns this control socket")
       }
-      if let existing = try? FileManager.default.attributesOfItem(atPath: path) {
-        guard existing[.type] as? FileAttributeType == .typeSocket else {
-          throw IndraError("Control path exists and is not a socket")
-        }
-        try FileManager.default.removeItem(atPath: path)
-      }
-      self.descriptor = descriptor
-    } catch {
-      try? descriptor.close()
-      throw error
     }
+    if let existing = try await fileSystem.info(forFileAt: path, infoAboutSymbolicLink: true) {
+      guard existing.type == .socket else { throw IndraError("Control path exists and is not a socket") }
+      try await fileSystem.removeItem(at: path, strategy: .sequential, recursively: false)
+    }
+    try await execute()
   }
-
-  deinit { try? descriptor.close() }
 }
 
 private func validateSocketPath(_ path: String) throws {
-  guard path.hasPrefix("/"), !path.utf8.contains(0), path.utf8.count < 104 else {
+  guard path.hasPrefix("/"), !path.hasSuffix("/"), !path.utf8.contains(0), path.utf8.count < 104 else {
     throw IndraError("Control socket requires an absolute path shorter than 104 bytes")
   }
 }

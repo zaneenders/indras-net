@@ -3,9 +3,21 @@ import NIOPosix
 
 public typealias Listener = NIOAsyncChannel<Connection, Never>
 
+public protocol TCPFraming: Sendable {
+  static var maximumPayloadBytes: UInt32 { get }
+  static var connectionLimits: [UInt32: UInt32] { get }
+}
+
+public enum FullSizeFrames: TCPFraming {
+  public static let maximumPayloadBytes = UInt32.max
+  public static let connectionLimits: [UInt32: UInt32] = [:]
+}
+
+public typealias TCP = FramedTCP<FullSizeFrames>
+
 /// TCP adapters for the frame codec, using NIO's scoped async I/O and backpressure.
 /// Each connection has one inbound consumer. There is no automatic replay or reconnect.
-public enum TCP: Sendable {
+public enum FramedTCP<Framing: TCPFraming>: Sendable {
   public static func connect(unixDomainSocketPath: String, connectTimeout: TimeAmount) async throws -> Connection {
     try Task.checkCancellation()
     let connection = try await ClientBootstrap(group: .singletonMultiThreadedEventLoopGroup)
@@ -77,23 +89,12 @@ public enum TCP: Sendable {
 
   private static func configure(_ channel: any Channel) -> EventLoopFuture<Connection> {
     channel.eventLoop.makeSucceededVoidFuture().flatMapThrowing {
-      try channel.pipeline.syncOperations.addHandler(ByteToMessageHandler(FrameDecoder()))
-      try channel.pipeline.syncOperations.addHandler(MessageToByteHandler(FrameEncoder()))
-      let asyncChannel = try NIOAsyncChannel<Frame, Frame>(
-        wrappingChannelSynchronously: channel,
-        configuration: .init(isOutboundHalfClosureEnabled: true))
-      // The async bridge sees the error first; malformed input also closes the socket
-      // when the application has not started consuming its inbound stream yet.
-      try channel.pipeline.syncOperations.addHandler(CloseOnError())
-      return Connection(asyncChannel: asyncChannel)
+      let decoder = FrameDecoder(
+        maximumPayloadBytes: Framing.maximumPayloadBytes, connectionLimits: Framing.connectionLimits)
+      try channel.pipeline.syncOperations.addHandler(ByteToMessageHandler(decoder))
+      try channel.pipeline.syncOperations.addHandler(
+        MessageToByteHandler(FrameEncoder(maximumPayloadBytes: Framing.maximumPayloadBytes)))
+      return try Connection(channel: channel)
     }
-  }
-}
-
-private final class CloseOnError: ChannelInboundHandler {
-  typealias InboundIn = Frame
-
-  func errorCaught(context: ChannelHandlerContext, error: any Error) {
-    context.close(promise: nil)
   }
 }

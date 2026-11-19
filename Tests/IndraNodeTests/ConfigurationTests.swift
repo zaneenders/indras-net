@@ -12,23 +12,64 @@ struct ConfigurationTests {
     }
   }
 
-  @Test func configurationRoundTripsWithoutOverwritingIdentity() throws {
+  @Test func configurationRoundTripsWithoutOverwritingIdentity() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let path = root.appendingPathComponent("config.json").path
     let configuration = makeConfiguration(name: "first", seeds: [])
-    try configuration.save(path: path, overwrite: false)
-    #expect(try NodeConfiguration.load(path: path) == configuration)
-    #expect(throws: (any Error).self) {
-      try makeConfiguration(name: "second", seeds: []).save(path: path, overwrite: false)
+    try await configuration.save(path: path, overwrite: false)
+    #expect(try await NodeConfiguration.load(path: path) == configuration)
+    await #expect(throws: (any Error).self) {
+      try await makeConfiguration(name: "second", seeds: []).save(path: path, overwrite: false)
     }
-    #expect(try NodeConfiguration.load(path: path).id == configuration.id)
+    #expect(try await NodeConfiguration.load(path: path).id == configuration.id)
     var updated = configuration
     updated.name = "renamed"
     updated.seeds = [PeerAddress(host: "localhost", port: 7332)]
     #expect(configuration.canReload(updated))
     updated.port = 7333
     #expect(!configuration.canReload(updated))
+  }
+
+  @Test func stagingUsesTheFilesystemResolvedConfigurationParent() async throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appending(path: UUID().uuidString)
+    let nested = root.appending(path: "actual/child")
+    try manager.createDirectory(at: nested, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: root) }
+    try manager.createSymbolicLink(at: root.appending(path: "link"), withDestinationURL: nested)
+    let path = root.path + "/link/../config.json"
+    var configuration = makeConfiguration(name: "before", seeds: [])
+    try await configuration.save(path: path, overwrite: false)
+    configuration.name = "after"
+    try await configuration.save(path: path, overwrite: true)
+    #expect(try await NodeConfiguration.load(path: root.path + "/actual/config.json") == configuration)
+    #expect(try manager.contentsOfDirectory(atPath: root.path).sorted() == ["actual", "link"])
+  }
+
+  @Test func concurrentExclusiveSavesPublishExactlyOneConfiguration() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appending(path: "config.json", directoryHint: .notDirectory).path
+    let configurations = [makeConfiguration(name: "first", seeds: []), makeConfiguration(name: "second", seeds: [])]
+    let saved = await withTaskGroup(of: NodeConfiguration?.self) { tasks in
+      for configuration in configurations {
+        tasks.addTask {
+          do {
+            try await configuration.save(path: path, overwrite: false)
+            return configuration
+          } catch {
+            return nil
+          }
+        }
+      }
+      var saved: [NodeConfiguration] = []
+      for await configuration in tasks {
+        if let configuration { saved.append(configuration) }
+      }
+      return saved
+    }
+    #expect(try await [NodeConfiguration.load(path: path)] == saved)
   }
 }
 

@@ -133,7 +133,7 @@ struct ReceptionistTests {
         let restarted = ReceptionistWorker(actorSystem: replacement.system, name: "beta-restarted")
         try await replacement.runtime.receptionist.register(restarted, with: key)
         try await servicesEventually { await pool.addresses() == Set([alpha.id, restarted.id]) }
-        #expect(restarted.id.endpoint.node != beta.id.endpoint.node)
+        #expect(restarted.id.endpoint.systemID != beta.id.endpoint.systemID)
         #expect(try await pool.run("again").sorted() == ["alpha: again", "beta-restarted: again"])
         try await replacement.stop()
       } catch {
@@ -213,7 +213,7 @@ struct ReceptionistTests {
   }
 }
 
-private distributed actor ReceptionistWorker {
+distributed actor ReceptionistWorker {
   typealias ActorSystem = TCPActorSystem
   let name: String
 

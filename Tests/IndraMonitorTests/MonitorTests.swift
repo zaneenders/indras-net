@@ -55,7 +55,7 @@ import Testing
     let selected = try #require(model.selected?.node)
     let replacement = NodeIdentity(
       id: selected.id, name: selected.name,
-      endpoint: ActorEndpoint(host: selected.endpoint.host, port: selected.endpoint.port, node: UUID()), build: nil)
+      endpoint: ActorEndpoint(host: selected.endpoint.host, port: selected.endpoint.port, systemID: UUID()), build: nil)
     model.manualPing = ManualPing(
       target: selected, outcome: .success(PingResult(node: replacement, milliseconds: 12.34)))
     let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
@@ -133,7 +133,7 @@ import Testing
       Member(
         node: NodeIdentity(
           id: UUID(), name: "peer-\(index)",
-          endpoint: ActorEndpoint(host: "127.0.0.1", port: 10_000 + index, node: UUID()), build: .current),
+          endpoint: ActorEndpoint(host: "127.0.0.1", port: 10_000 + index, systemID: UUID()), build: .current),
         state: .alive)
     }
     let status = NodeStatus(
@@ -202,12 +202,12 @@ import Testing
 private func fixtureStatus(process: UUID) -> NodeStatus {
   let build = BuildIdentity(commit: String(repeating: "a", count: 40), isDirty: true)
   let node = NodeIdentity(
-    id: UUID(), name: "tower", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7331, node: process), build: build)
+    id: UUID(), name: "tower", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7331, systemID: process), build: build)
   let peers = ["studio", "king-dog", "pi"].enumerated().map { index, name in
     Member(
       node: NodeIdentity(
         id: UUID(), name: name,
-        endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332 + index, node: UUID()), build: build),
+        endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332 + index, systemID: UUID()), build: build),
       state: index == 2 ? .suspect : .alive)
   }
   return NodeStatus(

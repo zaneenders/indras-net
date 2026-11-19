@@ -67,7 +67,7 @@ struct MonitorModel: Sendable {
   private mutating func apply(_ nextSnapshot: MonitorSnapshot, receivedAt: ContinuousClock.Instant) {
     error = nil
     let next = nextSnapshot.status
-    let sameProcess = status?.node.endpoint.node == next.node.endpoint.node
+    let sameProcess = status?.node.endpoint.systemID == next.node.endpoint.systemID
     inboundRate = nil
     outboundRate = nil
     if sameProcess, let before = snapshot {
@@ -86,12 +86,12 @@ struct MonitorModel: Sendable {
     }
     snapshot = nextSnapshot
     self.receivedAt = receivedAt
-    if !next.members.contains(where: { $0.node.endpoint.node == selectedProcess }) {
-      selectedProcess = next.members.first?.node.endpoint.node
+    if !next.members.contains(where: { $0.node.endpoint.systemID == selectedProcess }) {
+      selectedProcess = next.members.first?.node.endpoint.systemID
     }
   }
 
-  var selectedIndex: Int? { status?.members.firstIndex { $0.node.endpoint.node == selectedProcess } }
+  var selectedIndex: Int? { status?.members.firstIndex { $0.node.endpoint.systemID == selectedProcess } }
   var selected: Member? {
     guard let selectedIndex else { return nil }
     return status?.members[selectedIndex]
@@ -99,7 +99,7 @@ struct MonitorModel: Sendable {
 
   mutating func move(_ offset: Int) {
     guard let members = status?.members, !members.isEmpty else { return }
-    selectedProcess = members[max(0, min(members.count - 1, (selectedIndex ?? 0) + offset))].node.endpoint.node
+    selectedProcess = members[max(0, min(members.count - 1, (selectedIndex ?? 0) + offset))].node.endpoint.systemID
   }
 }
 

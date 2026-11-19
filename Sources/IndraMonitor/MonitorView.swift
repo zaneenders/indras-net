@@ -128,7 +128,7 @@ struct MonitorView: Block, Sendable {
     let first = max(0, (model.selectedIndex ?? 0) - memberRows + 1)
     let wide = memberPanelWidth >= 68
     let rows = peers.dropFirst(first).prefix(memberRows).map {
-      MonitorMemberRow(member: $0, selected: $0.node.endpoint.node == model.selectedProcess, wide: wide)
+      MonitorMemberRow(member: $0, selected: $0.node.endpoint.systemID == model.selectedProcess, wide: wide)
     }
     return MonitorPanel(title: "MEMBERS") {
       Column(gap: 0, alignment: .topLeading) {
@@ -162,7 +162,7 @@ struct MonitorView: Block, Sendable {
     ]
     var text = [
       address(node), "Build: \(node.build?.summary ?? "unknown")",
-      "Node: \(node.id.uuidString)", "Process: \(node.endpoint.node.uuidString)"
+      "Node: \(node.id.uuidString)", "Process: \(node.endpoint.systemID.uuidString)"
     ]
     if let build = node.build { text.append("Commit: \(build.commit)") }
     if let status = model.status, status.seeds.contains(PeerAddress(host: node.endpoint.host, port: node.endpoint.port))

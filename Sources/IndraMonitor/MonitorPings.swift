@@ -24,7 +24,7 @@ struct ManualPing: Sendable {
     case .pending: return "PING \(target.name) \(address): waiting…"
     case .success(let pong):
       let latency = pong.milliseconds.formatted(.number.precision(.fractionLength(2)))
-      let process = pong.node.endpoint.node == target.endpoint.node ? "" : " (different process replied)"
+      let process = pong.node.endpoint.systemID == target.endpoint.systemID ? "" : " (different process replied)"
       return "PONG \(target.name) \(address): \(latency) ms\(process)"
     case .failure(let error): return "PING \(target.name) \(address): \(error)"
     }

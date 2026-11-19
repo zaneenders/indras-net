@@ -3,6 +3,7 @@ import Foundation
 import IndraHealth
 import IndraMonitor
 import IndraNode
+import IndraSetu
 import TCPActorSystem
 import UnixSignals
 
@@ -13,8 +14,7 @@ struct Indra: AsyncParsableCommand {
     version: BuildIdentity.current.summary,
     subcommands: [
       Initialize.self, Daemon.self, Status.self, Nodes.self, Monitor.self, Services.self, Health.self, Ping.self,
-      Join.self,
-      Reload.self
+      Join.self, Reload.self, SetuCommand.self
     ])
 }
 
@@ -33,12 +33,12 @@ struct Initialize: AsyncParsableCommand {
   @Option(help: "TCP port.") var port = 7331
   @Option(help: "Seed host:port; repeat for multiple seeds.") var seed: [String] = []
 
-  func run() throws {
+  func run() async throws {
     let configuration = NodeConfiguration(
       version: 1, id: UUID(), name: name, cluster: cluster, listenHost: listenHost, advertisedHost: advertisedHost,
       port: port, seeds: try seed.map { try PeerAddress($0) }, probeIntervalMilliseconds: 3000,
       requestTimeoutMilliseconds: 2000)
-    try configuration.save(path: config, overwrite: false)
+    try await configuration.save(path: config, overwrite: false)
     print("Created \(config)")
   }
 }
@@ -48,13 +48,15 @@ struct Daemon: AsyncParsableCommand {
     abstract: "Run the node in the foreground for launchd/systemd.")
   @Option(help: "Configuration file.") var config = NodePaths.configuration
   @Option(help: "Private control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
+  @OptionGroup var setu: SetuOptions
 
   func run() async throws {
+    let services: [ServiceInstaller] = [HealthService.install] + (try setu.installer().map { [$0] } ?? [])
     let signals = await UnixSignalsSequence(trapping: [.sigint, .sigterm])
     do {
       try await withThrowingTaskGroup(of: Void.self) { tasks in
         tasks.addTask {
-          try await runNode(configurationPath: config, socket: socket, services: [HealthService.install]) { status in
+          try await runNode(configurationPath: config, socket: socket, services: services) { status in
             print(
               "indra \(status.node.name) ready at \(status.node.endpoint.host):\(status.node.endpoint.port); control: \(socket)"
             )

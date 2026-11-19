@@ -37,7 +37,7 @@ struct ControlTests {
     try await withControlRuntime { runtime in
       let peer = NodeIdentity(
         id: UUID(), name: "peer",
-        endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()), build: nil)
+        endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, systemID: UUID()), build: nil)
       for number in 0..<128 {
         _ = try await runtime.receive(
           MembershipRequest(

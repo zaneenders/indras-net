@@ -1,4 +1,5 @@
 import Foundation
+import _NIOFileSystem
 
 struct RememberedPeer: Codable, Sendable {
   let id: UUID
@@ -29,9 +30,13 @@ struct PeerHistory: Codable, Sendable {
     if peers.count > 256 { peers.removeLast(peers.count - 256) }
   }
 
-  static func load(path: String, nodeID: UUID, cluster: String) throws -> Self {
-    guard FileManager.default.fileExists(atPath: path) else { return Self(nodeID: nodeID, cluster: cluster) }
-    let history = try JSONDecoder().decode(Self.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+  static func load(path: String, nodeID: UUID, cluster: String) async throws -> Self {
+    let history: Self
+    do {
+      history = try await readNodeJSON(Self.self, from: path)
+    } catch let error as FileSystemError where error.code == .notFound {
+      return Self(nodeID: nodeID, cluster: cluster)
+    }
     guard history.version == 1 else { throw IndraError("Unsupported peer history version") }
     guard history.nodeID == nodeID, history.cluster == cluster else {
       return Self(nodeID: nodeID, cluster: cluster)
@@ -47,16 +52,7 @@ struct PeerHistory: Codable, Sendable {
     return sorted
   }
 
-  func save(path: String) throws {
-    let url = URL(fileURLWithPath: path)
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    var data = try encoder.encode(self)
-    data.append(10)
-    try data.write(to: url, options: .atomic)
-    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+  func save(path: String) async throws {
+    try await writeNodeJSON(self, to: path, overwrite: true)
   }
 }

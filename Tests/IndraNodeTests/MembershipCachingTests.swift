@@ -25,9 +25,9 @@ struct MembershipCachingTests {
     defer { listener.channel.close(promise: nil) }
     let port = try #require(listener.channel.localAddress?.port)
     let stalled = NodeIdentity(
-      id: UUID(), name: "stalled", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, node: UUID()), build: nil)
+      id: UUID(), name: "stalled", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, systemID: UUID()), build: nil)
     let legacy = NodeIdentity(
-      id: UUID(), name: "legacy", endpoint: ActorEndpoint(host: "localhost", port: port, node: UUID()), build: nil)
+      id: UUID(), name: "legacy", endpoint: ActorEndpoint(host: "localhost", port: port, systemID: UUID()), build: nil)
     try await withTestRuntime(
       configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused",
       services: [HealthService.install]
@@ -68,10 +68,10 @@ struct MembershipCachingTests {
     let path = root.appendingPathComponent("config.json").path
     var configuration = cacheConfiguration(name: "client", port: 0)
     configuration.requestTimeoutMilliseconds = 5000
-    try configuration.save(path: path, overwrite: false)
+    try await configuration.save(path: path, overwrite: false)
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let endpoint = ActorEndpoint(
-      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
+      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), systemID: UUID())
     let peer = NodeIdentity(id: UUID(), name: "seed", endpoint: endpoint, build: nil)
     let (started, start) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let (released, release) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -96,10 +96,10 @@ struct MembershipCachingTests {
         defer { first.cancel() }
         var arrivals = started.makeAsyncIterator()
         _ = try #require(await arrivals.next())
-        var saved = try NodeConfiguration.load(path: path)
+        var saved = try await NodeConfiguration.load(path: path)
         #expect(saved.seeds == [peer.address])
         saved.name = "second-join"
-        try saved.save(path: path, overwrite: true)
+        try await saved.save(path: path, overwrite: true)
         let second = Task { try await runtime.join(peer.address) }
         defer { second.cancel() }
         let period = await runtime.monitor().protocolPeriod
@@ -118,7 +118,7 @@ struct MembershipCachingTests {
         #expect(pending.inFlight == 1)
         release.yield(())
         #expect(try await second.value.node == peer)
-        #expect(try NodeConfiguration.load(path: path).seeds == [peer.address])
+        #expect(try await NodeConfiguration.load(path: path).seeds == [peer.address])
         try await server.value
         membership.cancel()
         do { try await membership.value } catch is CancellationError {}
@@ -136,7 +136,7 @@ struct MembershipCachingTests {
   func pingsReuseTheHandshakeAndAddressTheReservedActor(viaAlias: Bool) async throws {
     let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
     let endpoint = ActorEndpoint(
-      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), node: UUID())
+      host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port), systemID: UUID())
     let peer = NodeIdentity(id: UUID(), name: "peer", endpoint: endpoint, build: nil)
     let server = Task {
       try await serveMembership(
@@ -204,7 +204,7 @@ struct MembershipCachingTests {
       let current = await replacement.status().node
       let original = NodeIdentity(
         id: current.id, name: current.name,
-        endpoint: ActorEndpoint(host: current.endpoint.host, port: current.endpoint.port, node: UUID()), build: nil)
+        endpoint: ActorEndpoint(host: current.endpoint.host, port: current.endpoint.port, systemID: UUID()), build: nil)
       let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
       let alias = PeerAddress(host: "127.0.0.1", port: try #require(listener.channel.localAddress?.port))
       let server = Task {
@@ -263,9 +263,9 @@ struct MembershipCachingTests {
     let port = try #require(newListener.channel.localAddress?.port)
     let id = UUID()
     let original = NodeIdentity(
-      id: id, name: "peer", endpoint: ActorEndpoint(host: alias.host, port: port, node: UUID()), build: nil)
+      id: id, name: "peer", endpoint: ActorEndpoint(host: alias.host, port: port, systemID: UUID()), build: nil)
     let replacement = NodeIdentity(
-      id: id, name: original.name, endpoint: ActorEndpoint(host: alias.host, port: port, node: UUID()), build: nil)
+      id: id, name: original.name, endpoint: ActorEndpoint(host: alias.host, port: port, systemID: UUID()), build: nil)
     let oldServer = Task {
       try await serveMembership(
         listener: oldListener, peer: original, exchanges: 2, includeGossip: true,
@@ -312,9 +312,11 @@ struct MembershipCachingTests {
         let current = await peer.status().node
         let previous = NodeIdentity(
           id: current.id, name: current.name,
-          endpoint: ActorEndpoint(host: current.endpoint.host, port: current.endpoint.port, node: UUID()), build: nil)
+          endpoint: ActorEndpoint(host: current.endpoint.host, port: current.endpoint.port, systemID: UUID()),
+          build: nil)
         let reporter = NodeIdentity(
-          id: UUID(), name: "reporter", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()), build: nil
+          id: UUID(), name: "reporter", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, systemID: UUID()),
+          build: nil
         )
         if knowPrevious {
           _ = try await client.receive(
@@ -359,10 +361,11 @@ struct MembershipCachingTests {
     let original = NodeIdentity(
       id: UUID(), name: "peer",
       endpoint: ActorEndpoint(
-        host: "127.0.0.1", port: try #require(originalListener.channel.localAddress?.port), node: UUID()), build: nil)
+        host: "127.0.0.1", port: try #require(originalListener.channel.localAddress?.port), systemID: UUID()),
+      build: nil)
     let replacement = NodeIdentity(
       id: original.id, name: original.name,
-      endpoint: ActorEndpoint(host: original.endpoint.host, port: original.endpoint.port, node: UUID()), build: nil)
+      endpoint: ActorEndpoint(host: original.endpoint.host, port: original.endpoint.port, systemID: UUID()), build: nil)
     let replacementAddress = "127.0.0.1:\(try #require(replacementListener.channel.localAddress?.port))"
     let (started, start) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let (released, release) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -427,7 +430,8 @@ private func serveMembership(
     var connections = connections.makeAsyncIterator()
     let connection = try #require(try await connections.next())
     try await connection.executeThenClose { input, output in
-      try await output.write(WireMessage.hello(version: WireMessage.version, endpoint: peer.endpoint).frame())
+      try await output.write(
+        WireMessage.hello(version: WireMessage.version, endpoint: peer.endpoint, capabilities: nil).frame())
       let address = ActorAddress(endpoint: peer.endpoint, id: MembershipService.fixedID)
       var completed = 0
       for try await frame in input {

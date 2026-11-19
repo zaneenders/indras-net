@@ -1,5 +1,6 @@
 import Foundation
 import IndraHealth
+import IndraSetu
 import NIOCore
 import Networking
 import TCPActorSystem
@@ -33,7 +34,7 @@ struct NodeTests {
         let replacement = try await TestDaemon.start(configuration: configuration, services: [])
         do {
           #expect(replacement.identity.id == second.identity.id)
-          #expect(replacement.identity.endpoint.node != second.identity.endpoint.node)
+          #expect(replacement.identity.endpoint.systemID != second.identity.endpoint.systemID)
           try await eventually {
             let member = try await first.status().members.first { $0.node.id == replacement.identity.id }
             return member?.state == .alive && member?.node.endpoint == replacement.identity.endpoint
@@ -101,7 +102,8 @@ struct NodeTests {
       configuration: configuration, configurationPath: "/unused", peerHistoryPath: nil, system: system)
     do {
       let peer = NodeIdentity(
-        id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, node: UUID()), build: nil
+        id: UUID(), name: "unverified", endpoint: ActorEndpoint(host: "127.0.0.1", port: 7332, systemID: UUID()),
+        build: nil
       )
       _ = try await runtime.receive(
         MembershipRequest(
@@ -113,7 +115,7 @@ struct NodeTests {
             ])))
       #expect(await runtime.status().members.first?.state == .alive)
       let invalid = NodeIdentity(
-        id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, node: UUID()), build: nil)
+        id: UUID(), name: "invalid", endpoint: ActorEndpoint(host: "0.0.0.0", port: 7333, systemID: UUID()), build: nil)
       await #expect(throws: IndraError.self) {
         try await runtime.receive(
           MembershipRequest(
@@ -242,15 +244,98 @@ struct NodeTests {
     }
   }
 
+  @Test func installedSetuServicesDiscoverPeersAndTransferVerifiedFiles() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("indra-setu-\(UUID())")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("fixture.bin")
+    let bytes = Data(repeating: 0xA5, count: 5 * 1024 * 1024 + 13)
+    try bytes.write(to: source)
+
+    let first = try await TestDaemon.start(
+      configuration: makeConfiguration(name: "sender", seeds: []),
+      services: [SetuService.installer(directory: root.appendingPathComponent("sender").path)])
+    do {
+      let destination = root.appendingPathComponent("receiver")
+      let second = try await TestDaemon.start(
+        configuration: makeConfiguration(name: "receiver", seeds: [first.address]),
+        services: [SetuService.installer(directory: destination.path)])
+      do {
+        let service = SetuService.key.name
+        try await eventually {
+          guard
+            case .services(let services) = try await NodeControl.request(
+              .services, socket: first.socket, timeout: .seconds(3))
+          else { throw IndraError("Expected service listing") }
+          return services.contains { $0.registration.key == service && $0.node.id == second.identity.id }
+        }
+        let peer = second.identity.name
+        @Sendable func request(_ command: FileCommand) async throws -> FileReply {
+          try await NodeControl.command(
+            service, input: command, returning: FileReply.self, socket: first.socket, timeout: .seconds(3))
+        }
+        @Sendable func completed(_ command: FileCommand, expected: FileJob.State) async throws -> FileJob {
+          guard case .job(let job) = try await request(command) else { throw IndraError("Expected a file job") }
+          try await eventually {
+            guard case .job(let current) = try await request(.job(job.id)) else {
+              throw IndraError("Expected a file job")
+            }
+            return current.state != .running
+          }
+          guard case .job(let final) = try await request(.job(job.id)) else { throw IndraError("Missing file job") }
+          try #require(final.state == expected, "\(final.error ?? "unexpected state")")
+          return final
+        }
+        let sent = try await completed(.send(path: source.path, peer: peer), expected: .completed)
+        let receipt = try #require(sent.receipt)
+        #expect(sent.transferID == receipt.id)
+        #expect(receipt.byteCount == bytes.count)
+        guard case .receipt(let confirmed) = try await request(.receipt(id: receipt.id, peer: peer)) else {
+          throw IndraError("Expected a receipt")
+        }
+        #expect(confirmed == receipt)
+        #expect(try Data(contentsOf: destination.appendingPathComponent(source.lastPathComponent)) == bytes)
+        guard case .files(let initial) = try await request(.list(peer: peer)) else {
+          throw IndraError("Expected files")
+        }
+        #expect(initial.map(\.name) == [source.lastPathComponent])
+        let names = (0..<1024).map { "entry-\($0)" }
+        for name in names.reversed() {
+          try Data().write(to: destination.appending(path: name, directoryHint: .notDirectory), options: [])
+        }
+        guard case .files(let files) = try await request(.list(peer: peer)) else { throw IndraError("Expected files") }
+        #expect(files.map(\.name) == names.sorted() + [source.lastPathComponent])
+        let output = root.appendingPathComponent("copy")
+        let fetched = try await completed(
+          .get(name: source.lastPathComponent, peer: peer, output: output.path), expected: .completed)
+        #expect(fetched.transferID == fetched.receipt?.id)
+        #expect(fetched.receipt?.sha256 == receipt.sha256)
+        #expect(try Data(contentsOf: output) == bytes)
+        try Data([1]).write(to: source)
+        _ = try await completed(.send(path: source.path, peer: peer), expected: .failed)
+        #expect(try Data(contentsOf: destination.appendingPathComponent(source.lastPathComponent)) == bytes)
+        await #expect(throws: (any Error).self) { try await request(.get(name: "../copy", peer: peer, output: nil)) }
+        try await second.stop()
+      } catch {
+        try? await second.stop()
+        throw error
+      }
+      try await first.stop()
+    } catch {
+      try? await first.stop()
+      throw error
+    }
+  }
+
   @Test func explicitReloadKeepsIdentityAndRejectsRestartChanges() async throws {
     let first = try await TestDaemon.start(configuration: makeConfiguration(name: "first", seeds: []), services: [])
     do {
       let second = try await TestDaemon.start(configuration: makeConfiguration(name: "second", seeds: []), services: [])
       do {
-        var updated = try NodeConfiguration.load(path: first.config)
+        var updated = try await NodeConfiguration.load(path: first.config)
         updated.name = "renamed"
         updated.seeds = [second.address]
-        try updated.save(path: first.config, overwrite: true)
+        try await updated.save(path: first.config, overwrite: true)
         try await Task.sleep(for: .milliseconds(1100))
         #expect(try await first.status().node.name == "first")
         _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
@@ -272,14 +357,14 @@ struct NodeTests {
         var changedInterval = updated
         changedInterval.probeIntervalMilliseconds = 60_000
         for invalid in [changedPort, changedInterval] {
-          try invalid.save(path: first.config, overwrite: true)
+          try await invalid.save(path: first.config, overwrite: true)
           await #expect(throws: IndraError.self) {
             try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
           }
           #expect(try await first.status().configurationError?.contains("require a restart") == true)
         }
         #expect(try await first.status().node.endpoint == first.identity.endpoint)
-        try updated.save(path: first.config, overwrite: true)
+        try await updated.save(path: first.config, overwrite: true)
         _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
         #expect(try await first.status().configurationError == nil)
         try await second.stop()
@@ -303,9 +388,9 @@ struct NodeTests {
         try await eventually { try await first.status().members.first?.state == .alive }
         let third = try await TestDaemon.start(configuration: makeConfiguration(name: "third", seeds: []), services: [])
         do {
-          var configuration = try NodeConfiguration.load(path: first.config)
+          var configuration = try await NodeConfiguration.load(path: first.config)
           configuration.seeds = [third.address]
-          try configuration.save(path: first.config, overwrite: true)
+          try await configuration.save(path: first.config, overwrite: true)
           _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
           try await eventually {
             try await first.status().members.contains { $0.node.id == third.identity.id && $0.state == .alive }
@@ -344,7 +429,7 @@ struct NodeTests {
       #expect(try await daemon.status().node == daemon.identity)
       var restored = configuration
       restored.name = "restored"
-      try restored.save(path: daemon.config, overwrite: true)
+      try await restored.save(path: daemon.config, overwrite: true)
       _ = try await NodeControl.request(.reload, socket: daemon.socket, timeout: .seconds(3))
       let status = try await daemon.status()
       #expect(status.configurationError == nil)
@@ -372,7 +457,7 @@ struct NodeTests {
       let second = try await TestDaemon.start(configuration: peerConfiguration, services: [])
       do {
         configuration.seeds = [second.address]
-        try configuration.save(path: first.config, overwrite: true)
+        try await configuration.save(path: first.config, overwrite: true)
         _ = try await NodeControl.request(.reload, socket: first.socket, timeout: .seconds(3))
         try await eventually {
           try await first.status().members.first { $0.node.id == second.identity.id }?.state == .alive
@@ -408,7 +493,7 @@ struct NodeTests {
         await #expect(throws: IndraError.self) {
           try await NodeControl.request(.join(foreign.address), socket: first.socket, timeout: .seconds(3))
         }
-        #expect(try NodeConfiguration.load(path: first.config).seeds == [foreign.address])
+        #expect(try await NodeConfiguration.load(path: first.config).seeds == [foreign.address])
         #expect(try await first.status().members.isEmpty)
         #expect(try await foreign.status().members.isEmpty)
         #expect(try await first.status().discoveryErrors[foreign.address.description] != nil)
@@ -420,6 +505,26 @@ struct NodeTests {
       try await first.stop()
     } catch {
       try? await first.stop()
+      throw error
+    }
+  }
+
+  @Test func concurrentJoinsPersistBothSeeds() async throws {
+    let daemon = try await TestDaemon.start(configuration: makeConfiguration(name: "joining", seeds: []), services: [])
+    do {
+      let seeds = [PeerAddress(host: "127.0.0.1", port: 1), PeerAddress(host: "127.0.0.1", port: 2)]
+      await withTaskGroup(of: Void.self) { tasks in
+        for seed in seeds {
+          tasks.addTask {
+            _ = try? await NodeControl.request(.join(seed), socket: daemon.socket, timeout: .seconds(3))
+          }
+        }
+      }
+      #expect(Set(try await NodeConfiguration.load(path: daemon.config).seeds) == Set(seeds))
+      #expect(Set(try await daemon.status().seeds) == Set(seeds))
+      try await daemon.stop()
+    } catch {
+      try? await daemon.stop()
       throw error
     }
   }
@@ -440,7 +545,7 @@ struct NodeTests {
         await #expect(throws: IndraError.self) {
           try await NodeControl.request(.join(address), socket: first.socket, timeout: .seconds(3))
         }
-        #expect(try NodeConfiguration.load(path: first.config).seeds == [existing.address, address])
+        #expect(try await NodeConfiguration.load(path: first.config).seeds == [existing.address, address])
         #expect(try await first.status().discoveryErrors[address.description] != nil)
         var configuration = makeConfiguration(name: "returning", seeds: [])
         configuration.port = address.port
@@ -500,7 +605,7 @@ private struct TestDaemon: Sendable {
     let root = URL(fileURLWithPath: "/tmp/indra-\(UUID().uuidString)")
     let config = root.appendingPathComponent("config.json").path
     let socket = root.appendingPathComponent("run/control.sock").path
-    try configuration.save(path: config, overwrite: false)
+    try await configuration.save(path: config, overwrite: false)
     let (events, ready) = AsyncThrowingStream<NodeStatus, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
     let task = Task {
       do {
