@@ -63,14 +63,20 @@ actor FileTransfers {
     guard !stopped else { throw RPCError.shutDown }
     switch command {
     case .list(let peer):
-      let listing = SharedFileListing(actorSystem: system)
-      if let peer {
-        let remote = try await service(peer)
-        try await remote.list(into: listing, cluster: cluster)
-      } else {
-        try await directory.list { try await listing.append($0) }
+      guard let peer else { return .files(try await directory.list()) }
+      let remote = try await service(peer)
+      var page = try await remote.list(after: nil, cluster: cluster)
+      guard let firstCursor = page.next else { return .files(page.files) }
+      defer {
+        await withTaskCancellationShield { try? await remote.closeListing(firstCursor.listing, cluster: cluster) }
       }
-      return .files(await listing.whenLocal { $0.sortedFiles() }!)
+      var files = page.files
+      while let cursor = page.next {
+        try Task.checkCancellation()
+        page = try await remote.list(after: cursor, cluster: cluster)
+        files.append(contentsOf: page.files)
+      }
+      return .files(files)
     case .receipt(let id, let peer):
       if let peer { return .receipt(try await service(peer).receipt(id, cluster: cluster)) }
       return .receipt(await system.transfers.receipt(for: id))

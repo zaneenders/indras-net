@@ -32,11 +32,11 @@ struct SharedDirectory: Sendable {
       && !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
   }
 
-  func list(send: @Sendable ([SharedFile]) async throws -> Void) async throws {
+  func list() async throws -> [SharedFile] {
     try await FileSystem.shared.withDirectoryHandle(
       atPath: root, options: .init(followSymbolicLinks: true, closeOnExec: true)
     ) { directory in
-      var page: [SharedFile] = []
+      var files: [SharedFile] = []
       for try await entries in directory.listContents(recursive: false).batched() {
         try Task.checkCancellation()
         for entry in entries {
@@ -44,14 +44,11 @@ struct SharedDirectory: Sendable {
             let info = try await FileSystem.shared.info(forFileAt: entry.path, infoAboutSymbolicLink: true),
             info.type == .regular
           else { continue }
-          page.append(SharedFile(name: name, size: info.size))
-          if page.count == 1024 {
-            try await send(page)
-            page.removeAll(keepingCapacity: true)
-          }
+          files.append(SharedFile(name: name, size: info.size))
         }
       }
-      if !page.isEmpty { try await send(page) }
+      files.sort { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }
+      return files
     }
   }
 }

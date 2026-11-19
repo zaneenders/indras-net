@@ -1,6 +1,5 @@
 import Foundation
 import NIOCore
-import Synchronization
 import SystemPackage
 import TCPActorSystem
 import Testing
@@ -23,6 +22,43 @@ struct SetuFileTests {
     let absolute = FilePath(FileManager.default.currentDirectoryPath).pushing(relative)
     #expect(try await absolutePath(relative) == absolute)
     #expect(try await absolutePath(absolute) == absolute)
+  }
+
+  @Test func fileListingCursorsKeepIndependentSnapshotsAcrossDirectoryChanges() async throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appending(path: "indra-pages-\(UUID())", directoryHint: .isDirectory)
+    defer { try? manager.removeItem(at: root) }
+    let config = makeConfiguration(name: "setu", seeds: [])
+    try await withTestRuntime(
+      configuration: config, configurationPath: root.appending(path: "config.json").path,
+      services: [SetuService.installer(directory: root.path)]
+    ) { runtime in
+      let services = try await runtime.receptionist.lookup(SetuService.key)
+      let service = try #require(services.first)
+      let empty = try await service.list(after: nil, cluster: config.cluster)
+      #expect(empty.files.isEmpty && empty.next == nil)
+
+      for index in 0..<1024 { try Data().write(to: root.appending(path: "entry-\(index)")) }
+      let fullPage = try await service.list(after: nil, cluster: config.cluster)
+      #expect(fullPage.files.count == 1024 && fullPage.next == nil)
+      let last = root.appending(path: "z-old")
+      try Data([1]).write(to: last)
+      let first = try await service.list(after: nil, cluster: config.cluster)
+      let cursor = try #require(first.next)
+      #expect(first.files.map(\.name) == fullPage.files.map(\.name))
+      try manager.moveItem(at: last, to: root.appending(path: "z-new"))
+      let fresh = try await service.list(after: nil, cluster: config.cluster)
+      let other = try #require(fresh.next)
+      for _ in 0..<2 {
+        let tail = try await service.list(after: cursor, cluster: config.cluster)
+        #expect(tail.files.map(\.name) == ["z-old"] && tail.next == nil)
+      }
+      try await service.closeListing(cursor.listing, cluster: config.cluster)
+      await #expect(throws: IndraError.self) { try await service.list(after: cursor, cluster: config.cluster) }
+      let tail = try await service.list(after: other, cluster: config.cluster)
+      #expect(tail.files.map(\.name) == ["z-new"] && tail.next == nil)
+      try await service.closeListing(other.listing, cluster: config.cluster)
+    }
   }
 
   @Test(arguments: [false, true])
@@ -49,9 +85,7 @@ struct SetuFileTests {
     let hiddenName = ".\u{0301}hidden"
     try Data([2]).write(to: fixture.deletingLastPathComponent().appending(path: hiddenName), options: [])
     #expect(throws: IndraError.self) { try directory.path(for: hiddenName) }
-    let listing = Mutex<[SharedFile]>([])
-    try await directory.list { page in listing.withLock { $0.append(contentsOf: page) } }
-    let files = listing.withLock { $0 }
+    let files = try await directory.list()
     #expect(files.map(\.name) == ["file"])
     #expect(files.map(\.size) == [1])
     #expect(!manager.fileExists(atPath: base.path + "/shared"))

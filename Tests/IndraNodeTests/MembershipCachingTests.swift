@@ -510,7 +510,7 @@ private func serveMembership(
   }
 }
 
-private func withTestRuntime(
+func withTestRuntime(
   configuration: NodeConfiguration, configurationPath: String, services: [ServiceInstaller],
   _ body: @Sendable (NodeRuntime) async throws -> Void
 ) async throws {
