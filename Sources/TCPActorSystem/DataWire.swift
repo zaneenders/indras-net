@@ -166,7 +166,10 @@ enum DataWire {
   }
 
   private static func makeReceipt(_ ticket: TransferTicket, hash: SHA256) -> TransferReceipt {
-    let hex = hash.finalize().map { String(format: "%02x", $0) }.joined()
+    let hex = hash.finalize().map { byte in
+      let digits = String(byte, radix: 16, uppercase: false)
+      return byte < 16 ? "0" + digits : digits
+    }.joined()
     return TransferReceipt(id: ticket.id, byteCount: ticket.byteCount, sha256: hex)
   }
 

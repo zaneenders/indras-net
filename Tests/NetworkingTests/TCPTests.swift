@@ -251,7 +251,7 @@ struct TCPTests {
 }
 
 extension Channel {
-  fileprivate func setSendBuffer(bytes: Int) async throws {
+  fileprivate func setSendBuffer(bytes: SocketOptionValue) async throws {
     try await setOption(ChannelOptions.socketOption(.so_sndbuf), value: bytes).get()
   }
 
