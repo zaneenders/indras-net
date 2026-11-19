@@ -22,6 +22,14 @@ struct MonitorView: Block, Sendable {
         MonitorLine(text: "Resize to at least 60 columns x 22 rows", style: MonitorPalette.normal)
         MonitorLine(text: "Q quit", style: MonitorPalette.muted)
       }.padding(horizontal: 1, vertical: 1)
+    } else if let index = model.selectedServiceIndex {
+      Column(gap: 0, alignment: .topLeading) {
+        blankLine
+        header
+        blankLine
+        serviceList(index: index)
+        MonitorLine(text: "↑↓ select  Esc back  Space pause  Q quit", style: MonitorPalette.muted)
+      }.padding(horizontal: 2, vertical: 0)
     } else {
       Column(gap: 0, alignment: .topLeading) {
         blankLine
@@ -33,7 +41,7 @@ struct MonitorView: Block, Sendable {
         MonitorPanel(title: "RECENT ACTIVITY / newest first") {
           lines(activityLines)
         }.frame(width: .fill, height: .fixed(activityHeight), alignment: .topLeading)
-        MonitorLine(text: "↑/↓ select  P ping  Enter details  Space pause  Q quit", style: MonitorPalette.muted)
+        MonitorLine(text: "↑↓ node  S services  P ping  ↵ info  Space pause  Q quit", style: MonitorPalette.muted)
       }.padding(horizontal: 2, vertical: 0)
     }
   }
@@ -150,6 +158,31 @@ struct MonitorView: Block, Sendable {
 
   private var details: some Block {
     MonitorPanel(title: "SELECTED PEER") { lines(detailLines) }
+  }
+
+  private func serviceList(index: Int) -> some Block {
+    let node = model.serviceNode
+    let registrations = model.selectedNodeServices
+    let capacity = size.rows - 9  // Header, panel borders, actor ID and footer.
+    let first = max(0, index - capacity + 1)
+    return MonitorPanel(title: "SERVICES / \(node?.name ?? "…")") {
+      Column(gap: 0, alignment: .topLeading) {
+        if let registrations, !registrations.isEmpty {
+          let rows = registrations.indices.dropFirst(first).prefix(capacity).map { row in
+            let registration = registrations[row]
+            return MonitorLine(
+              text: "\(row == index ? "›" : " ") \(registration.key)  \(registration.actorType)",
+              style: row == index ? MonitorPalette.selected : MonitorPalette.normal)
+          }
+          BlockList(rows[...])
+          MonitorLine(text: "Actor  \(registrations[index].address.id.uuidString)", style: MonitorPalette.muted)
+        } else {
+          MonitorLine(
+            text: registrations == nil ? "Service listing unavailable" : "No services discovered for this node",
+            style: MonitorPalette.muted)
+        }
+      }.padding(horizontal: 1, vertical: 0)
+    }.frame(width: .fill, height: .fill, alignment: .topLeading)
   }
 
   private var detailLines: [MonitorLine] {

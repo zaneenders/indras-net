@@ -15,7 +15,7 @@ import TCPActorSystem
 
 struct MonitorReading: Sendable {
   enum Result: Sendable {
-    case snapshot(MonitorSnapshot, receivedAt: ContinuousClock.Instant)
+    case snapshot(MonitorSnapshot, services: [DiscoveredService]?, receivedAt: ContinuousClock.Instant)
     case failure(String)
   }
 
@@ -29,9 +29,11 @@ private func poll(socket: String, readings: ScreenSource<MonitorReading>) async 
     generation &+= 1
     let result: MonitorReading.Result
     do {
+      async let services = discoveredServices(socket: socket)
       guard case .monitor(let snapshot) = try await NodeControl.request(.monitor, socket: socket, timeout: .seconds(3))
       else { throw IndraError("Expected a monitor snapshot. Check that the daemon supports monitor.") }
-      result = .snapshot(snapshot, receivedAt: .now)
+      let receivedAt = ContinuousClock.now
+      result = .snapshot(snapshot, services: await services, receivedAt: receivedAt)
     } catch {
       guard !Task.isCancelled else { return }
       result = .failure(String(describing: error))
@@ -39,6 +41,12 @@ private func poll(socket: String, readings: ScreenSource<MonitorReading>) async 
     readings.publish(MonitorReading(generation: generation, result: result))
     do { try await Task.sleep(for: .seconds(1)) } catch { return }
   }
+}
+
+private func discoveredServices(socket: String) async -> [DiscoveredService]? {
+  guard case .services(let services) = try? await NodeControl.request(.services, socket: socket, timeout: .seconds(3))
+  else { return nil }
+  return services
 }
 
 struct MonitorModel: Sendable {
@@ -53,6 +61,8 @@ struct MonitorModel: Sendable {
   var history: [Double] = []
   var paused = false
   var showDetails = false
+  var selectedServiceIndex: Int?
+  private var services: [DiscoveredService]?
   var manualPing: ManualPing?
 
   mutating func apply(_ reading: MonitorReading) {
@@ -60,7 +70,13 @@ struct MonitorModel: Sendable {
     generation = reading.generation
     switch reading.result {
     case .failure(let message): error = message
-    case .snapshot(let next, let receivedAt): apply(next, receivedAt: receivedAt)
+    case .snapshot(let next, let services, let receivedAt):
+      let previousProcess = selectedProcess
+      self.services = services
+      apply(next, receivedAt: receivedAt)
+      if let index = selectedServiceIndex {
+        selectedServiceIndex = previousProcess == selectedProcess ? min(index, lastServiceIndex) : 0
+      }
     }
   }
 
@@ -97,7 +113,20 @@ struct MonitorModel: Sendable {
     return status?.members[selectedIndex]
   }
 
+  var serviceNode: NodeIdentity? { selected?.node ?? status?.node }
+
+  var selectedNodeServices: [ServiceRegistration]? {
+    guard let node = serviceNode else { return nil }
+    return services?.compactMap { $0.node.endpoint == node.endpoint ? $0.registration : nil }
+  }
+
+  private var lastServiceIndex: Int { max(0, (selectedNodeServices?.count ?? 0) - 1) }
+
   mutating func move(_ offset: Int) {
+    if let index = selectedServiceIndex {
+      selectedServiceIndex = max(0, min(lastServiceIndex, index + offset))
+      return
+    }
     guard let members = status?.members, !members.isEmpty else { return }
     selectedProcess = members[max(0, min(members.count - 1, (selectedIndex ?? 0) + offset))].node.endpoint.systemID
   }
@@ -146,13 +175,18 @@ struct MonitorModel: Sendable {
       if key == .control(.c) || (key == .character("c") && modifiers.contains(.control)) { return .quit }
       switch key {
       case .character("q"): return .quit
+      case .escape where model.selectedServiceIndex != nil: model.selectedServiceIndex = nil
       case .escape:
         if model.showDetails { model.showDetails = false } else { return .quit }
       case .up, .character("k"): model.move(-1)
       case .down, .character("j"): model.move(1)
-      case .enter: model.showDetails.toggle()
+      case .character("s"), .character("S"):
+        model.selectedServiceIndex = model.selectedServiceIndex == nil ? 0 : nil
+      case .enter:
+        guard model.selectedServiceIndex == nil else { return .none }
+        model.showDetails.toggle()
       case .character("p"), .character("P"):
-        guard let node = model.selected?.node, let pings else { return .none }
+        guard model.selectedServiceIndex == nil, let node = model.selected?.node, let pings else { return .none }
         pings.ping(node)
         model.manualPing = pings.read()
       case .character(" "):

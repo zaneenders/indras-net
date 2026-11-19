@@ -12,7 +12,7 @@ import Testing
     let pings = MonitorPings()
     screen.pings = pings
     screen.model.apply(
-      reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, generation: 1))
+      reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, services: [], generation: 1))
     screen.model.paused = true
     var copyBuffer = CopyBuffer()
     #expect(screen.event(.key(.character("p"), modifiers: []), copyBuffer: &copyBuffer) == .redraw)
@@ -51,7 +51,7 @@ import Testing
   @Test func pingResultDistinguishesProcessReplacement() throws {
     var model = MonitorModel()
     let status = fixtureStatus(process: UUID())
-    model.apply(reading(status: status, uptime: 10, inbound: 0, outbound: 0, generation: 1))
+    model.apply(reading(status: status, uptime: 10, inbound: 0, outbound: 0, services: [], generation: 1))
     let selected = try #require(model.selected?.node)
     let replacement = NodeIdentity(
       id: selected.id, name: selected.name,
@@ -67,33 +67,34 @@ import Testing
   @Test func ratesUseDaemonTimeAndResetAfterRestart() {
     let status = fixtureStatus(process: UUID())
     var model = MonitorModel()
-    model.apply(reading(status: status, uptime: 10, inbound: 2, outbound: 3, generation: 1))
+    model.apply(reading(status: status, uptime: 10, inbound: 2, outbound: 3, services: [], generation: 1))
     #expect(model.inboundRate == nil)
-    model.apply(reading(status: status, uptime: 12, inbound: 6, outbound: 9, generation: 2))
+    model.apply(reading(status: status, uptime: 12, inbound: 6, outbound: 9, services: [], generation: 2))
     #expect(model.inboundRate == 2)
     #expect(model.outboundRate == 3)
     #expect(model.history == [5])
-    model.apply(reading(status: fixtureStatus(process: UUID()), uptime: 1, inbound: 0, outbound: 0, generation: 3))
+    model.apply(
+      reading(status: fixtureStatus(process: UUID()), uptime: 1, inbound: 0, outbound: 0, services: [], generation: 3))
     #expect(model.inboundRate == nil)
     #expect(model.history.isEmpty)
   }
 
   @Test func pauseAndDisconnectPreserveTheObservedView() {
     let status = fixtureStatus(process: UUID())
-    let initial = reading(status: status, uptime: 10, inbound: 2, outbound: 3, generation: 1)
+    let initial = reading(status: status, uptime: 10, inbound: 2, outbound: 3, services: [], generation: 1)
     var model = MonitorModel()
     model.apply(initial)
     model.move(2)
     #expect(model.selected?.node.name == "pi")
     model.paused = true
-    model.apply(reading(status: status, uptime: 12, inbound: 6, outbound: 9, generation: 2))
+    model.apply(reading(status: status, uptime: 12, inbound: 6, outbound: 9, services: [], generation: 2))
     #expect(model.generation == 1)
     model.paused = false
     model.apply(MonitorReading(generation: 3, result: .failure("Disconnected")))
     #expect(model.status?.node.name == "tower")
     #expect(model.error == "Disconnected")
     #expect(model.snapshot?.uptimeSeconds == 10)
-    model.apply(reading(status: status, uptime: 14, inbound: 10, outbound: 15, generation: 4))
+    model.apply(reading(status: status, uptime: 14, inbound: 10, outbound: 15, services: [], generation: 4))
     #expect(model.error == nil)
     #expect(model.snapshot?.uptimeSeconds == 14)
     #expect(model.selected?.node.name == "pi")
@@ -105,7 +106,7 @@ import Testing
   func rendersMembershipAndBuildsAtSupportedSizes(size: TerminalSize) throws {
     var model = MonitorModel()
     model.apply(
-      reading(status: fixtureStatus(process: UUID()), uptime: 12, inbound: 6, outbound: 9, generation: 1))
+      reading(status: fixtureStatus(process: UUID()), uptime: 12, inbound: 6, outbound: 9, services: [], generation: 1))
     model.move(2)
     let text = try render(model, size: size)
     #expect(text.contains("INDRA / CLUSTER MONITOR"))
@@ -125,6 +126,47 @@ import Testing
     let text = try render(MonitorModel(), size: TerminalSize(columns: 40, rows: 12))
     #expect(text.contains("Resize to at least 60"))
     #expect(text.contains("Q quit"))
+  }
+
+  @Test func servicesFollowSelectionAndScrollOnACompactTerminal() throws {
+    let status = fixtureStatus(process: UUID())
+    let peer = status.members[1].node
+    let earlier = NodeIdentity(
+      id: peer.id, name: peer.name,
+      endpoint: ActorEndpoint(host: peer.endpoint.host, port: peer.endpoint.port, systemID: UUID()), build: peer.build)
+    func service(_ key: String, on node: NodeIdentity) -> DiscoveredService {
+      DiscoveredService(
+        node: node,
+        registration: ServiceRegistration(
+          key: key, actorType: "Worker", address: ActorAddress(endpoint: node.endpoint, id: UUID())))
+    }
+    let workers = (0..<30).map { service("worker-\($0)", on: peer) }
+    let all = workers + [service("old-service", on: earlier), service("other-service", on: status.members[0].node)]
+    let screen = MonitorScreen(socket: nil)
+    let size = TerminalSize(columns: 60, rows: 22)
+    screen.model.apply(reading(status: status, uptime: 10, inbound: 0, outbound: 0, services: all, generation: 1))
+    var copyBuffer = CopyBuffer()
+    _ = screen.event(.key(.down, modifiers: []), copyBuffer: &copyBuffer)
+    _ = screen.event(.key(.character("s"), modifiers: []), copyBuffer: &copyBuffer)
+    let listing = try render(screen.model, size: size)
+    #expect(listing.contains("SERVICES / king-dog"))
+    #expect(listing.contains("worker-0  Worker"))
+    #expect(screen.model.selectedNodeServices == workers.map(\.registration))
+    for _ in 0..<30 { _ = screen.event(.key(.down, modifiers: []), copyBuffer: &copyBuffer) }
+    let scrolled = try render(screen.model, size: size)
+    #expect(scrolled.contains("› worker-29"))
+    #expect(scrolled.contains(workers[29].registration.address.id.uuidString))
+    screen.model.apply(
+      reading(status: status, uptime: 11, inbound: 0, outbound: 0, services: [workers[0]], generation: 2))
+    #expect(try render(screen.model, size: size).contains("› worker-0"))
+    _ = screen.event(.key(.escape, modifiers: []), copyBuffer: &copyBuffer)
+    #expect(screen.model.selected?.node == peer)
+    _ = screen.event(.key(.down, modifiers: []), copyBuffer: &copyBuffer)
+    _ = screen.event(.key(.character("S"), modifiers: [.shift]), copyBuffer: &copyBuffer)
+    #expect(try render(screen.model, size: size).contains("No services discovered for this node"))
+    screen.model.apply(reading(status: status, uptime: 12, inbound: 0, outbound: 0, services: nil, generation: 3))
+    #expect(try render(screen.model, size: size).contains("Service listing unavailable"))
+    #expect(screen.model.error == nil)
   }
 
   @Test func maximumViewportKeepsScrolledSelectionAndActivityWithinTheLayoutBudget() throws {
@@ -153,7 +195,7 @@ import Testing
       probeIntervalMilliseconds: 3000, requestTimeoutMilliseconds: 2000,
       outbound: ProbeTotals(), inbound: ProbeTotals(), inFlight: 0, events: events, changes: changes)
     var model = MonitorModel()
-    model.apply(MonitorReading(generation: 1, result: .snapshot(snapshot, receivedAt: .now)))
+    model.apply(MonitorReading(generation: 1, result: .snapshot(snapshot, services: [], receivedAt: .now)))
     model.move(255)
     model.manualPing = ManualPing(target: peers[255].node, outcome: .pending)
     let text = try render(model, size: MonitorScreen.configuration.maximumSize)
@@ -168,7 +210,8 @@ import Testing
 
   @Test func longDaemonErrorsAreClippedWithoutRejectingTheDSLLayout() throws {
     var model = MonitorModel()
-    model.apply(reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, generation: 1))
+    model.apply(
+      reading(status: fixtureStatus(process: UUID()), uptime: 10, inbound: 0, outbound: 0, services: [], generation: 1))
     model.apply(
       MonitorReading(generation: 2, result: .failure(String(repeating: "e\u{301}", count: 5000))))
     let text = try render(model, size: TerminalSize(columns: 140, rows: 42))
@@ -214,9 +257,9 @@ private func fixtureStatus(process: UUID) -> NodeStatus {
     node: node, cluster: "test", members: peers, seeds: [], configurationError: nil, discoveryErrors: [:])
 }
 
-private func reading(status: NodeStatus, uptime: Double, inbound: Int, outbound: Int, generation: UInt64)
-  -> MonitorReading
-{
+private func reading(
+  status: NodeStatus, uptime: Double, inbound: Int, outbound: Int, services: [DiscoveredService]?, generation: UInt64
+) -> MonitorReading {
   var incoming = ProbeTotals()
   var outgoing = ProbeTotals()
   for _ in 0..<inbound { incoming.record(.ack) }
@@ -225,5 +268,5 @@ private func reading(status: NodeStatus, uptime: Double, inbound: Int, outbound:
     status: status, uptimeSeconds: uptime, protocolPeriod: 1, localHealthMultiplier: 0,
     probeIntervalMilliseconds: 3000, requestTimeoutMilliseconds: 2000, outbound: outgoing, inbound: incoming,
     inFlight: 0, events: [], changes: [])
-  return MonitorReading(generation: generation, result: .snapshot(snapshot, receivedAt: .now))
+  return MonitorReading(generation: generation, result: .snapshot(snapshot, services: services, receivedAt: .now))
 }

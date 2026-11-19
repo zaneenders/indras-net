@@ -15,7 +15,7 @@ swift run indra init --name beta --listen-host 0.0.0.0 --advertised-host 192.168
 swift run indra daemon
 # List cluster members and their SWIM states.
 swift run indra nodes
-# Monitor live membership, passive probe traffic, and daemon builds; add --json for one snapshot.
+# Monitor membership, probes, and builds. Press S for the selected node’s services or use --json for one snapshot.
 swift run indra monitor
 # Show this CLI build’s commit and dirty status.
 swift run indra --version
