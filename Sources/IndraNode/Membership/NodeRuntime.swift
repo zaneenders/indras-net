@@ -1,42 +1,7 @@
 import ClusterMembership
-public import Foundation
+import Foundation
 import SWIM
 public import TCPActorSystem
-
-public struct NodeIdentity: Codable, Hashable, Sendable {
-  public let id: UUID
-  public let name: String
-  public let endpoint: ActorEndpoint
-  public let build: BuildIdentity?
-
-  var address: PeerAddress { PeerAddress(host: endpoint.host, port: endpoint.port) }
-
-  func validate() throws {
-    try address.validate()
-    try build?.validate()
-    guard !name.isEmpty, name.utf8.count <= 128 else { throw IndraError("Invalid peer name") }
-  }
-}
-
-public struct Member: Codable, Sendable {
-  public enum State: String, Codable, Sendable { case alive, suspect, unreachable, dead }
-  public let node: NodeIdentity
-  public var state: State
-}
-
-public struct NodeStatus: Codable, Sendable {
-  public let node: NodeIdentity
-  public let cluster: String
-  public let members: [Member]
-  public let seeds: [PeerAddress]
-  public let configurationError: String?
-  public let discoveryErrors: [String: String]
-}
-
-public struct PingResult: Codable, Sendable {
-  public let node: NodeIdentity
-  public let milliseconds: Double
-}
 
 private enum MembershipWork: Sendable {
   case refreshServices
@@ -112,7 +77,7 @@ public actor NodeRuntime {
         discoveryErrors["peer-history"] = String(describing: error)
       }
     }
-    try await receptionist.start(runtime: self)
+    try await installBuiltInServices(in: receptionist)
     let context = ServiceContext(
       actorSystem: system, receptionist: receptionist, cluster: configuration.cluster,
       configurationPath: configurationPath, started: telemetry.started,
@@ -121,6 +86,15 @@ public actor NodeRuntime {
       try Task.checkCancellation()
       try await install(context)
     }
+  }
+
+  private func installBuiltInServices(in registry: isolated Receptionist) throws {
+    try registry.requireRegistrationCapacity(for: 2)
+    try system.reserveFixedActorIDs([ReceptionistService.fixedID, MembershipService.fixedID])
+    let discovery = ReceptionistService(actorSystem: system, receptionist: registry)
+    let membership = MembershipService(actorSystem: system, runtime: self)
+    try registry.register(discovery, with: ServiceKey<ReceptionistService>(ReceptionistService.serviceName))
+    try registry.register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
   }
 
   func addServiceShutdown(_ action: @escaping @Sendable () async -> Void) throws {

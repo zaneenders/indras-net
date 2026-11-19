@@ -1,35 +1,9 @@
-public import Distributed
+import Distributed
 import Foundation
-public import TCPActorSystem
-
-public struct ServiceKey<Act>: Hashable, Sendable
-where Act: DistributedActor, Act.ActorSystem == TCPActorSystem {
-  public let name: String
-
-  public init(_ name: String) {
-    self.name = name
-  }
-}
-
-public struct ServiceRegistration: Codable, Hashable, Sendable {
-  public let key: String
-  public let actorType: String
-  public let address: ActorAddress
-
-  func validate(owner: NodeIdentity) throws {
-    guard !key.isEmpty, key.utf8.count <= 128,
-      !actorType.isEmpty, actorType.utf8.count <= 1024,
-      address.endpoint == owner.endpoint
-    else { throw IndraError("Invalid service registration") }
-  }
-}
-
-public struct DiscoveredService: Codable, Hashable, Sendable {
-  public let node: NodeIdentity
-  public let registration: ServiceRegistration
-}
+import TCPActorSystem
 
 public actor Receptionist {
+  private static let registrationLimit = 1024
   private let system: TCPActorSystem
   private let cluster: String
   private var node: NodeIdentity
@@ -48,14 +22,11 @@ public actor Receptionist {
     self.node = node
   }
 
-  func start(runtime: NodeRuntime) throws {
+  func requireRegistrationCapacity(for count: Int) throws {
     guard !stopped else { throw IndraError("Receptionist is stopping") }
-    guard local.count <= 1022 else { throw IndraError("Too many local service registrations") }
-    try system.reserveFixedActorIDs([ReceptionistService.fixedID, MembershipService.fixedID])
-    let service = ReceptionistService(actorSystem: system, receptionist: self)
-    let membership = MembershipService(actorSystem: system, runtime: runtime)
-    try register(service, with: ServiceKey<ReceptionistService>(ReceptionistService.serviceName))
-    try register(membership, with: ServiceKey<MembershipService>(MembershipService.serviceName))
+    guard count <= Self.registrationLimit - local.count else {
+      throw IndraError("Too many local service registrations")
+    }
   }
 
   func query(_ name: String, status: NodeStatus) async throws -> Data {
@@ -90,7 +61,7 @@ public actor Receptionist {
       throw IndraError("Only local actors can register with this receptionist")
     }
     guard local[registration] == nil else { return }
-    guard local.count < 1024 else { throw IndraError("Too many local service registrations") }
+    try requireRegistrationCapacity(for: 1)
     local[registration] = actor
     revision += 1
     notifyWatchers()
@@ -200,7 +171,9 @@ public actor Receptionist {
       snapshot.node.id == peer.id, snapshot.node.endpoint == peer.endpoint
     else { throw IndraError("Service snapshot owner mismatch") }
     try snapshot.node.validate()
-    guard snapshot.registrations.count <= 1024 else { throw IndraError("Invalid service snapshot registrations") }
+    guard snapshot.registrations.count <= Self.registrationLimit else {
+      throw IndraError("Invalid service snapshot registrations")
+    }
     let registrations = Set(snapshot.registrations)
     guard registrations.count == snapshot.registrations.count else {
       throw IndraError("Invalid service snapshot registrations")
@@ -269,14 +242,6 @@ public actor Receptionist {
   }
 }
 
-struct ServiceSnapshot: Codable, Sendable {
-  let version: Int
-  let cluster: String
-  let node: NodeIdentity
-  let revision: UInt64
-  let registrations: [ServiceRegistration]
-}
-
 private struct ServicePeer {
   var identity: NodeIdentity
   let generation: UUID
@@ -289,20 +254,4 @@ private struct ServiceWatcher {
   var previous: [ServiceRegistration]
   let yield: @Sendable ([ServiceRegistration]) -> Void
   let finish: @Sendable () -> Void
-}
-
-distributed actor ReceptionistService: FixedActorID {
-  typealias ActorSystem = TCPActorSystem
-  static let fixedID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2))
-  static let serviceName = "indra.receptionist.v1"
-  private let receptionist: Receptionist
-
-  init(actorSystem: TCPActorSystem, receptionist: Receptionist) {
-    self.actorSystem = actorSystem
-    self.receptionist = receptionist
-  }
-
-  distributed func snapshot(version: Int, cluster: String) async throws -> ServiceSnapshot {
-    try await receptionist.snapshot(version: version, cluster: cluster)
-  }
 }

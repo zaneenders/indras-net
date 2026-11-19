@@ -1,5 +1,4 @@
 import ClusterMembership
-import Distributed
 import Foundation
 import SWIM
 import TCPActorSystem
@@ -139,21 +138,5 @@ extension NodeIdentity {
     return ClusterMembership.Node(
       protocol: "indra", host: endpoint.host, port: endpoint.port,
       uid: UInt64(uid, radix: 16))
-  }
-}
-
-distributed actor MembershipService: FixedActorID {
-  typealias ActorSystem = TCPActorSystem
-  static let fixedID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
-  static let serviceName = "indra.membership.swim.v1"
-  private let runtime: NodeRuntime
-
-  init(actorSystem: TCPActorSystem, runtime: NodeRuntime) {
-    self.actorSystem = actorSystem
-    self.runtime = runtime
-  }
-
-  distributed func probe(_ message: MembershipRequest) async throws -> MembershipReply {
-    try await runtime.receive(message)
   }
 }

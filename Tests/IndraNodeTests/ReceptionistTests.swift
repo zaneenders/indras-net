@@ -8,6 +8,31 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct ReceptionistTests {
+  @Test func startupCanRetryAfterFreeingRoomForBothBuiltInServices() async throws {
+    let system = try await TCPActorSystem(
+      host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0,
+      callTimeout: .seconds(2), connectTimeout: .seconds(1))
+    let runtime = NodeRuntime(
+      configuration: makeConfiguration(name: "full-registry", seeds: []),
+      configurationPath: "/unused", peerHistoryPath: nil, system: system)
+    defer { await runtime.shutdown() }
+    let registry = runtime.receptionist
+    let worker = ReceptionistWorker(actorSystem: system, name: "worker")
+    for index in 0..<1023 {
+      try await registry.register(worker, with: ServiceKey<ReceptionistWorker>("worker.\(index)"))
+    }
+
+    await #expect(throws: IndraError.self) { try await runtime.start(services: []) }
+    #expect(await registry.services().count == 1023)
+    await registry.unregister(worker, from: ServiceKey<ReceptionistWorker>("worker.0"))
+    try await runtime.start(services: [])
+
+    let membership = try await registry.lookup(ServiceKey<MembershipService>(MembershipService.serviceName))
+    let discovery = try await registry.lookup(ServiceKey<ReceptionistService>(ReceptionistService.serviceName))
+    #expect(membership.map(\.id) == [ActorAddress(endpoint: system.endpoint, id: MembershipService.fixedID)])
+    #expect(discovery.map(\.id) == [ActorAddress(endpoint: system.endpoint, id: ReceptionistService.fixedID)])
+  }
+
   @Test func startupRegistersQueriesForOtherReportTypes() async throws {
     let configuration = makeConfiguration(name: "query-node", seeds: [])
     let system = try await TCPActorSystem(
