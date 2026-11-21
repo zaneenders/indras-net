@@ -33,9 +33,46 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-collections.git", from: "1.7.6"),
     .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.2"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
+    .package(url: "https://github.com/brokenhandsio/swift-cbor.git", exact: "1.0.0-rc.1"),
+    .package(url: "https://github.com/apple/swift-profile-recorder.git", .upToNextMinor(from: "0.3.24")),
+    .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.5.0"),
     .package(url: "ssh://git@github.com/zaneenders/slate.git", revision: "3ea077821bbdd1bbb51e0cc10430302421be6e6c")
   ],
   targets: [
+    .target(
+      name: "BTree",
+      dependencies: [
+        .product(name: "CBOR", package: "swift-cbor"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "Logging", package: "swift-log"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "SystemPackage", package: "swift-system"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
+      ],
+      swiftSettings: networkingSwiftSettings
+    ),
+    .testTarget(
+      name: "BTreeTests",
+      dependencies: [
+        "BTree",
+        .product(name: "CBOR", package: "swift-cbor"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
+      ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .executableTarget(
+      name: "BTreeBenchmarks",
+      dependencies: [
+        "BTree",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "_NIOFileSystem", package: "swift-nio"),
+        .product(name: "ProfileRecorder", package: "swift-profile-recorder")
+      ],
+      path: "Benchmarks/BTreeBenchmarks",
+      swiftSettings: sharedSwiftSettings
+    ),
     .target(
       name: "IndraNode",
       dependencies: [

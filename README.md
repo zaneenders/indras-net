@@ -5,6 +5,16 @@
 swift test
 # Run tests and report source coverage.
 ./Scripts/test-coverage.swift
+# Generate the BTree DocC archive.
+swift package generate-documentation --target BTree --symbol-graph-minimum-access-level package
+# Benchmark the disk B+ tree in release mode.
+swift run -c release BTreeBenchmarks
+# Stress the file index with concurrent readers and a writer.
+swift run -c release BTreeBenchmarks stress --write-batch-size 8
+# Record a disk point-lookup CPU profile.
+swift run -c release BTreeBenchmarks profile lookup --output .build/btree-lookup.swipr
+# Symbolicate the CPU profile for a flame graph.
+swift run -c release swipr-sample-conv --format perf-script --demangle true --output .build/btree-lookup.perf .build/btree-lookup.swipr
 # Create this node's config at $XDG_CONFIG_HOME/indra/config.json or ~/.config/indra/config.json.
 swift run indra init --name alpha --listen-host 0.0.0.0 --advertised-host 192.168.1.10
 # Run the foreground daemon.
