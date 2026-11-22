@@ -3,16 +3,17 @@ import NIOCore
 import Networking
 import TCPActorSystem
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 
 @Suite(.timeLimit(.minutes(1)))
 struct ControlTests {
   @Test func requestUsesTheCallersDeadline() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let socket = root.appendingPathComponent("control.sock").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: "/tmp/indra-control-XXXXXXXX")
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let socket = root.appending("control.sock").string
     let listener = try await TCP.listen(unixDomainSocketPath: socket)
     try await listener.executeThenClose { connections in
       let reply = Task { try await NodeControl.request(.monitor, socket: socket, timeout: .milliseconds(250)) }
@@ -44,10 +45,10 @@ struct ControlTests {
             version: 1, cluster: "test", node: peer,
             probe: .ping(sequenceNumber: UInt32(number), payload: [])))
       }
-      let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
-      defer { try? FileManager.default.removeItem(at: root) }
-      let socket = root.appendingPathComponent("control.sock").path
+      let files = FileSystem.shared
+      let root = try await files.createTemporaryDirectory(template: "/tmp/indra-control-XXXXXXXX")
+      defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+      let socket = root.appending("control.sock").string
       let listener = try await TCP.listen(unixDomainSocketPath: socket)
       let accepting = Task {
         try await listener.executeThenClose { connections in

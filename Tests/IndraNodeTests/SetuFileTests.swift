@@ -1,8 +1,7 @@
-import Foundation
 import NIOCore
-import SystemPackage
 import TCPActorSystem
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 @testable import IndraSetu
@@ -19,34 +18,40 @@ import Glibc
 struct SetuFileTests {
   @Test func commandPathsPreserveParentComponentsForFilesystemResolution() async throws {
     let relative = FilePath("link/../file")
-    let absolute = FilePath(FileManager.default.currentDirectoryPath).pushing(relative)
+    let absolute = try await FileSystem.shared.currentWorkingDirectory.pushing(relative)
     #expect(try await absolutePath(relative) == absolute)
     #expect(try await absolutePath(absolute) == absolute)
   }
 
   @Test func fileListingCursorsKeepIndependentSnapshotsAcrossDirectoryChanges() async throws {
-    let manager = FileManager.default
-    let root = manager.temporaryDirectory.appending(path: "indra-pages-\(UUID())", directoryHint: .isDirectory)
-    defer { try? manager.removeItem(at: root) }
+    let files = FileSystem.shared
+    let base = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: base, strategy: .sequential, recursively: true) }
+    let root = base.appending("shared")
     let config = makeConfiguration(name: "setu", seeds: [])
     try await withTestRuntime(
-      configuration: config, configurationPath: root.appending(path: "config.json").path,
-      services: [SetuService.installer(directory: root.path)]
+      configuration: config, configurationPath: root.appending("config.json").string,
+      services: [SetuService.installer(directory: root.string)]
     ) { runtime in
       let services = try await runtime.receptionist.lookup(SetuService.key)
       let service = try #require(services.first)
       let empty = try await service.list(after: nil, cluster: config.cluster)
       #expect(empty.files.isEmpty && empty.next == nil)
 
-      for index in 0..<1024 { try Data().write(to: root.appending(path: "entry-\(index)")) }
+      for index in 0..<1024 {
+        try await ByteBuffer().write(
+          toFileAt: root.appending("entry-\(index)"), absoluteOffset: 0,
+          options: .newFile(replaceExisting: false, permissions: nil))
+      }
       let fullPage = try await service.list(after: nil, cluster: config.cluster)
       #expect(fullPage.files.count == 1024 && fullPage.next == nil)
-      let last = root.appending(path: "z-old")
-      try Data([1]).write(to: last)
+      let last = root.appending("z-old")
+      try await [UInt8(1)].write(
+        toFileAt: last, absoluteOffset: 0, options: .newFile(replaceExisting: false, permissions: nil))
       let first = try await service.list(after: nil, cluster: config.cluster)
       let cursor = try #require(first.next)
       #expect(first.files.map(\.name) == fullPage.files.map(\.name))
-      try manager.moveItem(at: last, to: root.appending(path: "z-new"))
+      try await files.moveItem(at: last, to: root.appending("z-new"))
       let fresh = try await service.list(after: nil, cluster: config.cluster)
       let other = try #require(fresh.next)
       for _ in 0..<2 {
@@ -63,50 +68,55 @@ struct SetuFileTests {
 
   @Test(arguments: [false, true])
   func sharedDirectoryWithParentComponentsMustExist(relativeLink: Bool) async throws {
-    let manager = FileManager.default
-    let base = manager.temporaryDirectory.appending(path: "indra-shared-\(UUID())", directoryHint: .isDirectory)
-    let child = base.appending(path: "nested/child", directoryHint: .isDirectory)
-    try manager.createDirectory(at: child, withIntermediateDirectories: true, attributes: nil)
-    defer { try? manager.removeItem(at: base) }
-    let link = base.appending(path: "link", directoryHint: .isDirectory)
-    try manager.createSymbolicLink(atPath: link.path, withDestinationPath: relativeLink ? "nested/child" : child.path)
+    let files = FileSystem.shared
+    let base = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: base, strategy: .sequential, recursively: true) }
+    let child = base.appending("nested/child")
+    try await files.createDirectory(at: child, withIntermediateDirectories: true, permissions: .ownerReadWriteExecute)
+    let link = base.appending("link")
+    try await files.createSymbolicLink(at: link, withDestination: relativeLink ? "nested/child" : child)
 
-    let path = link.path + "/../shared/files"
-    let resolved = base.appending(path: "nested/shared/files", directoryHint: .isDirectory)
+    let path = link.appending("../shared/files").string
+    let resolved = base.appending("nested/shared/files")
     await #expect(throws: IndraError.self) {
-      try await SharedDirectory(path: path, journal: StagingJournal(parent: FilePath(base.path)))
+      try await SharedDirectory(path: path, journal: StagingJournal(parent: base))
     }
-    #expect(!manager.fileExists(atPath: resolved.path))
-    _ = try await SharedDirectory(path: resolved.path, journal: StagingJournal(parent: FilePath(base.path)))
-    let directory = try await SharedDirectory(path: path, journal: StagingJournal(parent: FilePath(base.path)))
-    let fixture = resolved.appending(path: "file", directoryHint: .notDirectory)
-    try Data([1]).write(to: fixture, options: [])
-    try manager.createSymbolicLink(atPath: directory.root.appending("alias").string, withDestinationPath: "file")
+    #expect(try await files.info(forFileAt: resolved, infoAboutSymbolicLink: true) == nil)
+    _ = try await SharedDirectory(path: resolved.string, journal: StagingJournal(parent: base))
+    let directory = try await SharedDirectory(path: path, journal: StagingJournal(parent: base))
+    try await [UInt8(1)].write(
+      toFileAt: resolved.appending("file"), absoluteOffset: 0,
+      options: .newFile(replaceExisting: false, permissions: nil))
+    try await files.createSymbolicLink(at: directory.root.appending("alias"), withDestination: "file")
     let hiddenName = ".\u{0301}hidden"
-    try Data([2]).write(to: fixture.deletingLastPathComponent().appending(path: hiddenName), options: [])
+    try await [UInt8(2)].write(
+      toFileAt: resolved.appending(hiddenName), absoluteOffset: 0,
+      options: .newFile(replaceExisting: false, permissions: nil))
     #expect(throws: IndraError.self) { try directory.path(for: hiddenName) }
-    let files = try await directory.list()
-    #expect(files.map(\.name) == ["file"])
-    #expect(files.map(\.size) == [1])
-    #expect(!manager.fileExists(atPath: base.path + "/shared"))
+    let listing = try await directory.list()
+    #expect(listing.map(\.name) == ["file"])
+    #expect(listing.map(\.size) == [1])
+    #expect(try await files.info(forFileAt: base.appending("shared"), infoAboutSymbolicLink: true) == nil)
   }
 
   @Test func competingSinksPublishOnceInTheOriginallyOpenedDirectory() async throws {
-    let manager = FileManager.default
-    let root = manager.temporaryDirectory.appending(path: UUID().uuidString)
-    let original = root.appending(path: "shared")
-    let moved = root.appending(path: "moved")
-    try manager.createDirectory(at: original, withIntermediateDirectories: true)
-    defer { try? manager.removeItem(at: root) }
-    let path = FilePath(original.appending(path: "result").path)
-    let first = try await FileSink(path: path, journal: StagingJournal(parent: FilePath(root.path)))
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let original = root.appending("shared")
+    let moved = root.appending("moved")
+    try await files.createDirectory(
+      at: original, withIntermediateDirectories: false, permissions: .ownerReadWriteExecute)
+    let path = original.appending("result")
+    let first = try await FileSink(path: path, journal: StagingJournal(parent: root))
     defer { await first.abort() }
-    let second = try await FileSink(path: path, journal: StagingJournal(parent: FilePath(root.path)))
+    let second = try await FileSink(path: path, journal: StagingJournal(parent: root))
     defer { await second.abort() }
     try await first.write(ByteBuffer(string: "first"), at: 0)
     try await second.write(ByteBuffer(string: "second"), at: 0)
-    try manager.moveItem(at: original, to: moved)
-    try manager.createDirectory(at: original, withIntermediateDirectories: false)
+    try await files.moveItem(at: original, to: moved)
+    try await files.createDirectory(
+      at: original, withIntermediateDirectories: false, permissions: .ownerReadWriteExecute)
 
     let winners = await withTaskGroup(of: String?.self) { group in
       for (sink, value) in [(first, "first"), (second, "second")] {
@@ -124,21 +134,21 @@ struct SetuFileTests {
       for await winner in group { if let winner { winners.append(winner) } }
       return winners
     }
-    #expect(try winners == [String(contentsOf: moved.appending(path: "result"), encoding: .utf8)])
-    #expect(try manager.contentsOfDirectory(atPath: moved.path) == ["result"])
-    #expect(try manager.contentsOfDirectory(atPath: original.path).isEmpty)
+    #expect(try await winners == [String(contentsOf: moved.appending("result"), maximumSizeAllowed: .unlimited)])
+    #expect(try await directoryNames(at: moved) == ["result"])
+    #expect(try await directoryNames(at: original).isEmpty)
   }
 
   @Test func recoveryReclaimsInterruptedStagesAndPreservesTheActiveWriter() async throws {
-    let manager = FileManager.default
-    let root = manager.temporaryDirectory.appending(path: UUID().uuidString)
-    let output = root.appending(path: "external")
-    try manager.createDirectory(at: output, withIntermediateDirectories: true)
-    defer { try? manager.removeItem(at: root) }
-    let rootPath = root.path
-    let journal = StagingJournal(parent: FilePath(rootPath))
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let output = root.appending("external")
+    try await files.createDirectory(at: output, withIntermediateDirectories: false, permissions: .ownerReadWriteExecute)
+    let rootPath = root.string
+    let journal = StagingJournal(parent: root)
     let live = try await StagedFile(
-      path: FilePath(output.appending(path: "live").path), publication: .replace, journal: journal)
+      path: output.appending("live"), publication: .replace, journal: journal)
     defer { await live.abort() }
     try await live.write(ByteBuffer(string: "live"), at: 0)
 
@@ -154,19 +164,20 @@ struct SetuFileTests {
     try await journal.recover()
     try await journal.recover()
     try await live.commit()
-    #expect(try manager.contentsOfDirectory(atPath: output.path) == ["live"])
-    #expect(try String(contentsOf: output.appending(path: "live"), encoding: .utf8) == "live")
-    #expect(try manager.contentsOfDirectory(atPath: root.appending(path: ".indra-staging").path).isEmpty)
+    #expect(try await directoryNames(at: output) == ["live"])
+    #expect(try await String(contentsOf: output.appending("live"), maximumSizeAllowed: .unlimited) == "live")
+    #expect(try await directoryNames(at: root.appending(".indra-staging")).isEmpty)
   }
 
   @Test(arguments: [false, true])
   func directorySyncFailurePreservesPublicationAndReportsUncertainty(receiverDials: Bool) async throws {
-    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let destination = root.appending(path: "copy")
-    let source = root.appending(path: "original")
-    try Data([7]).write(to: source)
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let destination = root.appending("copy")
+    let source = root.appending("original")
+    try await [UInt8(7)].write(
+      toFileAt: source, absoluteOffset: 0, options: .newFile(replaceExisting: false, permissions: nil))
     let sender = try await TCPActorSystem(
       host: "127.0.0.1", advertisedHost: "127.0.0.1", port: 0,
       callTimeout: .seconds(2), connectTimeout: .seconds(2))
@@ -176,12 +187,11 @@ struct SetuFileTests {
       callTimeout: .seconds(2), connectTimeout: .seconds(2))
     defer { await receiver.shutdown() }
     let openSource: @Sendable () async throws -> TransferBody = {
-      .source(try await FileSource(path: FilePath(source.path), followLinks: false))
+      .source(try await FileSource(path: source, followLinks: false))
     }
     let openSink: @Sendable () async throws -> TransferBody = {
       var file = try await StagedFile(
-        path: FilePath(destination.path), publication: .createOnly,
-        journal: StagingJournal(parent: FilePath(root.path)))
+        path: destination, publication: .createOnly, journal: StagingJournal(parent: root))
       file.synchronizeDirectory = { _ in throw IndraError("Injected directory sync failure") }
       return .sink(StagedSink(file: file))
     }
@@ -196,16 +206,15 @@ struct SetuFileTests {
     } catch let error as CommitUnconfirmed {
       #expect(error.expected.id == ticket.id)
     }
-    #expect(try Data(contentsOf: destination) == Data([7]))
+    #expect(try await [UInt8](contentsOf: destination, maximumSizeAllowed: .unlimited) == [7])
     #expect(await receiver.transfers.receipt(for: ticket.id) == nil)
   }
 
   @Test func sourceRejectsFIFOWithoutWaitingForAWriter() async throws {
-    let root = FileManager.default.temporaryDirectory.appending(
-      path: "indra-fifo-\(UUID())", directoryHint: .isDirectory)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: nil)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = FilePath(root.appending(path: "source", directoryHint: .notDirectory).path)
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("source")
     let result = unsafe path.withPlatformString { unsafe mkfifo($0, 0o600) }
     try #require(result == 0)
 
@@ -213,9 +222,13 @@ struct SetuFileTests {
     let watchdog = Task {
       try await Task.sleep(for: .seconds(2))
       Issue.record("Opening a FIFO as a source waited for a writer")
-      let writer = try FileDescriptor.open(
-        path, .writeOnly, options: [.nonBlocking, .closeOnExec], permissions: nil, retryOnInterrupt: true)
-      try writer.close()
+      try await files.withDirectoryHandle(atPath: root, options: .init(followSymbolicLinks: false, closeOnExec: true)) {
+        directory in
+        try await directory.withFileHandle(
+          forWritingAt: "source",
+          options: .init(existingFile: .open, newFile: nil, followSymbolicLinks: false, closeOnExec: true)
+        ) { _ in }
+      }
     }
     defer {
       watchdog.cancel()
@@ -225,6 +238,14 @@ struct SetuFileTests {
       let source = try await FileSource(path: path, followLinks: false)
       await source.close()
     }
+  }
+}
+
+func directoryNames(at path: FilePath) async throws -> [String] {
+  try await FileSystem.shared.withDirectoryHandle(
+    atPath: path, options: .init(followSymbolicLinks: false, closeOnExec: true)
+  ) { directory in
+    try await directory.listContents(recursive: false).map { $0.name.string }.reduce(into: []) { $0.append($1) }
   }
 }
 

@@ -3,6 +3,7 @@ import IndraHealth
 import NIOCore
 import Networking
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 @testable import TCPActorSystem
@@ -63,9 +64,10 @@ struct MembershipCachingTests {
   }
 
   @Test func joinsAndBackgroundDiscoveryShareOneProbe() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("config.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("config.json").string
     var configuration = cacheConfiguration(name: "client", port: 0)
     configuration.requestTimeoutMilliseconds = 5000
     try await configuration.save(path: path, overwrite: false)

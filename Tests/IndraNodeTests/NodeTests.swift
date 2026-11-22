@@ -5,6 +5,7 @@ import NIOCore
 import Networking
 import TCPActorSystem
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 
@@ -245,21 +246,24 @@ struct NodeTests {
   }
 
   @Test func installedSetuServicesDiscoverPeersAndTransferVerifiedFiles() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("indra-setu-\(UUID())")
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let source = root.appendingPathComponent("fixture.bin")
-    let bytes = Data(repeating: 0xA5, count: 5 * 1024 * 1024 + 13)
-    try bytes.write(to: source)
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let name = "fixture.bin"
+    let source = root.appending(name)
+    let bytes = ByteBuffer(repeating: 0xA5, count: 5 * 1024 * 1024 + 13)
+    try await bytes.write(
+      toFileAt: source, absoluteOffset: 0, options: .newFile(replaceExisting: false, permissions: nil))
 
     let first = try await TestDaemon.start(
       configuration: makeConfiguration(name: "sender", seeds: []),
-      services: [SetuService.installer(directory: root.appendingPathComponent("sender").path)])
+      services: [SetuService.installer(directory: root.appending("sender").string)])
     do {
-      let destination = root.appendingPathComponent("receiver")
+      let destination = root.appending("receiver")
+      let received = destination.appending(name)
       let second = try await TestDaemon.start(
         configuration: makeConfiguration(name: "receiver", seeds: [first.address]),
-        services: [SetuService.installer(directory: destination.path)])
+        services: [SetuService.installer(directory: destination.string)])
       do {
         let service = SetuService.key.name
         try await eventually {
@@ -286,34 +290,37 @@ struct NodeTests {
           try #require(final.state == expected, "\(final.error ?? "unexpected state")")
           return final
         }
-        let sent = try await completed(.send(path: source.path, peer: peer), expected: .completed)
+        let sent = try await completed(.send(path: source.string, peer: peer), expected: .completed)
         let receipt = try #require(sent.receipt)
         #expect(sent.transferID == receipt.id)
-        #expect(receipt.byteCount == bytes.count)
+        #expect(receipt.byteCount == bytes.readableBytes)
         guard case .receipt(let confirmed) = try await request(.receipt(id: receipt.id, peer: peer)) else {
           throw IndraError("Expected a receipt")
         }
         #expect(confirmed == receipt)
-        #expect(try Data(contentsOf: destination.appendingPathComponent(source.lastPathComponent)) == bytes)
+        #expect(try await ByteBuffer(contentsOf: received, maximumSizeAllowed: .unlimited) == bytes)
         guard case .files(let initial) = try await request(.list(peer: peer)) else {
           throw IndraError("Expected files")
         }
-        #expect(initial.map(\.name) == [source.lastPathComponent])
+        #expect(initial.map(\.name) == [name])
         let names = (0..<1024).map { "entry-\($0)" }
-        for name in names.reversed() {
-          try Data().write(to: destination.appending(path: name, directoryHint: .notDirectory), options: [])
+        for entry in names.reversed() {
+          try await ByteBuffer().write(
+            toFileAt: destination.appending(entry), absoluteOffset: 0,
+            options: .newFile(replaceExisting: false, permissions: nil))
         }
         guard case .files(let files) = try await request(.list(peer: peer)) else { throw IndraError("Expected files") }
-        #expect(files.map(\.name) == names.sorted() + [source.lastPathComponent])
-        let output = root.appendingPathComponent("copy")
+        #expect(files.map(\.name) == names.sorted() + [name])
+        let output = root.appending("copy")
         let fetched = try await completed(
-          .get(name: source.lastPathComponent, peer: peer, output: output.path), expected: .completed)
+          .get(name: name, peer: peer, output: output.string), expected: .completed)
         #expect(fetched.transferID == fetched.receipt?.id)
         #expect(fetched.receipt?.sha256 == receipt.sha256)
-        #expect(try Data(contentsOf: output) == bytes)
-        try Data([1]).write(to: source)
-        _ = try await completed(.send(path: source.path, peer: peer), expected: .failed)
-        #expect(try Data(contentsOf: destination.appendingPathComponent(source.lastPathComponent)) == bytes)
+        #expect(try await ByteBuffer(contentsOf: output, maximumSizeAllowed: .unlimited) == bytes)
+        try await [UInt8(1)].write(
+          toFileAt: source, absoluteOffset: 0, options: .newFile(replaceExisting: true, permissions: nil))
+        _ = try await completed(.send(path: source.string, peer: peer), expected: .failed)
+        #expect(try await ByteBuffer(contentsOf: received, maximumSizeAllowed: .unlimited) == bytes)
         await #expect(throws: (any Error).self) { try await request(.get(name: "../copy", peer: peer, output: nil)) }
         try await second.stop()
       } catch {
@@ -418,9 +425,12 @@ struct NodeTests {
     let daemon = try await TestDaemon.start(configuration: configuration, services: [])
     do {
       if removeFile {
-        try FileManager.default.removeItem(atPath: daemon.config)
+        _ = try await FileSystem.shared.removeItem(
+          at: FilePath(daemon.config), strategy: .sequential, recursively: false)
       } else {
-        try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: daemon.config), options: .atomic)
+        try await "invalid JSON".write(
+          toFileAt: FilePath(daemon.config), absoluteOffset: 0,
+          options: .newFile(replaceExisting: true, permissions: nil))
       }
       await #expect(throws: IndraError.self) {
         try await NodeControl.request(.reload, socket: daemon.socket, timeout: .seconds(3))
@@ -584,7 +594,7 @@ struct NodeTests {
       let idle = try await TCP.connect(unixDomainSocketPath: daemon.socket, connectTimeout: .seconds(1))
       try await daemon.stop()
       try? await idle.channel.close()
-      #expect(!FileManager.default.fileExists(atPath: daemon.socket))
+      #expect(try await FileSystem.shared.info(forFileAt: FilePath(daemon.socket), infoAboutSymbolicLink: true) == nil)
     } catch {
       try? await daemon.stop()
       throw error
@@ -595,37 +605,43 @@ struct NodeTests {
 private struct TestDaemon: Sendable {
   let config: String
   let socket: String
-  let root: URL
+  let root: FilePath
   let identity: NodeIdentity
   let task: Task<Void, any Error>
 
   var address: PeerAddress { PeerAddress(host: identity.endpoint.host, port: identity.endpoint.port) }
 
   static func start(configuration: NodeConfiguration, services: [ServiceInstaller]) async throws -> Self {
-    let root = URL(fileURLWithPath: "/tmp/indra-\(UUID().uuidString)")
-    let config = root.appendingPathComponent("config.json").path
-    let socket = root.appendingPathComponent("run/control.sock").path
-    try await configuration.save(path: config, overwrite: false)
-    let (events, ready) = AsyncThrowingStream<NodeStatus, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    let task = Task {
-      do {
-        try await runNode(configurationPath: config, socket: socket, services: services) {
-          ready.yield($0)
-          ready.finish()
+    let root = try await FileSystem.shared.createTemporaryDirectory(template: "/tmp/indra-XXXXXXXX")
+    let config = root.appending("config.json").string
+    let socket = root.appending("run/control.sock").string
+    do {
+      try await configuration.save(path: config, overwrite: false)
+      let (events, ready) = AsyncThrowingStream<NodeStatus, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+      let task = Task {
+        do {
+          try await runNode(configurationPath: config, socket: socket, services: services) {
+            ready.yield($0)
+            ready.finish()
+          }
+        } catch {
+          ready.finish(throwing: error)
+          throw error
         }
+      }
+      do {
+        var iterator = events.makeAsyncIterator()
+        let status = try #require(try await iterator.next())
+        return Self(config: config, socket: socket, root: root, identity: status.node, task: task)
       } catch {
-        ready.finish(throwing: error)
+        task.cancel()
+        _ = try? await task.value
         throw error
       }
-    }
-    do {
-      var iterator = events.makeAsyncIterator()
-      let status = try #require(try await iterator.next())
-      return Self(config: config, socket: socket, root: root, identity: status.node, task: task)
     } catch {
-      task.cancel()
-      _ = try? await task.value
-      try? FileManager.default.removeItem(at: root)
+      await withTaskCancellationShield {
+        _ = try? await FileSystem.shared.removeItem(at: root, strategy: .sequential, recursively: true)
+      }
       throw error
     }
   }
@@ -638,9 +654,13 @@ private struct TestDaemon: Sendable {
   }
 
   func stop() async throws {
+    defer {
+      await withTaskCancellationShield {
+        _ = try? await FileSystem.shared.removeItem(at: root, strategy: .sequential, recursively: true)
+      }
+    }
     task.cancel()
     do { try await task.value } catch is CancellationError {}
-    try? FileManager.default.removeItem(at: root)
   }
 }
 

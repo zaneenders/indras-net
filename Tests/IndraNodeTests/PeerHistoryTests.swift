@@ -3,15 +3,17 @@ import NIOCore
 import Networking
 import TCPActorSystem
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 
 @Suite(.timeLimit(.minutes(1)))
 struct PeerHistoryTests {
   @Test func historyKeepsRecentAddressesAndIsScopedToTheNodeAndCluster() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("peers.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("history/peers.json").string
     let owner = UUID()
     var history = try await PeerHistory.load(path: path, nodeID: owner, cluster: "test")
     #expect(history.peers.isEmpty)
@@ -40,14 +42,15 @@ struct PeerHistoryTests {
     #expect(restored.peers.first?.lastSeen == history.peers.first?.lastSeen)
     #expect(try await PeerHistory.load(path: path, nodeID: UUID(), cluster: "test").peers.isEmpty)
     #expect(try await PeerHistory.load(path: path, nodeID: owner, cluster: "other").peers.isEmpty)
-    let permissions = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int
-    #expect(permissions == 0o600)
+    let info = try await files.info(forFileAt: FilePath(path), infoAboutSymbolicLink: true)
+    #expect(info?.permissions == .ownerReadWrite)
   }
 
   @Test func restartFindsLearnedPeerWithoutOriginalSeedAndOutagesPreserveHistory() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("peers.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("peers.json").string
     try await withPeerHistoryRuntime(configuration: makeConfiguration(name: "seed", seeds: []), historyPath: nil) {
       seed in
       let seedIdentity = await seed.status().node
@@ -84,16 +87,17 @@ struct PeerHistoryTests {
 
   @Test(arguments: [false, true])
   func invalidOrUnavailableHistoryFallsBackToSeeds(corrupt: Bool) async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("peers.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("peers.json").string
     try await withPeerHistoryRuntime(configuration: makeConfiguration(name: "seed", seeds: []), historyPath: nil) {
       seed in
       let seedIdentity = await seed.status().node
       let configuration = makeConfiguration(name: "joining", seeds: [seedIdentity.address])
       if corrupt {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
-        try Data("invalid JSON".utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+        try await "invalid JSON".write(
+          toFileAt: FilePath(path), absoluteOffset: 0, options: .newFile(replaceExisting: false, permissions: nil))
       } else {
         let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
         let port = try #require(reservation.channel.localAddress?.port)
@@ -115,9 +119,10 @@ struct PeerHistoryTests {
   }
 
   @Test func obsoleteSeedsAreNotRetriedWhileConnectedThroughHistory() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("peers.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("peers.json").string
     let reservation = try await TCP.listen(host: "127.0.0.1", port: 0)
     let obsolete = PeerAddress(host: "127.0.0.1", port: try #require(reservation.channel.localAddress?.port))
     try await reservation.channel.close()

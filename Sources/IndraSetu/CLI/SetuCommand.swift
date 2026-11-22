@@ -24,13 +24,13 @@ package struct SetuCommand: AsyncParsableCommand {
 }
 
 private struct Control: ParsableArguments {
-  @Option(help: "Local daemon control socket.") var socket = NodePaths.socket
+  @Option(help: "Local daemon control socket.") var socket: String?
   @Flag(help: "Print JSON.") var json = false
 
   func request(_ command: FileCommand) async throws -> FileReply {
     try await NodeControl.command(
       SetuService.key.name, input: command, returning: FileReply.self,
-      socket: socket, timeout: NodeControl.commandTimeout)
+      socket: NodePaths.socket(override: socket), timeout: NodeControl.commandTimeout)
   }
 
   func display(_ reply: FileReply) throws {

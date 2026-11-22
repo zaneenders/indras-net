@@ -45,6 +45,8 @@ private struct Measure: AsyncParsableCommand {
   func run() async throws {
     let benchmark = Benchmark(options: options)
     let workloads = workload.map { [$0] } ?? Workload.allCases
+    let latencyFormat = FloatingPointFormatStyle<Double>.number
+      .locale(Locale(identifier: "en_US_POSIX")).grouping(.never).precision(.fractionLength(1))
     print(
       "entries=\(options.entries) partitions=\(options.partitions) scan_limit=\(options.scanLimit) "
         + "directory=\(options.directory) rounds=\(rounds)")
@@ -60,9 +62,8 @@ private struct Measure: AsyncParsableCommand {
       }
       latencies.sort()
       let median = (latencies[(rounds - 1) / 2] + latencies[rounds / 2]) / 2
-      let locale = Locale(identifier: "en_US_POSIX")
-      let medianText = String(format: "%.1f", locale: locale, median)
-      let minimumText = String(format: "%.1f", locale: locale, latencies[0])
+      let medianText = median.formatted(latencyFormat)
+      let minimumText = latencies[0].formatted(latencyFormat)
       print("\(workload.rawValue)\t\(operations)\t\(medianText)\t\(minimumText)")
     }
   }

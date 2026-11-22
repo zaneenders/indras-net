@@ -38,10 +38,11 @@ package struct RaftCommand: AsyncParsableCommand {
 }
 
 private struct Control: ParsableArguments {
-  @Option(help: "Private daemon control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
+  @Option(help: "Private daemon control socket (or INDRA_SOCKET).") var socket: String?
   @Option(help: "Name or UUID of the Indra node hosting Raft.") var peer: String?
 
   func request(_ request: RaftRequest) async throws -> RaftReply {
+    let socket = try await NodePaths.socket(override: socket)
     if case .status = request, peer == nil {
       return try await NodeControl.command(
         RaftService.key.name, input: request, returning: RaftReply.self, socket: socket,

@@ -124,7 +124,8 @@ private struct FileIndexStress: Sendable {
       let finalSize = try await pagesSize(in: path)
       print("pages_file_bytes_before=\(seededSize) pages_file_bytes_after=\(finalSize)")
       let seconds = elapsed / .seconds(1)
-      let elapsedText = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), seconds)
+      let elapsedText = seconds.formatted(
+        .number.locale(Locale(identifier: "en_US_POSIX")).grouping(.never).precision(.fractionLength(3)))
       let rate = StressMetrics.format(Double(rounds * 20) / seconds)
       print("elapsed_s=\(elapsedText) operations_per_s=\(rate)")
       metrics.report()
@@ -310,6 +311,7 @@ private struct StressMetrics: Sendable {
   }
 
   static func format(_ value: Double) -> String {
-    String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+    value.formatted(
+      .number.locale(Locale(identifier: "en_US_POSIX")).grouping(.never).precision(.fractionLength(1)))
   }
 }

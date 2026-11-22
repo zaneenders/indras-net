@@ -20,13 +20,13 @@ struct Indra: AsyncParsableCommand {
 }
 
 struct LocalOptions: ParsableArguments {
-  @Option(help: "Private daemon control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
+  @Option(help: "Private daemon control socket (or INDRA_SOCKET).") var socket: String?
   @Flag(help: "Print JSON.") var json = false
 }
 
 struct Initialize: AsyncParsableCommand {
   static let configuration = CommandConfiguration(commandName: "init", abstract: "Create a node configuration.")
-  @Option(help: "Configuration file.") var config = NodePaths.configuration
+  @Option(help: "Configuration file.") var config: String?
   @Option(help: "Node name.") var name = ProcessInfo.processInfo.hostName
   @Option(help: "Cluster name.") var cluster = "indra"
   @Option(help: "Address to bind.") var listenHost = "127.0.0.1"
@@ -39,6 +39,7 @@ struct Initialize: AsyncParsableCommand {
       version: 1, id: UUID(), name: name, cluster: cluster, listenHost: listenHost, advertisedHost: advertisedHost,
       port: port, seeds: try seed.map { try PeerAddress($0) }, probeIntervalMilliseconds: 3000,
       requestTimeoutMilliseconds: 2000)
+    let config = try await NodePaths.configuration(override: config)
     try await configuration.save(path: config, overwrite: false)
     print("Created \(config)")
   }
@@ -47,12 +48,14 @@ struct Initialize: AsyncParsableCommand {
 struct Daemon: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Run the node in the foreground for launchd/systemd.")
-  @Option(help: "Configuration file.") var config = NodePaths.configuration
-  @Option(help: "Private control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
+  @Option(help: "Configuration file.") var config: String?
+  @Option(help: "Private control socket (or INDRA_SOCKET).") var socket: String?
   @OptionGroup var setu: SetuOptions
   @OptionGroup var raft: RaftOptions
 
   func run() async throws {
+    let config = try await NodePaths.configuration(override: config)
+    let socket = try await NodePaths.socket(override: socket)
     let setuServices = try setu.installer().map { [$0] } ?? []
     let services: [ServiceInstaller] = [HealthService.install, try raft.installer()] + setuServices
     let signals = await UnixSignalsSequence(trapping: [.sigint, .sigterm])
@@ -81,7 +84,8 @@ struct Status: AsyncParsableCommand {
 
   func run() async throws {
     guard
-      case .status(let status) = try await NodeControl.request(.status, socket: options.socket, timeout: .seconds(65))
+      case .status(let status) = try await NodeControl.request(
+        .status, socket: NodePaths.socket(override: options.socket), timeout: .seconds(65))
     else {
       throw IndraError("Unexpected daemon response")
     }
@@ -96,7 +100,8 @@ struct Nodes: AsyncParsableCommand {
 
   func run() async throws {
     guard
-      case .status(let status) = try await NodeControl.request(.status, socket: options.socket, timeout: .seconds(65))
+      case .status(let status) = try await NodeControl.request(
+        .status, socket: NodePaths.socket(override: options.socket), timeout: .seconds(65))
     else {
       throw IndraError("Unexpected daemon response")
     }
@@ -121,16 +126,17 @@ struct Monitor: AsyncParsableCommand {
   @OptionGroup var options: LocalOptions
 
   func run() async throws {
+    let socket = try await NodePaths.socket(override: options.socket)
     if options.json {
       guard
         case .monitor(let snapshot) = try await NodeControl.request(
-          .monitor, socket: options.socket, timeout: .seconds(65))
+          .monitor, socket: socket, timeout: .seconds(65))
       else {
         throw IndraError("Unexpected daemon response")
       }
       try printJSON(snapshot)
     } else {
-      try await runMonitor(socket: options.socket)
+      try await runMonitor(socket: socket)
     }
   }
 }
@@ -142,7 +148,7 @@ struct Services: AsyncParsableCommand {
   func run() async throws {
     guard
       case .services(let services) = try await NodeControl.request(
-        .services, socket: options.socket, timeout: .seconds(65))
+        .services, socket: NodePaths.socket(override: options.socket), timeout: .seconds(65))
     else {
       throw IndraError("Unexpected daemon response")
     }
@@ -168,7 +174,8 @@ struct Health: AsyncParsableCommand {
 
   func run() async throws {
     let reports = try await NodeControl.query(
-      HealthService.key.name, returning: HealthMetrics.self, socket: options.socket, timeout: .seconds(65))
+      HealthService.key.name, returning: HealthMetrics.self, socket: NodePaths.socket(override: options.socket),
+      timeout: .seconds(65))
     if options.json {
       try printJSON(reports)
       return
@@ -201,7 +208,8 @@ struct Ping: AsyncParsableCommand {
 
   func run() async throws {
     try printPong(
-      try await NodeControl.request(.ping(target), socket: options.socket, timeout: .seconds(65)), json: options.json)
+      try await NodeControl.request(
+        .ping(target), socket: NodePaths.socket(override: options.socket), timeout: .seconds(65)), json: options.json)
   }
 }
 
@@ -212,7 +220,8 @@ struct Join: AsyncParsableCommand {
 
   func run() async throws {
     try printPong(
-      try await NodeControl.request(.join(PeerAddress(address)), socket: options.socket, timeout: .seconds(65)),
+      try await NodeControl.request(
+        .join(PeerAddress(address)), socket: NodePaths.socket(override: options.socket), timeout: .seconds(65)),
       json: options.json)
   }
 }
@@ -223,7 +232,8 @@ struct Reload: AsyncParsableCommand {
 
   func run() async throws {
     guard
-      case .status(let status) = try await NodeControl.request(.reload, socket: options.socket, timeout: .seconds(65))
+      case .status(let status) = try await NodeControl.request(
+        .reload, socket: NodePaths.socket(override: options.socket), timeout: .seconds(65))
     else {
       throw IndraError("Unexpected daemon response")
     }

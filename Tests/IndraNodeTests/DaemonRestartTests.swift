@@ -4,6 +4,7 @@ import Networking
 import Subprocess
 import TCPActorSystem
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 
@@ -22,13 +23,15 @@ final class DaemonRestartTests {
     #else
     let products = URL(filePath: CommandLine.arguments[0]).deletingLastPathComponent()
     #endif
-    let executable = products.appending(path: "indra", directoryHint: .notDirectory)
+    let executable = FilePath(products.path).appending("indra")
+    let files = FileSystem.shared
+    let executableInfo = try await files.info(forFileAt: executable, infoAboutSymbolicLink: false)
     try #require(
-      FileManager.default.isExecutableFile(atPath: executable.path), "Missing built CLI at \(executable.path)")
+      executableInfo?.type == .regular
+        && executableInfo?.permissions.isDisjoint(with: [.ownerExecute, .groupExecute, .otherExecute]) == false,
+      "Missing built CLI at \(executable)")
 
-    let root = URL(filePath: "/tmp/indra-restart-\(UUID().uuidString)", directoryHint: .isDirectory)
-    try FileManager.default.createDirectory(
-      at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    let root = try await files.createTemporaryDirectory(template: "/tmp/indra-restart-XXXXXXXX")
     do {
       var configuration = makeConfiguration(name: "alpha", seeds: [])
       configuration.cluster = UUID().uuidString
@@ -48,8 +51,8 @@ final class DaemonRestartTests {
         }
         defer { nextListener?.channel.close(promise: nil) }
 
-        let staleSocket = try FileManager.default.attributesOfItem(atPath: beta.socket)
-        try #require(staleSocket[.type] as? FileAttributeType == .typeSocket)
+        let staleSocket = try await files.info(forFileAt: FilePath(beta.socket), infoAboutSymbolicLink: true)
+        try #require(staleSocket?.type == .socket)
         _ = try await alpha.waitFor(
           "Beta's services to disappear", arguments: ["services"], as: [DiscoveredService].self
         ) { services in
@@ -70,23 +73,23 @@ final class DaemonRestartTests {
         }
       }
     } catch {
-      throw IndraError("\(error)\nDaemon logs retained at \(root.path)")
+      throw IndraError("\(error)\nDaemon logs retained at \(root)")
     }
-    try FileManager.default.removeItem(at: root)
+    _ = try await files.removeItem(at: root, strategy: .sequential, recursively: true)
   }
 }
 
 private struct DaemonProcess: Sendable {
-  let executable: URL
-  let directory: URL
+  let executable: FilePath
+  let directory: FilePath
   let id: UUID
 
-  var config: String { directory.appending(path: "config.json", directoryHint: .notDirectory).path }
-  var socket: String { directory.appending(path: "control.sock", directoryHint: .notDirectory).path }
+  var config: String { directory.appending("config.json").string }
+  var socket: String { directory.appending("control.sock").string }
 
-  init(executable: URL, root: URL, configuration: NodeConfiguration) async throws {
+  init(executable: FilePath, root: FilePath, configuration: NodeConfiguration) async throws {
     self.executable = executable
-    self.directory = root.appending(path: configuration.name, directoryHint: .isDirectory)
+    self.directory = root.appending(configuration.name)
     self.id = configuration.id
     try await configuration.save(path: config, overwrite: false)
   }
@@ -94,18 +97,21 @@ private struct DaemonProcess: Sendable {
   func run<Value: Sendable>(
     logName: String, stopWith signal: Signal, _ body: @Sendable (NodeIdentity) async throws -> Value
   ) async throws -> Value {
-    let logURL = directory.appending(path: logName, directoryHint: .notDirectory)
-    let log = try FileDescriptor.open(
-      FilePath(logURL.path), .writeOnly, options: [.create, .exclusiveCreate, .closeOnExec],
-      permissions: .ownerReadWrite, retryOnInterrupt: true)
+    let logPath = directory.appending(logName)
+    let handle = try await FileSystem.shared.openFile(
+      forWritingAt: logPath,
+      options: .init(
+        existingFile: .none, newFile: .init(permissions: .ownerReadWrite, transactionalCreation: false),
+        followSymbolicLinks: false, closeOnExec: true))
+    let log = try handle.detachUnsafeFileDescriptor()
     defer { try? log.close() }
 
     var options = PlatformOptions()
     options.teardownSequence = [.gracefulShutDown(toProcessGroup: false, allowedDurationToNextStep: .seconds(2))]
     let result = try await Subprocess.run(
-      .path(.init(executable.path)), arguments: ["daemon", "--config", config, "--socket", socket],
+      .path(.init(executable.string)), arguments: ["daemon", "--config", config, "--socket", socket],
       environment: .inherit, workingDirectory: nil, platformOptions: options, input: .none,
-      output: .fileDescriptor(log, closeAfterSpawningProcess: false),
+      output: .fileDescriptor(.init(rawValue: log.rawValue), closeAfterSpawningProcess: false),
       error: .combinedWithOutput
     ) { process in
       let status = try await waitFor("daemon readiness", arguments: ["status"], as: NodeStatus.self) {
@@ -118,7 +124,7 @@ private struct DaemonProcess: Sendable {
       return value
     }
     let expected: TerminationStatus = signal == .kill ? .signaled(signal.rawValue) : .exited(0)
-    try #require(result.terminationStatus == expected, "See \(logURL.path)")
+    try #require(result.terminationStatus == expected, "See \(logPath)")
     return result.closureResult
   }
 
@@ -170,7 +176,7 @@ private struct DaemonProcess: Sendable {
       deadline: .now.advanced(by: timeout), timeoutError: IndraError("indra \(command) timed out")
     ) {
       let result = try await Subprocess.run(
-        .path(.init(executable.path)), arguments: Arguments(arguments + ["--socket", socket, "--json"]),
+        .path(.init(executable.string)), arguments: Arguments(arguments + ["--socket", socket, "--json"]),
         environment: .inherit, workingDirectory: nil, platformOptions: PlatformOptions(), input: .none,
         output: .data(limit: 65_536), error: .string(limit: 16_384))
       guard result.terminationStatus.isSuccess else {

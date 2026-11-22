@@ -129,7 +129,11 @@ let package = Package(
     ),
     .target(
       name: "IndraHealth",
-      dependencies: ["IndraNode", "TCPActorSystem"],
+      dependencies: [
+        "IndraNode", "TCPActorSystem",
+        .product(name: "SystemPackage", package: "swift-system"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
+      ],
       swiftSettings: sharedSwiftSettings
     ),
     .target(
@@ -161,7 +165,8 @@ let package = Package(
         "IndraNode", "IndraHealth", "IndraSetu", "TCPActorSystem", "Networking",
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "Subprocess", package: "swift-subprocess"),
-        .product(name: "SystemPackage", package: "swift-system")
+        .product(name: "SystemPackage", package: "swift-system"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
       ],
       swiftSettings: sharedSwiftSettings
     ),

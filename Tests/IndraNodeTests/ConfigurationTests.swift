@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import _NIOFileSystem
 
 @testable import IndraNode
 
@@ -13,9 +14,10 @@ struct ConfigurationTests {
   }
 
   @Test func configurationRoundTripsWithoutOverwritingIdentity() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appendingPathComponent("config.json").path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("node/config.json").string
     let configuration = makeConfiguration(name: "first", seeds: [])
     try await configuration.save(path: path, overwrite: false)
     #expect(try await NodeConfiguration.load(path: path) == configuration)
@@ -32,25 +34,26 @@ struct ConfigurationTests {
   }
 
   @Test func stagingUsesTheFilesystemResolvedConfigurationParent() async throws {
-    let manager = FileManager.default
-    let root = manager.temporaryDirectory.appending(path: UUID().uuidString)
-    let nested = root.appending(path: "actual/child")
-    try manager.createDirectory(at: nested, withIntermediateDirectories: true)
-    defer { try? manager.removeItem(at: root) }
-    try manager.createSymbolicLink(at: root.appending(path: "link"), withDestinationURL: nested)
-    let path = root.path + "/link/../config.json"
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let nested = root.appending("actual/child")
+    try await files.createDirectory(at: nested, withIntermediateDirectories: true, permissions: .ownerReadWriteExecute)
+    try await files.createSymbolicLink(at: root.appending("link"), withDestination: nested)
+    let path = root.appending("link/../config.json").string
     var configuration = makeConfiguration(name: "before", seeds: [])
     try await configuration.save(path: path, overwrite: false)
     configuration.name = "after"
     try await configuration.save(path: path, overwrite: true)
-    #expect(try await NodeConfiguration.load(path: root.path + "/actual/config.json") == configuration)
-    #expect(try manager.contentsOfDirectory(atPath: root.path).sorted() == ["actual", "link"])
+    #expect(try await NodeConfiguration.load(path: root.appending("actual/config.json").string) == configuration)
+    #expect(try await directoryNames(at: root).sorted() == ["actual", "link"])
   }
 
   @Test func concurrentExclusiveSavesPublishExactlyOneConfiguration() async throws {
-    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let path = root.appending(path: "config.json", directoryHint: .notDirectory).path
+    let files = FileSystem.shared
+    let root = try await files.createTemporaryDirectory(template: files.temporaryDirectory.appending("XXXXXXXX"))
+    defer { _ = try? await files.removeItem(at: root, strategy: .sequential, recursively: true) }
+    let path = root.appending("node/config.json").string
     let configurations = [makeConfiguration(name: "first", seeds: []), makeConfiguration(name: "second", seeds: [])]
     let saved = await withTaskGroup(of: NodeConfiguration?.self) { tasks in
       for configuration in configurations {

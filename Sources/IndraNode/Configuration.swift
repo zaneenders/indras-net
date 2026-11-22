@@ -1,4 +1,5 @@
 public import Foundation
+import _NIOFileSystem
 
 public struct IndraError: Error, Codable, Sendable, CustomStringConvertible {
   public let description: String
@@ -107,22 +108,24 @@ public struct NodeConfiguration: Codable, Sendable, Equatable {
 }
 
 public enum NodePaths: Sendable {
-  public static var configuration: String {
-    base(variable: "XDG_CONFIG_HOME", fallback: "/.config") + "/indra/config.json"
+  public static func configuration(override: String?) async throws -> String {
+    if let override { return override }
+    return try await base(variable: "XDG_CONFIG_HOME", fallback: "/.config") + "/indra/config.json"
   }
 
-  public static var socket: String {
+  public static func socket(override: String?) async throws -> String {
+    if let override { return override }
     let environment = ProcessInfo.processInfo.environment
     if let configured = environment["INDRA_SOCKET"], configured.hasPrefix("/") { return configured }
     if let runtime = environment["XDG_RUNTIME_DIR"], runtime.hasPrefix("/") {
       return runtime + "/indra/control.sock"
     }
-    return base(variable: "XDG_STATE_HOME", fallback: "/.local/state") + "/indra/run/control.sock"
+    return try await base(variable: "XDG_STATE_HOME", fallback: "/.local/state") + "/indra/run/control.sock"
   }
 
-  private static func base(variable: String, fallback: String) -> String {
+  private static func base(variable: String, fallback: String) async throws -> String {
     if let value = ProcessInfo.processInfo.environment[variable], value.hasPrefix("/") { return value }
-    return FileManager.default.homeDirectoryForCurrentUser.path + fallback
+    return try await FileSystem.shared.homeDirectory.string + fallback
   }
 }
 

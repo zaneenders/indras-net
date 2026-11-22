@@ -1,7 +1,8 @@
 package import Distributed
-import Foundation
 package import IndraNode
+import SystemPackage
 package import TCPActorSystem
+import _NIOFileSystem
 
 package struct HealthMetrics: Codable, Sendable {
   package let uptimeSeconds: Double
@@ -32,13 +33,21 @@ package distributed actor HealthService {
     self.started = started
   }
 
-  distributed func sample(cluster: String) throws -> HealthMetrics {
+  distributed func sample(cluster: String) async throws -> HealthMetrics {
     guard cluster == self.cluster else { throw IndraError("Peer uses a different cluster") }
-    let directory = URL(fileURLWithPath: configurationPath).deletingLastPathComponent()
-    guard
-      let capacity = (try? directory.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?.volumeAvailableCapacity,
-      let freeDiskBytes = UInt64(exactly: capacity)
-    else { throw IndraError("Could not read free space on the configuration filesystem") }
+    let directory = try await absolutePath(FilePath(configurationPath)).removingLastComponent()
+    let freeDiskBytes: UInt64
+    do {
+      freeDiskBytes = try await FileSystem.shared.withDirectoryHandle(
+        atPath: directory, options: .init(followSymbolicLinks: true, closeOnExec: true)
+      ) { handle in
+        try await handle.withUnsafeDescriptor { try StatFS($0, retryOnInterrupt: true).availableSpace }
+      }
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch {
+      throw IndraError("Could not read free space on the configuration filesystem")
+    }
     return HealthMetrics(uptimeSeconds: started.duration(to: .now) / .seconds(1), freeDiskBytes: freeDiskBytes)
   }
 }
