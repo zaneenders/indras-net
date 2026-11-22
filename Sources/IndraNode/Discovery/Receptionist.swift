@@ -73,6 +73,15 @@ public actor Receptionist {
   ) throws {
     guard queries[key.name] == nil else { throw IndraError("Duplicate service query name \(key.name)") }
     try register(actor, with: key)
+    try registerQuery(for: key, timeout: timeout, sample: sample)
+  }
+
+  package func registerQuery<Act, Value: Codable & Sendable>(
+    for key: ServiceKey<Act>, timeout: Duration,
+    sample: @escaping @Sendable (Act, String) async throws -> Value
+  ) throws {
+    guard !stopped else { throw IndraError("Receptionist is stopping") }
+    guard queries[key.name] == nil else { throw IndraError("Duplicate service query name \(key.name)") }
     queries[key.name] = { receptionist, status in
       let actors = try receptionist.lookup(key)
       let reports = try await collectReports(actors: actors, status: status, timeout: timeout, sample: sample)

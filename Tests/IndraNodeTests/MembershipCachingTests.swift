@@ -171,28 +171,43 @@ struct MembershipCachingTests {
   }
 
   @Test func firstPingAfterPeerRestartLearnsTheNewEndpoint() async throws {
-    try await withTestRuntime(
-      configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
-    ) { client in
-      let configuration = cacheConfiguration(name: "peer", port: 0)
-      try await withTestRuntime(configuration: configuration, configurationPath: "/unused", services: []) { original in
-        let identity = await original.status().node
-        #expect(try await client.ping("127.0.0.1:\(identity.endpoint.port)").node == identity)
-        await original.shutdown()
-        var updated = configuration
-        updated.port = identity.endpoint.port
-        try await withTestRuntime(configuration: updated, configurationPath: "/unused", services: []) { replacement in
-          let current = await replacement.status().node
-          #expect(current.id == identity.id)
-          #expect(current.endpoint != identity.endpoint)
-          let byName = try await client.ping(identity.name)
-          let byID = try await client.ping(identity.id.uuidString)
-          #expect(byName.node == current)
-          #expect(byID.node == current)
-          let members = await client.status().members
-          #expect(members.count == 1)
-          #expect(members.first?.node == current)
-          #expect(members.first?.state == .alive)
+    let listener = try await TCP.listen(host: "127.0.0.1", port: 0)
+    let port = try #require(listener.channel.localAddress?.port)
+    let original = NodeIdentity(
+      id: UUID(), name: "peer", endpoint: ActorEndpoint(host: "127.0.0.1", port: port, systemID: UUID()), build: nil)
+    let replacement = NodeIdentity(
+      id: original.id, name: original.name,
+      endpoint: ActorEndpoint(host: original.endpoint.host, port: port, systemID: UUID()), build: nil)
+    let (originalClosed, signalClose) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+
+    try await listener.executeThenClose { incoming in
+      try await withThrowingDiscardingTaskGroup { tasks in
+        tasks.addTask {
+          defer { signalClose.finish() }
+          var connections = incoming.makeAsyncIterator()
+          let first = try #require(try await connections.next())
+          try await replyToMembershipPings(
+            connection: first, peer: original, exchanges: 1, includeGossip: true, beforeReply: { _ in })
+          signalClose.yield(())
+          let second = try #require(try await connections.next())
+          try await replyToMembershipPings(
+            connection: second, peer: replacement, exchanges: 2, includeGossip: true, beforeReply: { _ in })
+        }
+        tasks.addTask {
+          try await withTestRuntime(
+            configuration: cacheConfiguration(name: "client", port: 0), configurationPath: "/unused", services: []
+          ) { client in
+            try #require(try await client.ping(original.address.description).node == original)
+            var closures = originalClosed.makeAsyncIterator()
+            _ = try #require(await closures.next())
+
+            #expect(try await client.ping(original.name).node == replacement)
+            #expect(try await client.ping(original.id.uuidString).node == replacement)
+            let members = await client.status().members
+            #expect(members.count == 1)
+            #expect(members.first?.node == replacement)
+            #expect(members.first?.state == .alive)
+          }
         }
       }
     }
@@ -478,35 +493,43 @@ private func serveMembership(
   try await listener.executeThenClose { connections in
     var connections = connections.makeAsyncIterator()
     let connection = try #require(try await connections.next())
-    try await connection.executeThenClose { input, output in
-      try await output.write(
-        WireMessage.hello(version: WireMessage.version, endpoint: peer.endpoint, capabilities: nil).frame())
-      let address = ActorAddress(endpoint: peer.endpoint, id: MembershipService.fixedID)
-      var completed = 0
-      for try await frame in input {
-        switch try WireMessage(frame: frame) {
-        case .hello: break
-        case .call(let invocation):
-          try #require(invocation.actorID == address)
-          #expect(invocation.actorType == String(reflecting: MembershipService.self))
-          let request = try JSONDecoder().decode(MembershipRequest.self, from: #require(invocation.arguments.first))
-          try await beforeReply(completed)
-          let response = MembershipReply(
-            version: 1, cluster: "cache-tests", node: peer,
-            response: .ack(
-              target: peer, incarnation: 0,
-              payload: includeGossip ? [GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)] : [],
-              sequenceNumber: request.probe.sequenceNumber))
-          try await output.write(
-            WireMessage.reply(invocation.requestID, .value(try JSONEncoder().encode(response))).frame())
-          completed += 1
-          if completed == exchanges { return }
-        case .reply:
-          throw IndraError("Unexpected reply from membership client")
-        }
+    try await replyToMembershipPings(
+      connection: connection, peer: peer, exchanges: exchanges, includeGossip: includeGossip, beforeReply: beforeReply)
+  }
+}
+
+private func replyToMembershipPings(
+  connection: Connection, peer: NodeIdentity, exchanges: Int, includeGossip: Bool,
+  beforeReply: @Sendable (Int) async throws -> Void
+) async throws {
+  try await connection.executeThenClose { input, output in
+    try await output.write(
+      WireMessage.hello(version: WireMessage.version, endpoint: peer.endpoint, capabilities: nil).frame())
+    let address = ActorAddress(endpoint: peer.endpoint, id: MembershipService.fixedID)
+    var completed = 0
+    for try await frame in input {
+      switch try WireMessage(frame: frame) {
+      case .hello: break
+      case .call(let invocation):
+        try #require(invocation.actorID == address)
+        #expect(invocation.actorType == String(reflecting: MembershipService.self))
+        let request = try JSONDecoder().decode(MembershipRequest.self, from: #require(invocation.arguments.first))
+        try await beforeReply(completed)
+        let response = MembershipReply(
+          version: 1, cluster: "cache-tests", node: peer,
+          response: .ack(
+            target: peer, incarnation: 0,
+            payload: includeGossip ? [GossipMember(node: peer, status: .alive(0), protocolPeriod: 0)] : [],
+            sequenceNumber: request.probe.sequenceNumber))
+        try await output.write(
+          WireMessage.reply(invocation.requestID, .value(try JSONEncoder().encode(response))).frame())
+        completed += 1
+        if completed == exchanges { return }
+      case .reply:
+        throw IndraError("Unexpected reply from membership client")
       }
-      throw IndraError("Membership client disconnected before completing exchanges")
     }
+    throw IndraError("Membership client disconnected before completing exchanges")
   }
 }
 

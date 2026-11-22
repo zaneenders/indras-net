@@ -1,5 +1,7 @@
 public import TCPActorSystem
 
+package import struct Foundation.UUID
+
 public typealias ServiceInstaller = @Sendable (ServiceContext) async throws -> Void
 
 public struct ServiceContext: Sendable {
@@ -8,6 +10,7 @@ public struct ServiceContext: Sendable {
   public let cluster: String
   public let configurationPath: String
   public let started: ContinuousClock.Instant
+  package let nodeID: UUID
   let runtime: NodeRuntime
 
   public func onShutdown(_ action: @escaping @Sendable () async -> Void) async throws {

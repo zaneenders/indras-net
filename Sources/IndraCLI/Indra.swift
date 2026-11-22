@@ -3,6 +3,7 @@ import Foundation
 import IndraHealth
 import IndraMonitor
 import IndraNode
+import IndraRaft
 import IndraSetu
 import TCPActorSystem
 import UnixSignals
@@ -14,7 +15,7 @@ struct Indra: AsyncParsableCommand {
     version: BuildIdentity.current.summary,
     subcommands: [
       Initialize.self, Daemon.self, Status.self, Nodes.self, Monitor.self, Services.self, Health.self, Ping.self,
-      Join.self, Reload.self, SetuCommand.self
+      Join.self, Reload.self, SetuCommand.self, RaftCommand.self
     ])
 }
 
@@ -49,9 +50,11 @@ struct Daemon: AsyncParsableCommand {
   @Option(help: "Configuration file.") var config = NodePaths.configuration
   @Option(help: "Private control socket (or INDRA_SOCKET).") var socket = NodePaths.socket
   @OptionGroup var setu: SetuOptions
+  @OptionGroup var raft: RaftOptions
 
   func run() async throws {
-    let services: [ServiceInstaller] = [HealthService.install] + (try setu.installer().map { [$0] } ?? [])
+    let setuServices = try setu.installer().map { [$0] } ?? []
+    let services: [ServiceInstaller] = [HealthService.install, try raft.installer()] + setuServices
     let signals = await UnixSignalsSequence(trapping: [.sigint, .sigterm])
     do {
       try await withThrowingTaskGroup(of: Void.self) { tasks in

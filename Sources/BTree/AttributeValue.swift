@@ -7,6 +7,7 @@ package enum AttributeValue: DiskBTreeValue, Equatable {
 
   case string(String)
   case bool(Bool)
+  case null
   case int64(Int64)
   case uint64(UInt64)
   case float32(Float)
@@ -19,6 +20,7 @@ package enum AttributeValue: DiskBTreeValue, Equatable {
   private enum CodingKeys: String, CodingKey {
     case string = "s"
     case bool = "b"
+    case null = "n"
     case int64 = "i"
     case uint64 = "u"
     case float32 = "f"

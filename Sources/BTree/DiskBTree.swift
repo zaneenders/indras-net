@@ -17,6 +17,12 @@ package struct DiskBTree<Partition: DiskBTreeKey, SortKey: DiskBTreeKey, Value: 
   private let path: FilePath
   private let schema: DiskTreeSchema
 
+  package static func validateRecord(
+    _ value: Value, for partition: Partition, sortKey: SortKey
+  ) throws(DiskBTreeError) {
+    _ = try DiskPage<Partition, SortKey>.record(for: .init(partition: partition, sortKey: sortKey), value: value)
+  }
+
   package static func create(in directory: FilePath) async throws(DiskBTreeError) -> Self {
     let schema = Self.persistedSchema
     try await DiskPager.create(at: directory, schema: schema)

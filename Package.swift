@@ -90,9 +90,40 @@ let package = Package(
     .executableTarget(
       name: "IndraCLI",
       dependencies: [
-        "IndraNode", "IndraHealth", "IndraMonitor", "IndraSetu", "TCPActorSystem",
+        "IndraNode", "IndraHealth", "IndraMonitor", "IndraRaft", "IndraSetu", "TCPActorSystem",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "UnixSignals", package: "swift-service-lifecycle")
+      ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .target(
+      name: "RaftCore",
+      dependencies: [.product(name: "OrderedCollections", package: "swift-collections")],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .testTarget(
+      name: "RaftCoreTests",
+      dependencies: ["RaftCore", .product(name: "OrderedCollections", package: "swift-collections")],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .target(
+      name: "IndraRaft",
+      dependencies: [
+        "BTree", "IndraNode", "RaftCore", "TCPActorSystem",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "OrderedCollections", package: "swift-collections"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
+      ],
+      swiftSettings: sharedSwiftSettings
+    ),
+    .testTarget(
+      name: "IndraRaftTests",
+      dependencies: [
+        "BTree", "IndraNode", "IndraRaft", "RaftCore", "TCPActorSystem",
+        .product(name: "OrderedCollections", package: "swift-collections"),
+        .product(name: "_NIOFileSystem", package: "swift-nio")
       ],
       swiftSettings: sharedSwiftSettings
     ),
@@ -113,12 +144,14 @@ let package = Package(
     ),
     .target(
       name: "IndraMonitor",
-      dependencies: ["IndraNode", "TCPActorSystem", .product(name: "Slate", package: "slate")],
+      dependencies: ["BTree", "IndraNode", "IndraRaft", "TCPActorSystem", .product(name: "Slate", package: "slate")],
       swiftSettings: sharedSwiftSettings
     ),
     .testTarget(
       name: "IndraMonitorTests",
-      dependencies: ["IndraMonitor", "IndraNode", "TCPActorSystem", .product(name: "Slate", package: "slate")],
+      dependencies: [
+        "IndraMonitor", "IndraNode", "IndraRaft", "TCPActorSystem", .product(name: "Slate", package: "slate")
+      ],
       swiftSettings: sharedSwiftSettings
     ),
     .plugin(name: "GitBuildPlugin", capability: .buildTool()),

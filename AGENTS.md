@@ -1,6 +1,7 @@
 # Repository rules
 
 - Until the `0.1.0` release, breaking changes are encouraged and backward compatibility is optional.
+- Write all scripts in Swift and use the `.swift` file extension.
 - No default arguments in repository code, including tests. Keep every argument
   explicit at call sites; do not hide defaults behind overloads or wrappers.
 - Prefer modern Swift APIs and language features over legacy `NS`-prefixed APIs

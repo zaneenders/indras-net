@@ -81,7 +81,7 @@ public actor NodeRuntime {
     let context = ServiceContext(
       actorSystem: system, receptionist: receptionist, cluster: configuration.cluster,
       configurationPath: configurationPath, started: telemetry.started,
-      runtime: self)
+      nodeID: configuration.id, runtime: self)
     for install in services {
       try Task.checkCancellation()
       try await install(context)

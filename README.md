@@ -19,6 +19,10 @@ swift run -c release swipr-sample-conv --format perf-script --demangle true --ou
 swift run indra init --name alpha --listen-host 0.0.0.0 --advertised-host 192.168.1.10
 # Run the foreground daemon.
 swift run indra daemon
+# Install a staged macOS LaunchDaemon plist and archive any existing Indra LaunchAgent.
+./Scripts/install-launch-daemon.swift ~/.local/state/indra/launchd/com.indras-net.indra.plist
+# Inspect the system-domain Indra service.
+launchctl print system/com.indras-net.indra
 # On another machine, create a unique node with a seed address.
 swift run indra init --name beta --listen-host 0.0.0.0 --advertised-host 192.168.1.11 --seed 192.168.1.10:7331
 # Run that machine's daemon in another terminal or under launchd/systemd.
@@ -33,6 +37,27 @@ swift run indra --version
 swift run indra services
 # Check daemon uptime and config filesystem free space. Add --json for raw values.
 swift run indra health
+# Create a private store directory.
+mkdir -m 700 /absolute/raft
+# Bootstrap a Raft group and run indra status to get its node UUID.
+swift run indra daemon --raft-directory /absolute/raft
+# Commit a value through Raft.
+swift run indra raft put example value
+# Commit a JSON object as a dictionary.
+swift run indra raft put profile '{"name":"Zane","active":true}' --json
+# Read the applied value.
+swift run indra raft get example
+# Inspect the term, commit index, and applied index.
+swift run indra raft status
+# Remove a key and reuse the request ID if you retry.
+swift run indra raft delete example --request-id 88F94111-19FB-4EC8-B69C-B9A1B21C186A
+# Discover and join the existing Raft group on each eligible peer.
+mkdir -m 700 /absolute/raft
+swift run indra daemon --raft-directory /absolute/raft --raft-join auto
+# Submit a write to the current leader from any daemon.
+swift run indra raft put example value
+# Click Raft or press Shift+L to compare replicas in the monitor.
+swift run indra monitor
 # Enable file transfers on the node's existing TCP port.
 swift run indra daemon --setu-directory /absolute/shared
 # Send a file and print its verified receipt.
@@ -63,6 +88,7 @@ swift run indra daemon --config /absolute/path/config.json --socket /absolute/pr
 swift run indra nodes --socket /absolute/private/run/control.sock
 # Build static Linux x86-64 with Swift 6.4.2 and its matching Static Linux SDK.
 swift build -c release --product indra --swift-sdk swift-6.4.2-RELEASE_static-linux-0.1.0 --triple x86_64-swift-linux-musl --static-swift-stdlib
-# Cross-compile for the Pi using the installed Cortex SDK.
-swift build -c release --product indra --swift-sdk swift-6.4.2-RELEASE_static-linux-0.1.0_cortex-a53 --triple aarch64-swift-linux-musl --static-swift-stdlib
+# Cross-compile for the Pi 4 using the installed Cortex SDK.
+swift build -c release --product indra --swift-sdk swift-6.4.2-RELEASE_static-linux-0.1.0_cortex-a53 --triple aarch64-swift-linux-musl --static-swift-stdlib \
+  -Xcc -march=armv8-a+nocrypto -Xcxx -march=armv8-a+nocrypto
 ```
